@@ -254,13 +254,24 @@ The official vendor GitHub Actions this pipeline uses
 see Implementation substrate above) call the real APIs, which is a different
 cost surface than the $0 GitHub Actions minutes above. Verified 2026-08-22:
 
+**These two are not the same kind of "free," and that distinction matters
+enough to state plainly:** Claude's headless usage draws on a subscription
+you're already paying for regardless of this pipeline. Gemini's does not —
+there is no Gemini subscription being reused (the auth path that would have
+done that, Gemini Code Assist, is the one confirmed discontinued for
+headless CLI use). Gemini is free only because, and only for as long as,
+Google's AI Studio API free tier says so — a fundamentally more fragile
+basis than a subscription you control.
+
 **Claude (nodes 1 & 4, PR Review in particular since that's the one running
 headless in Actions):** `claude-code-action` supports a
 **`CLAUDE_CODE_OAUTH_TOKEN`** (generated locally via `claude setup-token`) —
 usage draws from an existing Pro/Max **subscription**, not pay-as-you-go API
 billing. Use this, not `ANTHROPIC_API_KEY`, in the workflow config, or every
 headless Claude call bills per-token on top of the subscription you're
-already paying for.
+already paying for. If subscription limits are hit, Claude just rate-limits
+until the window resets — flat-fee subscriptions don't overage-bill, so
+there's no cost-risk mirror of the Gemini guardrails below.
 
 **Gemini (nodes 2 & 3, Three Amigos and Dev & Test):** the model choice
 directly determines the bill. Google AI Studio's free tier covers **Flash
@@ -292,6 +303,43 @@ this in production:
   existing iteration caps and human-escalation design already limit worst-
   case usage if quotas tighten further, but the model/effort choice above
   should be revisited if AI Studio changes free-tier Flash terms again.
+
+### Keeping Gemini calls free — two guardrail layers
+
+Two different guarantees, not one — decided 2026-08-22:
+
+**Layer 1 — structural, not a workflow check at all: keep billing disabled
+on the GCP project behind `GEMINI_API_KEY`.** A project with no billing
+enabled cannot be charged; there's no payment method attached to charge.
+Exceeding the free tier's caps on that project just returns `429` errors,
+never a bill. This is the actual hard guarantee — platform-enforced, not
+dependent on any workflow logic being correct — and it's the same shape of
+control as GitHub's `$0` Actions spending limit relied on elsewhere in this
+doc. This alone makes extra Gemini API cost structurally impossible,
+regardless of bugs in anything below.
+
+**Layer 2 — operational, a repo Variable as policy + workflow logic as
+enforcement: protects availability, not cost.** A GitHub repo/environment
+**Variable** (`vars.*`, plain config — not a secret) holding a conservative
+self-imposed budget, e.g. `GEMINI_DAILY_BUDGET`, set below the documented
+1,500 RPD cap for headroom. The variable alone does nothing; something has
+to read it and act:
+- **Preferred, unconfirmed:** the Gemini API returns rate-limit response
+  headers (`x-ratelimit-remaining-requests`) that could be checked in real
+  time. Whether `gemini` CLI / `run-gemini-cli` actually surfaces these
+  headers to a workflow step (as opposed to Google's raw REST API, which
+  this design deliberately isn't calling directly) is **untested — verify
+  before relying on it.**
+- **Fallback if headers aren't reachable through the CLI:** a self-tracked
+  request counter (incremented on every Gemini call, persisted via a
+  GitHub Actions cache entry or equivalent) compared against
+  `GEMINI_DAILY_BUDGET`. Once near the ceiling, skip the call and escalate
+  to the human — same pattern as the iteration-cap escalation elsewhere —
+  rather than risking a mid-run `429`.
+
+Layer 1 is what actually prevents cost. Layer 2 is what keeps the pipeline
+from breaking mid-run when the free tier's real limits get close — worth
+building, but don't mistake it for the cost guarantee; that's Layer 1.
 
 ## Provider quota considerations
 
