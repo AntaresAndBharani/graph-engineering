@@ -143,35 +143,59 @@ becomes a bottleneck — the fix would be a narrow headless "answer these
 specific questions" mode for Architect, distinct from full Requirement
 Refinement.
 
-### Vendor action choice: official actions, not custom-built ones
+### Vendor action & CLI choice for Gemini nodes (final)
 
-Considered building a custom GitHub Action for the Gemini nodes instead of
-using Google's official one. Verified 2026-08-22 before deciding:
+**Decision: `google-github-actions/run-gemini-cli`, wrapping the `gemini`
+CLI, authenticated with a `GEMINI_API_KEY` from Google AI Studio.** Not a
+custom-built action, not Antigravity CLI. Reasoning, settled 2026-08-22:
 
-- **`google-github-actions/run-gemini-cli` is not locked to pre-built
-  triage/review templates** — it's a lightweight wrapper around the Gemini
-  CLI that accepts a fully custom `prompt` input, so the Three Amigos and
-  Dev & Test prompt templates in this repo can be used as-is. No need to
-  reinvent CLI install/auth handling that Google already maintains.
-- **The real gap is output reliability, not flexibility.** The action's
-  output is a `summary` field — described as "the *summarized* output," not
-  a guaranteed structured-JSON passthrough. This design depends on strict
-  JSON (`verdict`, `clarification_questions`, etc.) being parsed
-  programmatically downstream, so trusting `summary` risks silent parsing
-  failures.
-- **Decision:** use the official action for CLI install + auth, but don't
-  rely on `summary` for parsing. Have the prompt instruct Gemini to write
-  its JSON output to a file in the workspace, then read that file directly
-  in the next workflow step — bypasses the action's own summarization
-  entirely, keeps auth/install as someone else's maintenance burden.
-- **Gemini Code Assist auth is not viable — checked and ruled out**, not
-  just unverified: Gemini Code Assist support for the Gemini CLI and IDE
-  extensions (Individual, Google AI Pro, and Google AI Ultra tiers) was
-  **discontinued 2026-06-18**, with users redirected to Google's Antigravity
-  platform instead. Since this predates today, don't spend time on a
-  Code-Assist-auth path for `run-gemini-cli` — it's an AI-Studio-API-key (or
-  Vertex AI / WIF) decision only. See "Provider quota considerations" below
-  for what this means for actual usage limits.
+- **Not a custom action** — `run-gemini-cli` isn't locked to pre-built
+  triage/review templates; it accepts a fully custom `prompt` input, so the
+  Three Amigos and Dev & Test prompt templates in this repo work as-is with
+  no need to reinvent CLI install/auth handling.
+- **Its `summary` output isn't guaranteed structured JSON** ("the
+  *summarized* output," not a passthrough), and this design depends on
+  strict JSON (`verdict`, `clarification_questions`, etc.) parsed
+  downstream. Fix: have the prompt write JSON to a file in the workspace and
+  read that file directly in the next step, instead of trusting `summary`.
+- **Not Gemini Code Assist auth** — discontinued 2026-06-18 for
+  Individual/AI Pro/AI Ultra tiers, redirected to Antigravity. This is a
+  different product from the AI Studio API key path below and doesn't
+  affect it.
+- **Not Antigravity CLI** — considered, rejected: it currently has an open,
+  unresolved feature request for API-key headless authentication, meaning
+  it can't yet run non-interactively in a GitHub Actions runner at all. No
+  official GitHub Action wraps it either. Disqualifying for this use case
+  regardless of how strategically central Antigravity is to Google's
+  roadmap. Revisit only if Antigravity ships headless auth support and a
+  matching Action — not before.
+- **`gemini` CLI's headless auth is exactly what this needs, confirmed
+  against official docs, not assumed:** setting `GEMINI_API_KEY` as an env
+  var makes the CLI skip the browser OAuth flow entirely — no login prompt,
+  nothing that can block a runner. Pair with the CLI's headless/
+  `--non-interactive` mode. Simpler to bootstrap than Claude's OAuth token,
+  which needs a one-time interactive `claude setup-token` run locally first;
+  an AI Studio API key is generated directly in the console with no OAuth
+  consent step, and used as-is.
+
+**Operational notes for whoever implements this:**
+- One static `GEMINI_API_KEY` secret is shared by every workflow run —
+  concurrent runs (e.g. two issues progressing at once) all draw on the same
+  10 RPM free-tier cap, so the `concurrency:` group recommended above is a
+  correctness requirement here, not just tidiness.
+- Store it as a GitHub encrypted secret, scoped as narrowly as practical;
+  confirm the action doesn't echo it in verbose/debug log output on the
+  first real test run rather than assuming GitHub's log-masking covers it.
+- It doesn't expire the way an OAuth token does — no refresh burden, but
+  also no forced rotation; rotate it on a deliberate schedule anyway.
+- Unconfirmed, worth watching rather than acting on: GitHub-hosted runners
+  use shared, well-known IP ranges, and some API providers throttle
+  cloud/CI-originated traffic more aggressively. No evidence this hits
+  Gemini's free tier specifically — just something to notice if 429/403s
+  don't match the documented quota numbers.
+
+See "Provider quota considerations" below for the free-tier usage limits
+this auth path is subject to.
 
 ## Cost constraints — GitHub Actions free tier
 
