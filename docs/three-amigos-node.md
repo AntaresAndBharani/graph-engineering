@@ -3,9 +3,17 @@
 **Not implemented — definition only**, per the current-scope note in the
 top-level README. Documented so the full pipeline can be reviewed together.
 
-- **Model:** Gemini Pro (upgraded from Flash — a readiness gate is a critical
-  quality checkpoint, and a cheaper model tends to rubber-stamp well-formatted
-  but logically flawed issues, wasting a full Dev/Test cycle downstream).
+- **Model:** Gemini 3.7 Flash, **High thinking effort** (changed 2026-08-22
+  from Gemini 3.1 Pro — Pro was pulled from Google AI Studio's free tier in
+  April 2026 and is now paid-only; see the top-level README's "Claude &
+  Gemini auth / free-tier status" for the full trade-off). A readiness gate
+  is still a critical quality checkpoint, so plain/default-effort Flash was
+  rejected for the same reason as before — it tends to rubber-stamp
+  well-formatted but logically flawed issues. High effort is meant to close
+  most of that gap while staying in the free-tier-eligible Flash family;
+  this hasn't been validated against real issues yet, and the 3-round
+  iteration cap + human escalation exist partly as a backstop if it
+  rubber-stamps something Pro would have caught.
 - **Trigger:** an issue from the Architect with `requirement_status: DEFINED`.
 - **Output:** a readiness verdict, or a request back to the Architect.
 

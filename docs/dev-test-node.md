@@ -3,7 +3,9 @@
 **Not implemented — definition only**, per the current-scope note in the
 top-level README. Documented so the full pipeline can be reviewed together.
 
-- **Model:** Gemini Pro.
+- **Model:** Gemini 3.7 Flash, High thinking effort (changed 2026-08-22 from
+  Gemini 3.1 Pro to stay on Google AI Studio's free tier — see the top-level
+  README's "Claude & Gemini auth / free-tier status").
 - **Trigger:** an issue with Three Amigos verdict `READY`, **or** a PR with
   PR-Review verdict `CHANGES_REQUESTED` (this node handles both first
   implementation and fix-up passes — same actor, same responsibility).

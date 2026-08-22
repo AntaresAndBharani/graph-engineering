@@ -3,7 +3,10 @@
 **Not implemented — definition only**, per the current-scope note in the
 top-level README. Documented so the full pipeline can be reviewed together.
 
-- **Model:** Claude Opus.
+- **Model:** Claude Opus, via `anthropics/claude-code-action` authenticated
+  with `CLAUDE_CODE_OAUTH_TOKEN` (subscription-based billing, not
+  `ANTHROPIC_API_KEY`) — see the top-level README's "Claude & Gemini auth /
+  free-tier status".
 - **Trigger:** a PR opened or updated by the Dev & Test node.
 - **Output:** an `APPROVED` or `CHANGES_REQUESTED` verdict, posted as a real
   GitHub PR review — not an internal message.

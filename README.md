@@ -13,8 +13,8 @@ pipeline, modeled as a directed state graph. Source discussion:
 | # | Node | Role | Model tier |
 |---|------|------|------------|
 | 1 | Architect (**Definition**) | Refine the requirement with the human, then decompose into SMART GitHub sub-issues | Claude Opus |
-| 2 | Three Amigos | Product/Dev/QA readiness gate before coding starts; asks Architect targeted clarification questions when blocked | Gemini (Pro) |
-| 3 | Dev & Test | Implement the issue, run local tests, open the PR | Gemini (Pro) |
+| 2 | Three Amigos | Product/Dev/QA readiness gate before coding starts; asks Architect targeted clarification questions when blocked | Gemini 3.7 Flash (High) |
+| 3 | Dev & Test | Implement the issue, run local tests, open the PR | Gemini 3.7 Flash (High) |
 | 4 | PR Review | Review diff vs. acceptance criteria; exchanges PR comments with Dev until Claude judges it merge-ready | Claude Opus |
 | 5 | Merge & Backlog | `gh pr merge` + `gh issue create` for follow-ups | Deterministic ($0) |
 
@@ -22,6 +22,11 @@ Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
 points, and the two places a human or another agent needs a decision *from*
 Claude). **Gemini handles development and testing** (nodes 2 & 3, high-iteration
 work). Node 5 is plain `gh` CLI, no model involved.
+
+Nodes 2 & 3 moved from Gemini 3.1 Pro to **Gemini 3.7 Flash with High thinking
+effort** (2026-08-22) specifically to stay on Google AI Studio's free API
+tier — see "Claude & Gemini auth / free-tier status" under Cost constraints
+below for why, and the caveats that come with it.
 
 ## Current scope
 
@@ -143,10 +148,12 @@ Refinement.
 The user wants this running on GitHub's free tier only. Two separate budgets
 matter here and shouldn't be conflated:
 
-1. **GitHub Actions runner minutes** — infrastructure cost, covered below.
-2. **LLM API/subscription usage** (Claude, Gemini) — a completely separate
-   cost, already covered by the model-tiering discussion elsewhere in this
-   repo. Nothing below affects it.
+1. **GitHub Actions runner minutes** — infrastructure cost, covered in this
+   section.
+2. **LLM API/subscription usage** (Claude, Gemini) — a separate cost, driven
+   by which official vendor action and auth method each node uses. Covered
+   in "Claude & Gemini auth / free-tier status" below, since it turned out
+   *not* to be free by default and needed a real decision.
 
 Confirmed current limits for a **GitHub Free** org/account (verified against
 GitHub's billing docs, not assumed — this org is on the Free plan):
@@ -185,6 +192,52 @@ unlimited — a real number to watch, not a blocker at current scale.
    limits — this is the default for Free/Pro). With it at $0, workflows
    simply stop running once free minutes are exhausted until the next
    billing cycle — never a surprise charge.
+
+### Claude & Gemini auth / free-tier status
+
+The official vendor GitHub Actions this pipeline uses
+(`anthropics/claude-code-action`, `google-github-actions/run-gemini-cli` —
+see Implementation substrate above) call the real APIs, which is a different
+cost surface than the $0 GitHub Actions minutes above. Verified 2026-08-22:
+
+**Claude (nodes 1 & 4, PR Review in particular since that's the one running
+headless in Actions):** `claude-code-action` supports a
+**`CLAUDE_CODE_OAUTH_TOKEN`** (generated locally via `claude setup-token`) —
+usage draws from an existing Pro/Max **subscription**, not pay-as-you-go API
+billing. Use this, not `ANTHROPIC_API_KEY`, in the workflow config, or every
+headless Claude call bills per-token on top of the subscription you're
+already paying for.
+
+**Gemini (nodes 2 & 3, Three Amigos and Dev & Test):** the model choice
+directly determines the bill. Google AI Studio's free tier covers **Flash
+and Flash-Lite only** — as of April 2026, the Pro family (including what
+this design originally specified, Gemini 3.1 Pro) was pulled from the free
+tier entirely and is now paid-only. That's why nodes 2 & 3 moved to
+**Gemini 3.7 Flash, High thinking effort** instead: still a Flash-family
+model (free-tier eligible), with meaningfully better reasoning than default
+Flash via the effort setting. Caveats, unresolved — verify before relying on
+this in production:
+- Whether High-effort calls specifically stay under the free tier's rate
+  caps (10 RPM / 250K TPM / 1,500 RPD as of this writing) hasn't been
+  confirmed from docs — test with a real, billing-disabled API key first.
+- High effort costs ~40% more tokens and a median ~10s / p95 ~50s latency to
+  first token versus default effort. Not a dollar cost if it stays in the
+  free tier, but it does add directly to GitHub Actions wall-clock minutes
+  (bounded by the 2,000/month budget above, and by the 3-round iteration
+  cap).
+- **Billing trap:** enabling billing on a Gemini API project removes free-tier
+  eligibility for *everything* in that project, not just the model that
+  needed billing — every call becomes billable from token one. Keep this
+  pipeline's Gemini API key in its own dedicated, billing-disabled GCP
+  project, separate from any project where Pro/paid access might be needed
+  for something else.
+- **The free tier itself is not a stable guarantee.** Google cut free-tier
+  quotas 50–80% in December 2025 and removed Pro models from free tier
+  entirely in April 2026 — two real tightenings within about nine months.
+  Design for "currently free, historically shrinking," not permanent — the
+  existing iteration caps and human-escalation design already limit worst-
+  case usage if quotas tighten further, but the model/effort choice above
+  should be revisited if AI Studio changes free-tier Flash terms again.
 
 ## Known trade-offs (carried over from the design review)
 
