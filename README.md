@@ -107,6 +107,85 @@ followup_tasks              [string]
 iteration_count             int                              (shared circuit breaker, cap 3)
 ```
 
+## Implementation substrate (decided, not yet built)
+
+Nodes 2–5 are event-triggered GitHub Actions workflows, not scheduled/cron
+jobs and not a standalone polling script — GitHub already emits the exact
+events this graph's edges correspond to, so there's no need to build or host
+a poller:
+
+| Node | Trigger event |
+|---|---|
+| Three Amigos | `issues: [labeled]` — label set to `ready-for-review` once Architect finishes decomposition |
+| Dev & Test (first pass) | `issues: [labeled]` — label set to `ready-for-dev` when Three Amigos returns `READY` |
+| PR Review | `pull_request: [opened, synchronize]` |
+| Dev & Test (fix-up pass) | `pull_request_review: [submitted]` filtered to `changes_requested` |
+| Merge & Backlog | `pull_request_review: [submitted]` filtered to `approved` |
+
+**Architect stays out of this.** Its Requirement Refinement phase is a live
+back-and-forth with a human, and a GitHub Actions run can't hold an open
+conversation mid-run — it runs to completion per trigger. So Architect
+remains an interactive Claude Code session; only its *output* (the finished,
+`DEFINED` issues) becomes the artifact the rest of the graph reacts to.
+
+**Known gap:** the Three Amigos → Architect `clarification_questions` loop
+has nowhere headless to land, since Architect isn't a workflow. In practice
+Three Amigos posts the questions as an issue comment + a `needs-clarification`
+label, and it sits until a human (or an interactive Architect session) picks
+it up. That keeps Architect human-anchored as designed, but means that one
+loop isn't autonomous the way nodes 2–5 are among themselves. Revisit if this
+becomes a bottleneck — the fix would be a narrow headless "answer these
+specific questions" mode for Architect, distinct from full Requirement
+Refinement.
+
+## Cost constraints — GitHub Actions free tier
+
+The user wants this running on GitHub's free tier only. Two separate budgets
+matter here and shouldn't be conflated:
+
+1. **GitHub Actions runner minutes** — infrastructure cost, covered below.
+2. **LLM API/subscription usage** (Claude, Gemini) — a completely separate
+   cost, already covered by the model-tiering discussion elsewhere in this
+   repo. Nothing below affects it.
+
+Confirmed current limits for a **GitHub Free** org/account (verified against
+GitHub's billing docs, not assumed — this org is on the Free plan):
+
+| | Public repo | Private repo |
+|---|---|---|
+| Actions minutes | Unlimited, free | 2,000 min/month (Linux) |
+| Artifact/cache storage | Unlimited | 500 MB / 10 GB cache |
+| Runner OS multiplier | — | Linux 1x, Windows ~1.7x, macOS ~8x |
+
+GitHub bills **wall-clock runner time**, not compute — a job that's mostly
+waiting on a Claude/Gemini API response still burns minutes for the entire
+wait. For a private target repo, a full issue lifecycle (Three Amigos → Dev
+& Test with retries → PR Review with retries → Merge) could plausibly run
+15–60 minutes of Actions time depending on retry rounds, putting the ceiling
+at roughly 30–130 issues/month before hitting the 2,000-minute cap. Not
+unlimited — a real number to watch, not a blocker at current scale.
+
+**Design choices that keep this at $0, in order of impact:**
+
+1. **`ubuntu-latest` only for every node in this pipeline** — never
+   `macos-latest`/`windows-latest`. macOS runners burn the 2,000-minute pool
+   ~8x faster. If this mobile app's CI ever needs macOS runners for iOS
+   builds, keep that pipeline entirely separate from this one so it doesn't
+   compete for the same minute budget.
+2. **Self-hosted runner, for zero risk regardless of volume** — register an
+   existing machine as a GitHub Actions runner and none of its runtime counts
+   against the 2,000-minute quota at all, since GitHub isn't providing the
+   compute. Strongest lever if the pipeline's usage grows; trade-off is
+   owning that machine's uptime/security and installing the `claude`/`gemini`
+   CLIs and credentials on it.
+3. **The 3-round iteration caps already in this design directly bound
+   worst-case minutes per issue** — not originally a cost control, but it
+   functions as one.
+4. **Keep the Actions spending limit at $0** (Settings → Billing → Spending
+   limits — this is the default for Free/Pro). With it at $0, workflows
+   simply stop running once free minutes are exhausted until the next
+   billing cycle — never a surprise charge.
+
 ## Known trade-offs (carried over from the design review)
 
 - Three Amigos (node 2) and Dev/Test (node 3) both run on Gemini — this saves
