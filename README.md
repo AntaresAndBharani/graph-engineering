@@ -143,6 +143,36 @@ becomes a bottleneck — the fix would be a narrow headless "answer these
 specific questions" mode for Architect, distinct from full Requirement
 Refinement.
 
+### Vendor action choice: official actions, not custom-built ones
+
+Considered building a custom GitHub Action for the Gemini nodes instead of
+using Google's official one. Verified 2026-08-22 before deciding:
+
+- **`google-github-actions/run-gemini-cli` is not locked to pre-built
+  triage/review templates** — it's a lightweight wrapper around the Gemini
+  CLI that accepts a fully custom `prompt` input, so the Three Amigos and
+  Dev & Test prompt templates in this repo can be used as-is. No need to
+  reinvent CLI install/auth handling that Google already maintains.
+- **The real gap is output reliability, not flexibility.** The action's
+  output is a `summary` field — described as "the *summarized* output," not
+  a guaranteed structured-JSON passthrough. This design depends on strict
+  JSON (`verdict`, `clarification_questions`, etc.) being parsed
+  programmatically downstream, so trusting `summary` risks silent parsing
+  failures.
+- **Decision:** use the official action for CLI install + auth, but don't
+  rely on `summary` for parsing. Have the prompt instruct Gemini to write
+  its JSON output to a file in the workspace, then read that file directly
+  in the next workflow step — bypasses the action's own summarization
+  entirely, keeps auth/install as someone else's maintenance burden.
+- **Gemini Code Assist auth is not viable — checked and ruled out**, not
+  just unverified: Gemini Code Assist support for the Gemini CLI and IDE
+  extensions (Individual, Google AI Pro, and Google AI Ultra tiers) was
+  **discontinued 2026-06-18**, with users redirected to Google's Antigravity
+  platform instead. Since this predates today, don't spend time on a
+  Code-Assist-auth path for `run-gemini-cli` — it's an AI-Studio-API-key (or
+  Vertex AI / WIF) decision only. See "Provider quota considerations" below
+  for what this means for actual usage limits.
+
 ## Cost constraints — GitHub Actions free tier
 
 The user wants this running on GitHub's free tier only. Two separate budgets
@@ -238,6 +268,46 @@ this in production:
   existing iteration caps and human-escalation design already limit worst-
   case usage if quotas tighten further, but the model/effort choice above
   should be revisited if AI Studio changes free-tier Flash terms again.
+
+## Provider quota considerations
+
+Not previously accounted for — this is a different axis from both the
+GitHub Actions minutes budget and the dollar-cost/free-tier discussion
+above. It's about **usage-quota contention and rate limits**, i.e. whether
+requests get throttled or rejected, independent of what anything costs.
+Verified 2026-08-22:
+
+**Claude — Architect and PR Review share the same Opus quota bucket.**
+Anthropic enforces two limits per subscription: a rolling 5-hour window and
+a 7-day weekly cap. On Pro, Sonnet and Opus share one pool; on Max plans
+they're split into separate Sonnet/Opus buckets — but that split doesn't
+help here, because **both Architect (interactive) and PR Review (headless,
+via `CLAUDE_CODE_OAUTH_TOKEN`) use Opus**. If both draw on the same
+subscription/account, a burst of automated PR reviews can eat into the
+quota needed for an interactive Architect session, and vice versa — this is
+a real availability risk, not just a cost one. Rough usage estimates: Pro
+~30–40 messages/day, Max 5x ~150–200/day, Max 20x ~600–800/day, and an
+agentic PR review (reading a diff, multiple tool calls) likely consumes more
+than one simple "message" worth of quota. **Open decision, not yet made:**
+whether the automation's `CLAUDE_CODE_OAUTH_TOKEN` should come from the same
+Claude account used interactively, or a second, dedicated subscription to
+isolate the two usage patterns. Revisit once real PR Review volume is known.
+
+**Gemini — the free tier's rate limits are tight enough to hit from normal
+pipeline traffic, not just heavy use.** The AI Studio free tier for Flash is
+capped at **10 requests/minute**, 250K tokens/minute, 1,500 requests/day. Ten
+RPM is easy to exceed if Three Amigos and Dev & Test both fire within the
+same minute — e.g. several issues progressing at once, or a fast
+fix-up/review cycle. This reinforces (with a concrete reason now, not just
+tidiness) the earlier recommendation to add a `concurrency:` group that
+serializes this pipeline's runs rather than letting them fire in parallel.
+
+**Not yet resolved for either provider:** what happens on a 429/rate-limit
+error — does the action retry with backoff automatically, or does the job
+just fail? Unconfirmed from docs for either `claude-code-action` or
+`run-gemini-cli`. Treat a hard rate-limit failure the same as an iteration-
+cap breach: escalate to the human rather than silently retrying forever or
+leaving the issue/PR in an unclear state.
 
 ## Known trade-offs (carried over from the design review)
 
