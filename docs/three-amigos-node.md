@@ -14,7 +14,8 @@ top-level README. Documented so the full pipeline can be reviewed together.
   this hasn't been validated against real issues yet, and the 3-round
   iteration cap + human escalation exist partly as a backstop if it
   rubber-stamps something Pro would have caught.
-- **Trigger:** an issue from the Architect with `requirement_status: DEFINED`.
+- **Trigger:** an issue labeled `ready-for-review` by Architect (either entry
+  point — see `docs/definition-node.md`).
 - **Output:** a readiness verdict, or a request back to the Architect.
 
 ## Evaluation framework
@@ -58,20 +59,33 @@ Two distinct failure paths, not one — this is the refinement from the
   "no open-ended agent-to-agent dialogue" rule in the top-level README. The
   Architect's contract for answering these is documented in
   `docs/definition-node.md` under "Answering Three Amigos clarification
-  requests".
+  requests" — **two-tier as of 2026-08-22**: Architect (headless) tries to
+  answer from its own repo knowledge first, and only escalates further to
+  the PO (`needs-po-input`) if the question turns out to be a business call
+  it can't make on its own. Three Amigos doesn't need to know which tier
+  resolved it — it just gets an answer back, eventually.
 
 ## Routing
 
 ```
-READY               -> Dev & Test node
+READY               -> PO approval gate (awaiting-approval) -> Dev & Test, once the PO says go
 NEEDS_REVISION       -> Architect (SMART Decomposition)
-NEEDS_CLARIFICATION  -> Architect (targeted answer) -> Three Amigos (re-check)
+NEEDS_CLARIFICATION  -> Architect (headless, may further escalate to PO) -> Three Amigos (re-check)
 ```
 
-Both loop-back paths share one `iteration_count` in state, capped at 3. If
-still not `READY` after 3 rounds (any mix of revision/clarification),
-escalate to the human instead of looping further or letting the issue
-through by default.
+`READY` no longer routes straight into Dev & Test (2026-08-22 revision) — it
+lands on an explicit human checkpoint instead. The point of this pipeline's
+front half is to hand the PO a fully-vetted, ready-to-build issue and wait
+for an actual go-ahead before any implementation work starts, not to
+auto-continue just because the readiness gate passed.
+
+The two loop-back paths (`NEEDS_REVISION`, `NEEDS_CLARIFICATION` at the
+Three-Amigos-↔-Architect tier specifically) share one `iteration_count` in
+state, capped at 3. If still not `READY` after 3 rounds, escalate to the PO
+instead of looping further or letting the issue through by default. This cap
+does **not** apply to the Architect ↔ PO tier of clarification escalation
+(`needs-po-input`) — see `docs/definition-node.md`, that loop always
+terminates in a human decision so it doesn't need a runaway-protection cap.
 
 ## Prompt template
 

@@ -7,13 +7,30 @@ pipeline, modeled as a directed state graph. Source discussion:
 ## Pipeline
 
 ```
-[Requirement] -> 1. Architect -> 2. Three Amigos -> 3. Dev & Test -> 4. PR Review -> 5. Merge & Backlog
+[PO: you + Gemini/Antigravity draft a US]   (manual, external — not a graph node)
+        |  tag ready-for-architect
+        v
+1. Architect  --(conflict/business call)--> back to PO (needs-po-input)
+        |  ready-for-review
+        v
+2. Three Amigos
+        |  READY
+        v
+[PO APPROVAL GATE — awaiting-approval]      (manual checkpoint, not automated)
+        |  PO says go (ready-for-dev)
+        v
+3. Dev & Test  <---(changes requested)--->  4. PR Review
+        |  approved
+        v
+5. Merge & Backlog
 ```
 
 | # | Node | Role | Model tier |
 |---|------|------|------------|
-| 1 | Architect (**Definition**) | Refine the requirement with the human, then decompose into SMART GitHub sub-issues | Claude Opus |
+| — | PO drafting | You + Gemini/Antigravity draft the User Story. Manual, external to the automated graph. | Gemini/Antigravity (subscription) |
+| 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
 | 2 | Three Amigos | Product/Dev/QA readiness gate before coding starts; asks Architect targeted clarification questions when blocked | Gemini 3.7 Flash (High) |
+| — | PO approval gate | Human checkpoint: nothing gets implemented until the PO explicitly says go, even after Three Amigos returns `READY`. Manual, not automated. | — |
 | 3 | Dev & Test | Implement the issue, run local tests, open the PR | Gemini 3.7 Flash (High) |
 | 4 | PR Review | Review diff vs. acceptance criteria; exchanges PR comments with Dev until Claude judges it merge-ready | Claude Opus |
 | 5 | Merge & Backlog | `gh pr merge` + `gh issue create` for follow-ups | Deterministic ($0) |
@@ -21,7 +38,10 @@ pipeline, modeled as a directed state graph. Source discussion:
 Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
 points, and the two places a human or another agent needs a decision *from*
 Claude). **Gemini handles development and testing** (nodes 2 & 3, high-iteration
-work). Node 5 is plain `gh` CLI, no model involved.
+work). Node 5 is plain `gh` CLI, no model involved. The PO drafting step and
+approval gate are deliberately unnumbered — they're human checkpoints, not
+automated graph nodes, per "Add a node only when it demonstrably needs one"
+below.
 
 Nodes 2 & 3 moved from Gemini 3.1 Pro to **Gemini 3.7 Flash with High thinking
 effort** (2026-08-22) specifically to stay on Google AI Studio's free API
@@ -37,8 +57,8 @@ below for why, and the caveats that come with it.
 
 Per-node specs:
 
-- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**in progress**): Requirement Refinement / SMART Decomposition phases, issue schema, prompt templates.
-- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (defined, not built): readiness gate, `NEEDS_REVISION` vs `NEEDS_CLARIFICATION` routing.
+- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**in progress**): PO drafting input, interactive vs. headless entry points, technical refinement + PO-escalation, issue schema, prompt templates.
+- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (defined, not built): readiness gate, `NEEDS_REVISION` vs `NEEDS_CLARIFICATION` routing, PO approval gate after `READY`.
 - [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (defined, not built): implementation loop, handling PR Reviewer feedback.
 - [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (defined, not built): review schema, blocking vs. follow-up split, merge authority.
 - [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (defined, not built): deterministic merge + backlog issue creation.
@@ -82,7 +102,11 @@ Captured here so the decision isn't lost before these nodes are implemented:
   structured output; Architect answers just those fields and returns updated
   issue JSON. See "Answering Three Amigos clarification requests" in
   `docs/definition-node.md` for the schema Architect already commits to.
-  Capped at 3 rounds, then escalates to the human.
+  Capped at 3 rounds. **Two-tier as of 2026-08-22:** Architect tries to
+  answer from its own repo knowledge first (it can now run headless — see
+  "Architect's two entry points" below); only if it's genuinely a business
+  call does it escalate further to the PO (`needs-po-input`), which has no
+  round cap since it always terminates in a human decision.
 - **PR Reviewer ↔ Dev:** the exchange happens as real GitHub PR comments
   (`gh pr review --comment` / `gh pr comment`), not an internal message log —
   that thread *is* the state. Dev pushes fixes and can reply in-thread, but
@@ -97,10 +121,13 @@ picture is reviewable without cross-referencing all five docs:
 
 ```
 raw_requirement          string
+architect_mode            INTERACTIVE | HEADLESS           (which entry point produced this issue)
 requirement_status       REFINING | DEFINED                (Architect)
+po_escalation             {issue, conflict} | null          (Architect -> PO, uncapped, no iteration_count)
 github_issue_ids         [int]
 current_issue_id         int | null
-clarification_questions  [{issue, field, question}]         (Three Amigos -> Architect)
+clarification_questions  [{issue, field, question}]         (Three Amigos -> Architect, tier 1, capped)
+po_approval                PENDING | APPROVED | null         (the PO approval gate after Three Amigos READY)
 branch_name               string
 pr_number                 int | null
 pr_diff                   string
@@ -109,8 +136,12 @@ error_count                int
 review_status              APPROVED | CHANGES_REQUESTED | null   (PR Reviewer sets this — no one else)
 review_feedback             string
 followup_tasks              [string]
-iteration_count             int                              (shared circuit breaker, cap 3)
+iteration_count             int                              (shared circuit breaker, cap 3 — does NOT apply to po_escalation)
 ```
+
+In practice most of this is materialized as GitHub labels/comments (per
+"Prefer shared, persistent artifacts" above), not a literal state object —
+this table is the logical shape, not a schema some database enforces.
 
 ## Implementation substrate (decided, not yet built)
 
@@ -121,27 +152,53 @@ a poller:
 
 | Node | Trigger event |
 |---|---|
-| Three Amigos | `issues: [labeled]` — label set to `ready-for-review` once Architect finishes decomposition |
-| Dev & Test (first pass) | `issues: [labeled]` — label set to `ready-for-dev` when Three Amigos returns `READY` |
+| **Architect — headless entry** | `issues: [labeled]` — label `ready-for-architect`, set by the PO after drafting with Gemini/Antigravity |
+| Three Amigos | `issues: [labeled]` — label set to `ready-for-review` once Architect finishes (either entry point) |
+| **PO approval gate** | *Not a workflow* — the PO reviews the `READY` issue and manually applies `ready-for-dev` when ready to proceed |
+| Dev & Test (first pass) | `issues: [labeled]` — label `ready-for-dev`, applied by the **PO**, not automatically by Three Amigos' `READY` |
 | PR Review | `pull_request: [opened, synchronize]` |
 | Dev & Test (fix-up pass) | `pull_request_review: [submitted]` filtered to `changes_requested` |
 | Merge & Backlog | `pull_request_review: [submitted]` filtered to `approved` |
 
-**Architect stays out of this.** Its Requirement Refinement phase is a live
-back-and-forth with a human, and a GitHub Actions run can't hold an open
-conversation mid-run — it runs to completion per trigger. So Architect
-remains an interactive Claude Code session; only its *output* (the finished,
-`DEFINED` issues) becomes the artifact the rest of the graph reacts to.
+### Label taxonomy
 
-**Known gap:** the Three Amigos → Architect `clarification_questions` loop
-has nowhere headless to land, since Architect isn't a workflow. In practice
-Three Amigos posts the questions as an issue comment + a `needs-clarification`
-label, and it sits until a human (or an interactive Architect session) picks
-it up. That keeps Architect human-anchored as designed, but means that one
-loop isn't autonomous the way nodes 2–5 are among themselves. Revisit if this
-becomes a bottleneck — the fix would be a narrow headless "answer these
-specific questions" mode for Architect, distinct from full Requirement
-Refinement.
+```
+draft               PO is drafting with Gemini/Antigravity — not Architect's concern yet
+ready-for-architect  PO considers the draft ready — triggers Architect's headless entry point
+needs-po-input       Architect escalated a conflict/business call — PO resolves, then re-tags ready-for-architect
+ready-for-review     Architect finished (either entry point) — hands off to Three Amigos
+needs-clarification  Three Amigos has a targeted doubt — Architect tries to resolve, may escalate to needs-po-input
+awaiting-approval    Three Amigos returned READY — sitting at the PO approval gate
+ready-for-dev        PO said go — triggers Dev & Test
+```
+
+These need to actually exist as labels on the target repo before any
+`issues: [labeled]` trigger can fire — a setup step, not something that
+happens automatically.
+
+**Architect's two entry points (revised 2026-08-22 — corrects an earlier,
+too-broad claim that Architect "stays out of automation" entirely):**
+Requirement Refinement genuinely can't run headless — it's a live
+back-and-forth with a human, and a GitHub Actions run can't hold an open
+conversation mid-run. But that's only Phase 1. If refinement already
+happened upstream (PO + Gemini/Antigravity), Architect's remaining job —
+light technical refinement grounded in the repo, plus SMART Decomposition —
+has no such requirement and runs headless via `claude-code-action`,
+triggered by `ready-for-architect`. Full detail, including the three-way
+outcome (proceed / minor auto-adjustment / escalate to PO) and why that
+escalation loop doesn't need an iteration cap, in
+`docs/definition-node.md`. The interactive path (human brings a raw idea
+straight to a live Architect session, as in this repo's own use) remains
+available and unaffected — the two entry points coexist.
+
+**Previously flagged as an open gap, now mostly resolved by the above:** the
+Three Amigos → Architect `clarification_questions` loop used to have nowhere
+headless to land. Now it does — headless Architect tries to answer from its
+own repo knowledge first (tier 1, capped at 3 rounds with Three Amigos),
+and only escalates to the PO via `needs-po-input` (tier 2, uncapped, always
+resolves to a human decision) if the question turns out to be a genuine
+business call. See `docs/definition-node.md` "Answering Three Amigos
+clarification requests" for the exact two-tier contract.
 
 ### Vendor action & CLI choice for Gemini nodes (final)
 
@@ -349,21 +406,24 @@ above. It's about **usage-quota contention and rate limits**, i.e. whether
 requests get throttled or rejected, independent of what anything costs.
 Verified 2026-08-22:
 
-**Claude — Architect and PR Review share the same Opus quota bucket.**
-Anthropic enforces two limits per subscription: a rolling 5-hour window and
-a 7-day weekly cap. On Pro, Sonnet and Opus share one pool; on Max plans
-they're split into separate Sonnet/Opus buckets — but that split doesn't
-help here, because **both Architect (interactive) and PR Review (headless,
-via `CLAUDE_CODE_OAUTH_TOKEN`) use Opus**. If both draw on the same
-subscription/account, a burst of automated PR reviews can eat into the
-quota needed for an interactive Architect session, and vice versa — this is
-a real availability risk, not just a cost one. Rough usage estimates: Pro
-~30–40 messages/day, Max 5x ~150–200/day, Max 20x ~600–800/day, and an
-agentic PR review (reading a diff, multiple tool calls) likely consumes more
-than one simple "message" worth of quota. **Open decision, not yet made:**
-whether the automation's `CLAUDE_CODE_OAUTH_TOKEN` should come from the same
-Claude account used interactively, or a second, dedicated subscription to
-isolate the two usage patterns. Revisit once real PR Review volume is known.
+**Claude — Architect (both entry points) and PR Review share the same Opus
+quota bucket.** Anthropic enforces two limits per subscription: a rolling
+5-hour window and a 7-day weekly cap. On Pro, Sonnet and Opus share one
+pool; on Max plans they're split into separate Sonnet/Opus buckets — but
+that split doesn't help here, because **interactive Architect, headless
+Architect (technical refinement), and PR Review all use Opus** — three
+consumers now, not two, since Architect's headless entry point was added
+2026-08-22. If all three draw on the same subscription/account, a burst of
+automated activity (PR reviews, or a batch of PO-drafted issues hitting
+`ready-for-architect` at once) can eat into the quota needed for an
+interactive Architect session, and vice versa — a real availability risk,
+not just a cost one. Rough usage estimates: Pro ~30–40 messages/day, Max 5x
+~150–200/day, Max 20x ~600–800/day, and an agentic run (reading a diff or a
+repo, multiple tool calls) likely consumes more than one simple "message"
+worth of quota. **Open decision, not yet made:** whether the automation's
+`CLAUDE_CODE_OAUTH_TOKEN` should come from the same Claude account used
+interactively, or a second, dedicated subscription to isolate the usage
+patterns. Revisit once real headless-Architect + PR-Review volume is known.
 
 **Gemini — the free tier's rate limits are tight enough to hit from normal
 pipeline traffic, not just heavy use.** The AI Studio free tier for Flash is

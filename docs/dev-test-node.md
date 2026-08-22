@@ -6,9 +6,13 @@ top-level README. Documented so the full pipeline can be reviewed together.
 - **Model:** Gemini 3.7 Flash, High thinking effort (changed 2026-08-22 from
   Gemini 3.1 Pro to stay on Google AI Studio's free tier — see the top-level
   README's "Claude & Gemini auth / free-tier status").
-- **Trigger:** an issue with Three Amigos verdict `READY`, **or** a PR with
-  PR-Review verdict `CHANGES_REQUESTED` (this node handles both first
-  implementation and fix-up passes — same actor, same responsibility).
+- **Trigger:** an issue labeled `ready-for-dev`, **or** a PR with PR-Review
+  verdict `CHANGES_REQUESTED` (this node handles both first implementation
+  and fix-up passes — same actor, same responsibility). `ready-for-dev` is
+  set by the **PO**, not automatically by Three Amigos' `READY` verdict —
+  see `docs/three-amigos-node.md` "Routing" (2026-08-22 revision): `READY`
+  lands on a PO approval gate first, and only the PO's explicit go-ahead
+  applies this label. Don't wire this node to trigger directly off `READY`.
 - **Output:** a branch, commits, and an open (or updated) PR.
 - **Local test runner cost:** $0 — no LLM involved in actually running tests.
 
