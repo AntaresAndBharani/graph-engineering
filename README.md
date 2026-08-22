@@ -91,6 +91,14 @@ drawn from Anthropic's published guidance on agent design
   `review_status` / merge-readiness is set only by the PR Reviewer (Claude);
   the Dev node can push commits and reply in the thread, but never marks its
   own work approved.
+- **Every node maintains the human-readable artifact, not just its JSON
+  payload.** The JSON schemas throughout this design are for *machine
+  routing* between nodes — they are never a substitute for a well-written
+  issue body, PR description, or comment. Added 2026-08-22, after noticing
+  the PO approval gate means a human reads the actual GitHub issue to decide
+  "go," not this design's internal schema: any node that touches an issue or
+  PR must leave it readable on its own, without needing to know these
+  schemas to understand what happened and why.
 
 ## Interaction design for nodes 2 & 4 (documented now, not built)
 

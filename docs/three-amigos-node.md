@@ -16,7 +16,9 @@ top-level README. Documented so the full pipeline can be reviewed together.
   rubber-stamps something Pro would have caught.
 - **Trigger:** an issue labeled `ready-for-review` by Architect (either entry
   point — see `docs/definition-node.md`).
-- **Output:** a readiness verdict, or a request back to the Architect.
+- **Output:** a readiness verdict (JSON, for routing) **and** a human-readable
+  comment on the issue (see "Posting a readable summary" below) — the JSON
+  alone is not the deliverable.
 
 ## Evaluation framework
 
@@ -64,6 +66,19 @@ Two distinct failure paths, not one — this is the refinement from the
   the PO (`needs-po-input`) if the question turns out to be a business call
   it can't make on its own. Three Amigos doesn't need to know which tier
   resolved it — it just gets an answer back, eventually.
+
+## Posting a readable summary (2026-08-22 — not optional)
+
+The `verdict` JSON drives routing; it is not what the PO reads. Since `READY`
+now lands on the PO approval gate (see "Routing" below), the PO is reading
+the actual GitHub issue to decide whether to say go — so before or when
+applying `awaiting-approval`, Three Amigos must also post a comment
+synthesizing `product_analysis`, `developer_analysis`, and `qa_analysis`
+into plain language: what was checked, what the BDD scenarios are, anything
+worth the PO's attention even though it didn't block readiness. Same for
+`NEEDS_REVISION` / `NEEDS_CLARIFICATION` — the feedback/questions should be
+visible as a comment on the issue, not only passed as JSON to Architect,
+so there's a readable audit trail of why the issue bounced.
 
 ## Routing
 

@@ -31,6 +31,21 @@ top-level README. Documented so the full pipeline can be reviewed together.
 5. Once local tests pass: `gh pr create` (first pass) referencing the issue,
    or push a new commit to the existing branch (fix-up pass).
 
+## PR description quality (2026-08-22 — not optional)
+
+Per the README's "every node maintains the human-readable artifact"
+principle: the PR description is not a formality, it's what the PO and PR
+Reviewer actually read. `gh pr create` with a bare title is not sufficient.
+The body must include:
+- What changed and why, in plain language — not just a diff summary.
+- A link back to the issue and which acceptance criteria this addresses.
+- What was tested and the result (the actual local test output summary, not
+  just "tests pass").
+
+This applies on the first pass and every fix-up pass — update the
+description if the scope of the PR changes across commits, don't leave it
+describing only the original implementation once fixes land.
+
 ## Handling PR Reviewer feedback
 
 Per the "Interaction design for nodes 2 & 4" section in the top-level README,
