@@ -1,0 +1,124 @@
+# Graph Engineering — Agentic SDLC
+
+Design and configuration for an autonomous software-development-lifecycle (SDLC)
+pipeline, modeled as a directed state graph. Source discussion:
+`Graph Engineering in AI Development.pdf` (Gemini conversation, 2026-08-22).
+
+## Pipeline
+
+```
+[Requirement] -> 1. Architect -> 2. Three Amigos -> 3. Dev & Test -> 4. PR Review -> 5. Merge & Backlog
+```
+
+| # | Node | Role | Model tier |
+|---|------|------|------------|
+| 1 | Architect (**Definition**) | Refine the requirement with the human, then decompose into SMART GitHub sub-issues | Claude Opus |
+| 2 | Three Amigos | Product/Dev/QA readiness gate before coding starts; asks Architect targeted clarification questions when blocked | Gemini (Pro) |
+| 3 | Dev & Test | Implement the issue, run local tests, open the PR | Gemini (Pro) |
+| 4 | PR Review | Review diff vs. acceptance criteria; exchanges PR comments with Dev until Claude judges it merge-ready | Claude Opus |
+| 5 | Merge & Backlog | `gh pr merge` + `gh issue create` for follow-ups | Deterministic ($0) |
+
+Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
+points, and the two places a human or another agent needs a decision *from*
+Claude). **Gemini handles development and testing** (nodes 2 & 3, high-iteration
+work). Node 5 is plain `gh` CLI, no model involved.
+
+## Current scope
+
+> **Only node 1 (Architect / Definition) is implemented / being built right
+> now.** Nodes 2–5 are now fully *documented* below for review, but still
+> **not implemented or configured** — don't wire up automation, scripts, or
+> CLI loops for them until asked.
+
+Per-node specs:
+
+- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**in progress**): Requirement Refinement / SMART Decomposition phases, issue schema, prompt templates.
+- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (defined, not built): readiness gate, `NEEDS_REVISION` vs `NEEDS_CLARIFICATION` routing.
+- [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (defined, not built): implementation loop, handling PR Reviewer feedback.
+- [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (defined, not built): review schema, blocking vs. follow-up split, merge authority.
+- [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (defined, not built): deterministic merge + backlog issue creation.
+
+## Inter-agent communication principles
+
+These apply across all five nodes, including the ones not built yet, and are
+drawn from Anthropic's published guidance on agent design
+([Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents),
+[How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)):
+
+- **Add a node only when it demonstrably needs one** — a different model, a
+  different exit condition, or independent checkpointing. A different
+  *phase* of the same actor's work (e.g. Architect refining a requirement
+  before decomposing it) is a sub-flow within a node, not a new node.
+- **No open-ended chat between agents.** Human↔agent conversation
+  (Architect refining a requirement with the user) is fine and recommended
+  as a checkpoint. Agent↔agent exchanges (Three Amigos ↔ Architect,
+  PR Reviewer ↔ Dev) must stay structured: specific questions, specific
+  fields, bounded rounds — never a freeform back-and-forth.
+- **Prefer shared, persistent artifacts over passing message history.** A
+  GitHub PR's comment thread is exactly this kind of artifact — durable,
+  human-visible, and already checkpointed by GitHub itself. Nodes should
+  read/write it directly rather than duplicating the conversation inside the
+  orchestrator's own state.
+- **Every agent-to-agent loop needs an iteration cap and a human escalation
+  path** at the cap — never merge, approve, or silently proceed just because
+  retries ran out.
+- **Authority for a verdict stays with the node responsible for it.** e.g.
+  `review_status` / merge-readiness is set only by the PR Reviewer (Claude);
+  the Dev node can push commits and reply in the thread, but never marks its
+  own work approved.
+
+## Interaction design for nodes 2 & 4 (documented now, not built)
+
+Captured here so the decision isn't lost before these nodes are implemented:
+
+- **Three Amigos → Architect:** when Three Amigos (Gemini) can't resolve a
+  doubt itself, it does not get a live chat channel to Claude. It emits
+  targeted `clarification_questions` (issue, field, question) as part of its
+  structured output; Architect answers just those fields and returns updated
+  issue JSON. See "Answering Three Amigos clarification requests" in
+  `docs/definition-node.md` for the schema Architect already commits to.
+  Capped at 3 rounds, then escalates to the human.
+- **PR Reviewer ↔ Dev:** the exchange happens as real GitHub PR comments
+  (`gh pr review --comment` / `gh pr comment`), not an internal message log —
+  that thread *is* the state. Dev pushes fixes and can reply in-thread, but
+  only the PR Reviewer node (Claude) sets `review_status: APPROVED`. Capped
+  the same way, with human escalation at the cap instead of an unbounded
+  review/fix loop.
+
+## Shared state schema (consolidated)
+
+Every node reads/writes a subset of this. Listed here once so the full
+picture is reviewable without cross-referencing all five docs:
+
+```
+raw_requirement          string
+requirement_status       REFINING | DEFINED                (Architect)
+github_issue_ids         [int]
+current_issue_id         int | null
+clarification_questions  [{issue, field, question}]         (Three Amigos -> Architect)
+branch_name               string
+pr_number                 int | null
+pr_diff                   string
+test_output                string
+error_count                int
+review_status              APPROVED | CHANGES_REQUESTED | null   (PR Reviewer sets this — no one else)
+review_feedback             string
+followup_tasks              [string]
+iteration_count             int                              (shared circuit breaker, cap 3)
+```
+
+## Known trade-offs (carried over from the design review)
+
+- Three Amigos (node 2) and Dev/Test (node 3) both run on Gemini — this saves
+  cost but means the readiness gate isn't fully decorrelated from the
+  implementer. The clarification-question path above gives Three Amigos an
+  explicit way to defer to Claude instead of guessing, which mitigates this
+  somewhat but doesn't eliminate it.
+- CLI orchestration (`claude` / `gemini` invoked headlessly) needs a
+  non-interactive permission mode configured, or automated loops will hang on
+  the first confirmation prompt.
+- Prefer each CLI's structured/JSON output mode over parsing JSON out of
+  conversational stdout once this moves to headless automation.
+- Human escalation at each loop's iteration cap is now part of the design
+  (see above) but not yet implemented anywhere — there's no code, only the
+  Definition node's spec, so this is a reminder for whoever builds nodes 2–5.
