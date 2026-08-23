@@ -1,7 +1,15 @@
 # Three Amigos Node (Readiness Gate)
 
-**Not implemented — definition only**, per the current-scope note in the
-top-level README. Documented so the full pipeline can be reviewed together.
+**Implemented and live-testing (2026-08-23)** —
+[`three-amigos.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/three-amigos.yml)
+in `crosstrainingapp`, merged via
+[PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54).
+See the top-level README's "Implementation lessons from live testing." One
+real simplification from live testing: the implemented prompt drops the
+`issue` key from `clarification_questions` entries (just `field`/
+`question`) since this node evaluates exactly one subtask per run, not a
+batch — the `issue` identifier in the schema below was only ever needed for
+disambiguating across multiple issues at once.
 
 - **Model:** Gemini 3.7 Flash, **High thinking effort** (changed 2026-08-22
   from Gemini 3.1 Pro — Pro was pulled from Google AI Studio's free tier in

@@ -1,8 +1,18 @@
 # Definition Node (Architect)
 
-The only node currently in scope. Turns a requirement into a set of SMART
-GitHub sub-issues, ready for the (not-yet-built) Three Amigos readiness gate.
-Has two entry points now (2026-08-22 revision) — see below.
+**Implemented and live-testing (2026-08-23)** —
+[`architect.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/architect.yml)
+in `crosstrainingapp`, merged via
+[PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54).
+See the top-level README's "Implementation lessons from live testing" for
+real bugs/prerequisites found so far. This doc is still the design
+reference — update it if live testing surfaces a real design change, not
+just a code fix.
+
+Turns a requirement into a set of SMART GitHub sub-issues, ready for the
+Three Amigos readiness gate (also now implemented — see
+`docs/three-amigos-node.md`). Has two entry points (2026-08-22 revision) —
+see below.
 
 **Label names below are aligned to the actual target implementation repo
 (`AntaresAndBharani/crosstrainingapp`, 2026-08-23), not generic placeholders.**
@@ -160,7 +170,7 @@ README) — write them so each one can become a Given/When/Then test.
 
 ## Answering Three Amigos clarification requests (two-tier)
 
-Once built, the Three Amigos node (Gemini) will not chat freely with
+The Three Amigos node (Gemini) does not chat freely with
 Architect — per the agent-communication principles in the top-level README,
 inter-agent exchanges stay structured and bounded, not open-ended. When Three
 Amigos can't resolve a doubt itself, it routes back here with specific,
@@ -318,7 +328,7 @@ status:definition        (existing) PO is drafting — not yet Architect's conce
 status:ready-for-architect  on type:user-story: PO considers the draft ready, run full refine+decompose
                              on type:subtask: PO answered a needs-po-input escalation, incorporate it
 status:needs-po-input    Architect escalated a conflict — PO must resolve, then relabel status:ready-for-architect
-status:review            Architect created/updated this subtask — hands off to Three Amigos (not built yet)
+status:review            Architect created/updated this subtask — hands off to Three Amigos
 ```
 
 Full detail on the `type:user-story` / `type:subtask` templates being reused
@@ -327,10 +337,8 @@ Full detail on the `type:user-story` / `type:subtask` templates being reused
 
 ## Out of scope (do not build yet)
 
-Three Amigos validation, the Dev & Test loop, PR review, and merge/backlog
-automation are all designed at a high level in the top-level README but are
-**not implemented**. Don't wire up any of this — including the headless
-entry point described above, or the `gh issue create` calls being scripted
-into an unattended workflow — until asked. This doc describes the full
-contract Architect commits to; it doesn't mean the headless trigger or the
-Three Amigos side are being built now.
+Both entry points described above (interactive and headless) **are
+implemented** — see the "Implemented and live-testing" note at the top of
+this doc. What's still out of scope: the Dev & Test loop, PR review, and
+merge/backlog automation, all designed at a high level in the top-level
+README but **not implemented**. Don't wire those up until asked.

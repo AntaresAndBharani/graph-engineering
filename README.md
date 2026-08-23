@@ -62,23 +62,71 @@ below for why, and the caveats that come with it.
 
 ## Current scope
 
-> **Only node 1 (Architect / Definition) is implemented / being built right
-> now.** Nodes 2–5 are now fully *documented* below for review, but still
-> **not implemented or configured** — don't wire up automation, scripts, or
-> CLI loops for them until asked.
+> **Nodes 1 (Architect) and 2 (Three Amigos) are implemented and live in
+> `crosstrainingapp`** as of 2026-08-23 —
+> [PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54)
+> (`.github/workflows/architect.yml`, `three-amigos.yml`), merged to `main`,
+> currently being validated against a real test issue (#55). See
+> "Implementation lessons from live testing" below for what real-world
+> testing has surfaced so far — genuinely useful for whoever builds nodes
+> 3–5 next, not just historical notes. **Nodes 3–5 remain documented, not
+> implemented** — don't wire up automation for them until asked.
 
 Per-node specs:
 
-- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**in progress**): PO drafting input, interactive vs. headless entry points, technical refinement + PO-escalation, issue schema, prompt templates.
-- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (defined, not built): readiness gate, `NEEDS_REVISION` vs `NEEDS_CLARIFICATION` routing, PO approval gate after `READY`.
+- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**implemented, live-testing**): PO drafting input, interactive vs. headless entry points, technical refinement + PO-escalation, issue schema, prompt templates.
+- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (**implemented, live-testing**): readiness gate, `NEEDS_REVISION` vs `NEEDS_CLARIFICATION` routing, PO approval gate after `READY`.
 - [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (defined, not built): implementation loop, handling PR Reviewer feedback.
 - [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (defined, not built): review schema, blocking vs. follow-up split, merge authority.
 - [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (defined, not built): deterministic merge + backlog issue creation.
 
+## Implementation lessons from live testing (crosstrainingapp)
+
+Real-world testing surfaced gaps the design phase couldn't have — captured
+here because the same classes of issue will very likely recur when nodes
+3–5 get built, not because they're just crosstrainingapp trivia.
+
+**Confirmed prerequisites for headless Claude/Gemini nodes in any target
+repo (4, not 3 — one was missing from the original plan):**
+1. `CLAUDE_CODE_OAUTH_TOKEN` — generate via `claude setup-token` locally,
+   add as a repo secret.
+2. `GEMINI_API_KEY` — from a dedicated, billing-disabled GCP project via
+   AI Studio, add as a repo secret.
+3. A fine-grained PAT (repo secret, e.g. `ORCHESTRATION_PAT`) — Issues
+   read/write, Contents read. Needed because the default `GITHUB_TOKEN`
+   doesn't retrigger workflows on the issues it creates/relabels itself.
+4. **The [Claude Code GitHub App](https://github.com/apps/claude) must be
+   installed on the repo/org** — discovered from a real failure
+   (`401 Unauthorized - Claude Code is not installed on this repository`),
+   not anticipated from the action's documented inputs. Separate from
+   `CLAUDE_CODE_OAUTH_TOKEN` (that's Anthropic-API auth); this is what lets
+   `claude-code-action` act on GitHub's side at all. Install this *before*
+   the first run, not after hitting the failure.
+
+**Confirmed workflow-YAML gotchas, both real bugs caught in production:**
+- `claude-code-action@v1` requests a GitHub OIDC token internally as part
+  of its own token setup, regardless of which Anthropic-side auth method is
+  used — the workflow's `permissions:` block needs `id-token: write` or it
+  fails with `Could not fetch an OIDC token`. Added defensively to
+  `three-amigos.yml` too (different action, similar GCP/OIDC-capable
+  inputs) even though not yet confirmed necessary there.
+- Keep the mode-name strings used in trigger/branching logic and the
+  filenames of any per-mode prompt files in exact sync — a
+  `full_decompose` (underscore) vs `architect-full-decompose.md` (hyphen)
+  mismatch broke the very first real run. Not a design flaw, just worth
+  the reminder: verify string literals used to build a file path actually
+  match real filenames, ideally with an automated check, not just review.
+- Bash heredocs (`<<'DELIM' ... DELIM`) inside an indented YAML `run: |`
+  block break in a non-obvious way if the body/closing delimiter is
+  indented with spaces — plain `<<` requires an exact-match, unindented
+  closing line. Avoided entirely in the final version by moving
+  mode-specific prompt text into separate committed `.md` files instead of
+  inline heredocs — simpler and safer than fighting `<<-`/tabs.
+
 ## Inter-agent communication principles
 
-These apply across all five nodes, including the ones not built yet, and are
-drawn from Anthropic's published guidance on agent design
+These apply across all five nodes, including the ones (3–5) not built yet,
+and are drawn from Anthropic's published guidance on agent design
 ([Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents),
 [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)):
 
@@ -163,7 +211,7 @@ In practice most of this is materialized as GitHub labels/comments (per
 "Prefer shared, persistent artifacts" above), not a literal state object —
 this table is the logical shape, not a schema some database enforces.
 
-## Implementation substrate (decided, not yet built)
+## Implementation substrate (node 2 built and live; 3–5 decided, not yet built)
 
 Nodes 2–5 are event-triggered GitHub Actions workflows, not scheduled/cron
 jobs and not a standalone polling script — GitHub already emits the exact
