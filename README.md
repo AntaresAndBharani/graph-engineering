@@ -6,18 +6,30 @@ pipeline, modeled as a directed state graph. Source discussion:
 
 ## Pipeline
 
+**Target implementation repo (confirmed 2026-08-23):**
+[`AntaresAndBharani/crosstrainingapp`](https://github.com/AntaresAndBharani/crosstrainingapp)
+(Kotlin/Jetpack Compose Android app). It already had a real `type:user-story`
+/ `type:subtask` issue-template system and a `status:definition` /
+`status:ready` / `status:in-progress` label lifecycle before this pipeline
+was designed, plus a working (interactive, not automated) Antigravity
+`developer`/`tester` setup for the Dev & Test node. This design reuses and
+extends that rather than inventing a parallel one — label names below are
+`crosstrainingapp`'s actual names, not generic placeholders. See "Label
+taxonomy" further down for the full mapping.
+
 ```
-[PO: you + Gemini/Antigravity draft a US]   (manual, external — not a graph node)
-        |  tag ready-for-architect
+[PO: you + Gemini/Antigravity draft a type:user-story]   (manual, external — not a graph node)
+        |  relabel status:ready-for-architect
         v
-1. Architect  --(conflict/business call)--> back to PO (needs-po-input)
-        |  ready-for-review
+1. Architect  --(conflict/business call)--> back to PO (status:needs-po-input)
+        |  creates type:subtask issues, status:review
         v
 2. Three Amigos
         |  READY
         v
-[PO APPROVAL GATE — awaiting-approval]      (manual checkpoint, not automated)
-        |  PO says go (ready-for-dev)
+[PO APPROVAL GATE — status:awaiting-approval]      (manual checkpoint, not automated)
+        |  PO relabels status:ready (the EXISTING label — no new one needed;
+        |  this already triggers the interactive Antigravity Developer/Tester setup)
         v
 3. Dev & Test  <---(changes requested)--->  4. PR Review
         |  approved
@@ -113,8 +125,8 @@ Captured here so the decision isn't lost before these nodes are implemented:
   Capped at 3 rounds. **Two-tier as of 2026-08-22:** Architect tries to
   answer from its own repo knowledge first (it can now run headless — see
   "Architect's two entry points" below); only if it's genuinely a business
-  call does it escalate further to the PO (`needs-po-input`), which has no
-  round cap since it always terminates in a human decision.
+  call does it escalate further to the PO (`status:needs-po-input`), which
+  has no round cap since it always terminates in a human decision.
 - **PR Reviewer ↔ Dev:** the exchange happens as real GitHub PR comments
   (`gh pr review --comment` / `gh pr comment`), not an internal message log —
   that thread *is* the state. Dev pushes fixes and can reply in-thread, but
@@ -160,41 +172,54 @@ a poller:
 
 | Node | Trigger event |
 |---|---|
-| **Architect — headless entry** | `issues: [labeled]` — label `ready-for-architect`, set by the PO after drafting with Gemini/Antigravity |
-| Three Amigos | `issues: [labeled]` — label set to `ready-for-review` once Architect finishes (either entry point) |
-| **PO approval gate** | *Not a workflow* — the PO reviews the `READY` issue and manually applies `ready-for-dev` when ready to proceed |
-| Dev & Test (first pass) | `issues: [labeled]` — label `ready-for-dev`, applied by the **PO**, not automatically by Three Amigos' `READY` |
+| **Architect — headless entry** | `issues: [labeled]` — `status:ready-for-architect` on `type:user-story` (full refine+decompose) or `type:subtask` (incorporate a PO answer) |
+| Three Amigos | `issues: [labeled]` — `status:review` on a `type:subtask`, applied by Architect (either entry point, or after resolving a clarification) |
+| **PO approval gate** | *Not a workflow* — the PO reviews the `status:awaiting-approval` subtask and manually relabels `status:ready` when ready to proceed |
+| Dev & Test (first pass) | Currently manual/interactive (existing `.antigravity` Developer/Tester setup) — reacts to `status:ready`, the **existing** label, applied by the **PO**, never automatically by Three Amigos' `READY` |
 | PR Review | `pull_request: [opened, synchronize]` |
 | Dev & Test (fix-up pass) | `pull_request_review: [submitted]` filtered to `changes_requested` |
 | Merge & Backlog | `pull_request_review: [submitted]` filtered to `approved` |
 
 ### Label taxonomy
 
+Reuses `crosstrainingapp`'s existing `type:user-story` / `type:subtask` /
+`status:definition` / `status:ready` / `status:in-progress` (confirmed
+2026-08-23, see "Pipeline" above); adds the rest. Two are dual-purpose —
+same label, different meaning depending on which issue type it's on:
+
 ```
-draft               PO is drafting with Gemini/Antigravity — not Architect's concern yet
-ready-for-architect  PO considers the draft ready — triggers Architect's headless entry point
-needs-po-input       Architect escalated a conflict/business call — PO resolves, then re-tags ready-for-architect
-ready-for-review     Architect finished (either entry point) — hands off to Three Amigos
-needs-clarification  Three Amigos has a targeted doubt — Architect tries to resolve, may escalate to needs-po-input
-awaiting-approval    Three Amigos returned READY — sitting at the PO approval gate
-ready-for-dev        PO said go — triggers Dev & Test
+status:definition           (existing) PO is drafting — not Architect's concern yet
+status:ready-for-architect  on type:user-story: PO says the draft is ready, run full refine+decompose
+                              on type:subtask: PO answered a needs-po-input escalation, incorporate it
+status:needs-po-input       Architect escalated a conflict/business call (either issue type) — PO resolves,
+                              then relabels status:ready-for-architect
+status:review                Architect created/updated this subtask — hands off to Three Amigos
+status:needs-revision        Three Amigos: issue is wrong/incomplete — full rework by Architect
+status:needs-clarification   Three Amigos has a targeted doubt — Architect tries to resolve (tier 1, capped
+                              at 3), may escalate to status:needs-po-input (tier 2, uncapped)
+status:awaiting-approval     Three Amigos returned READY — sitting at the PO approval gate
+status:ready                 (existing) PO said go — triggers Dev & Test (currently: pick it up in Antigravity)
+status:in-progress            (existing) someone's actively implementing it
 ```
 
 These need to actually exist as labels on the target repo before any
-`issues: [labeled]` trigger can fire — a setup step, not something that
+`issues: [labeled]` trigger can fire — a setup step (create the six new
+`status:*` labels above; the rest already exist), not something that
 happens automatically.
 
-**Architect's two entry points (revised 2026-08-22 — corrects an earlier,
-too-broad claim that Architect "stays out of automation" entirely):**
-Requirement Refinement genuinely can't run headless — it's a live
-back-and-forth with a human, and a GitHub Actions run can't hold an open
-conversation mid-run. But that's only Phase 1. If refinement already
-happened upstream (PO + Gemini/Antigravity), Architect's remaining job —
-light technical refinement grounded in the repo, plus SMART Decomposition —
-has no such requirement and runs headless via `claude-code-action`,
-triggered by `ready-for-architect`. Full detail, including the three-way
-outcome (proceed / minor auto-adjustment / escalate to PO) and why that
-escalation loop doesn't need an iteration cap, in
+**Architect's two entry points (revised 2026-08-22, labels aligned to
+`crosstrainingapp` 2026-08-23 — corrects an earlier, too-broad claim that
+Architect "stays out of automation" entirely):** Requirement Refinement
+genuinely can't run headless — it's a live back-and-forth with a human, and
+a GitHub Actions run can't hold an open conversation mid-run. But that's
+only Phase 1. If refinement already happened upstream (PO + Gemini/
+Antigravity), Architect's remaining job — light technical refinement
+grounded in the repo, plus SMART Decomposition — has no such requirement and
+runs headless via `claude-code-action`, triggered by
+`status:ready-for-architect`. Full detail, including the three-way outcome
+(proceed / minor auto-adjustment / escalate to PO), the complete PO-escalation
+loop when a Three Amigos clarification can't be resolved by Architect alone,
+and why that escalation loop doesn't need an iteration cap, in
 `docs/definition-node.md`. The interactive path (human brings a raw idea
 straight to a live Architect session, as in this repo's own use) remains
 available and unaffected — the two entry points coexist.
@@ -203,10 +228,11 @@ available and unaffected — the two entry points coexist.
 Three Amigos → Architect `clarification_questions` loop used to have nowhere
 headless to land. Now it does — headless Architect tries to answer from its
 own repo knowledge first (tier 1, capped at 3 rounds with Three Amigos),
-and only escalates to the PO via `needs-po-input` (tier 2, uncapped, always
-resolves to a human decision) if the question turns out to be a genuine
-business call. See `docs/definition-node.md` "Answering Three Amigos
-clarification requests" for the exact two-tier contract.
+and only escalates to the PO via `status:needs-po-input` (tier 2, uncapped,
+always resolves to a human decision) if the question turns out to be a
+genuine business call. See `docs/definition-node.md` "Answering Three Amigos
+clarification requests" for the exact two-tier contract, including the full
+loop back through `status:ready-for-architect` once the PO answers.
 
 ### Vendor action & CLI choice for Gemini nodes (final)
 
@@ -423,7 +449,7 @@ Architect (technical refinement), and PR Review all use Opus** — three
 consumers now, not two, since Architect's headless entry point was added
 2026-08-22. If all three draw on the same subscription/account, a burst of
 automated activity (PR reviews, or a batch of PO-drafted issues hitting
-`ready-for-architect` at once) can eat into the quota needed for an
+`status:ready-for-architect` at once) can eat into the quota needed for an
 interactive Architect session, and vice versa — a real availability risk,
 not just a cost one. Rough usage estimates: Pro ~30–40 messages/day, Max 5x
 ~150–200/day, Max 20x ~600–800/day, and an agentic run (reading a diff or a

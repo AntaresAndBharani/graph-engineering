@@ -14,8 +14,11 @@ top-level README. Documented so the full pipeline can be reviewed together.
   this hasn't been validated against real issues yet, and the 3-round
   iteration cap + human escalation exist partly as a backstop if it
   rubber-stamps something Pro would have caught.
-- **Trigger:** an issue labeled `ready-for-review` by Architect (either entry
-  point — see `docs/definition-node.md`).
+- **Trigger:** a `type:subtask` issue labeled `status:review` by Architect
+  (either entry point, or after resolving a clarification — see
+  `docs/definition-node.md`). Label names aligned to the actual target repo
+  (`AntaresAndBharani/crosstrainingapp`) — see `docs/definition-node.md`'s
+  note on this.
 - **Output:** a readiness verdict (JSON, for routing) **and** a human-readable
   comment on the issue (see "Posting a readable summary" below) — the JSON
   alone is not the deliverable.
@@ -63,16 +66,17 @@ Two distinct failure paths, not one — this is the refinement from the
   `docs/definition-node.md` under "Answering Three Amigos clarification
   requests" — **two-tier as of 2026-08-22**: Architect (headless) tries to
   answer from its own repo knowledge first, and only escalates further to
-  the PO (`needs-po-input`) if the question turns out to be a business call
-  it can't make on its own. Three Amigos doesn't need to know which tier
-  resolved it — it just gets an answer back, eventually.
+  the PO (`status:needs-po-input`) if the question turns out to be a business
+  call it can't make on its own. Three Amigos doesn't need to know which
+  tier resolved it — it just gets `status:review` again, eventually, and
+  re-checks.
 
 ## Posting a readable summary (2026-08-22 — not optional)
 
 The `verdict` JSON drives routing; it is not what the PO reads. Since `READY`
 now lands on the PO approval gate (see "Routing" below), the PO is reading
 the actual GitHub issue to decide whether to say go — so before or when
-applying `awaiting-approval`, Three Amigos must also post a comment
+applying `status:awaiting-approval`, Three Amigos must also post a comment
 synthesizing `product_analysis`, `developer_analysis`, and `qa_analysis`
 into plain language: what was checked, what the BDD scenarios are, anything
 worth the PO's attention even though it didn't block readiness. Same for
@@ -83,24 +87,34 @@ so there's a readable audit trail of why the issue bounced.
 ## Routing
 
 ```
-READY               -> PO approval gate (awaiting-approval) -> Dev & Test, once the PO says go
-NEEDS_REVISION       -> Architect (SMART Decomposition)
-NEEDS_CLARIFICATION  -> Architect (headless, may further escalate to PO) -> Three Amigos (re-check)
+READY               -> status:awaiting-approval -> PO relabels status:ready (reusing the EXISTING
+                        label crosstrainingapp's Antigravity Developer/Tester setup already
+                        picks up) -> Dev & Test, once the PO says go
+NEEDS_REVISION       -> status:needs-revision -> Architect (SMART Decomposition)
+NEEDS_CLARIFICATION  -> status:needs-clarification -> Architect (headless, may further
+                        escalate to status:needs-po-input) -> status:review -> Three Amigos (re-check)
 ```
 
 `READY` no longer routes straight into Dev & Test (2026-08-22 revision) — it
 lands on an explicit human checkpoint instead. The point of this pipeline's
 front half is to hand the PO a fully-vetted, ready-to-build issue and wait
 for an actual go-ahead before any implementation work starts, not to
-auto-continue just because the readiness gate passed.
+auto-continue just because the readiness gate passed. `status:ready` is
+deliberately the *existing* label, not a new one — it already means "ready
+to be picked up" in this repo, and the PO applying it is what already
+triggers the interactive Antigravity Developer/Tester workflow. No new
+label needed for that handoff.
 
 The two loop-back paths (`NEEDS_REVISION`, `NEEDS_CLARIFICATION` at the
 Three-Amigos-↔-Architect tier specifically) share one `iteration_count` in
 state, capped at 3. If still not `READY` after 3 rounds, escalate to the PO
 instead of looping further or letting the issue through by default. This cap
 does **not** apply to the Architect ↔ PO tier of clarification escalation
-(`needs-po-input`) — see `docs/definition-node.md`, that loop always
-terminates in a human decision so it doesn't need a runaway-protection cap.
+(`status:needs-po-input`) — see `docs/definition-node.md` for the full
+traced-through loop; that tier always terminates in a human decision so it
+doesn't need a runaway-protection cap, and once the PO answers, the tier-1
+count resets for that thread rather than carrying a grudge from before the
+human stepped in.
 
 ## Prompt template
 

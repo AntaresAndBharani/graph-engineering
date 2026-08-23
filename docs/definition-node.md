@@ -4,6 +4,16 @@ The only node currently in scope. Turns a requirement into a set of SMART
 GitHub sub-issues, ready for the (not-yet-built) Three Amigos readiness gate.
 Has two entry points now (2026-08-22 revision) — see below.
 
+**Label names below are aligned to the actual target implementation repo
+(`AntaresAndBharani/crosstrainingapp`, 2026-08-23), not generic placeholders.**
+That repo already has `type:user-story` / `type:subtask` issue types and a
+`status:definition` / `status:ready` / `status:in-progress` lifecycle, plus
+production-grade `user-story.yml` / `subtask.yml` issue templates — this
+design reuses and extends those rather than inventing a parallel taxonomy.
+If this pipeline is ever pointed at a different repo, map onto whatever that
+repo's existing conventions are the same way, rather than reintroducing these
+exact names by default.
+
 - **Model:** Claude Opus (highest reasoning tier available).
 - **Output:** GitHub issues created via `gh issue create`, following the
   schema below.
@@ -18,12 +28,13 @@ not that subscription. Not the `gemini` CLI interactively — that consumer
 login path was discontinued 2026-06-18; use Gemini's chat interface or
 Antigravity directly.
 
-Mechanically: the PO creates a GitHub issue labeled `draft`, works it up with
-Gemini/Antigravity, and when ready relabels it `ready-for-architect`. That
-label is the trigger for Architect's headless entry point below. This isn't
-a GitHub Actions trigger *to* the PO — there's no automation upstream of
-this, it's just a visible backlog convention instead of an ad hoc prompt
-each time.
+Mechanically: the PO creates a `type:user-story` issue (using the existing
+`user-story.yml` template — it already gets `status:definition` by default),
+works it up with Gemini/Antigravity, and when ready relabels it
+`status:ready-for-architect`. That label is the trigger for Architect's
+headless entry point below. This isn't a GitHub Actions trigger *to* the
+PO — there's no automation upstream of this, it's just a visible backlog
+convention instead of an ad hoc prompt each time.
 
 ## Two entry points, one node
 
@@ -41,9 +52,9 @@ work can arrive, because they have genuinely different exit conditions:
    "go", then **SMART Decomposition**. Full detail in "Prompt templates"
    below. Use this when there's no PO/Antigravity draft yet and you want to
    shape the idea with Claude from scratch.
-2. **Headless entry** (new) — triggered by the `ready-for-architect` label,
-   via `anthropics/claude-code-action` with `CLAUDE_CODE_OAUTH_TOKEN`, no
-   human present. Assumes the PO already did Requirement Refinement upstream
+2. **Headless entry** (new) — triggered by the `status:ready-for-architect`
+   label, via `anthropics/claude-code-action` with `CLAUDE_CODE_OAUTH_TOKEN`,
+   no human present. Assumes the PO already did Requirement Refinement upstream
    (with Gemini/Antigravity). Architect's job here is **not** re-refinement
    from scratch — it's **light technical refinement grounded in the actual
    codebase** (this run needs a real checkout, not just the issue text) plus
@@ -63,19 +74,28 @@ codebase context) couldn't have: existing patterns, integration points,
 edge cases the current architecture already has opinions about. Three
 possible outcomes per run, not two:
 
-1. **No conflicts** — refine + decompose, create the issues, label the
-   parent/epic `ready-for-review`. Normal path, hands off to Three Amigos.
+1. **No conflicts** — refine + decompose, create the `type:subtask` issues
+   (using the `subtask.yml` template's fields — entry-points, acceptance
+   criteria, verification commands map directly onto what Architect already
+   produces), each labeled `status:review` — **not** the template's own
+   default of `status:ready`, since Three Amigos hasn't seen them yet.
+   Normal path, hands off to Three Amigos.
 2. **Minor technical adjustment** — Architect makes it directly (e.g.
    tightens an acceptance criterion, notes a specific file/module to touch).
    No escalation; this is what "light refinement" means in practice.
 3. **Real conflict or business call** — something the draft didn't account
    for that only the PO can decide (e.g. "this conflicts with how X
    currently works — replace it or coexist?"). Architect does **not**
-   guess. It relabels the issue back to `needs-po-input` (not the generic
-   `draft` — there's real content already, just one decision needed),
-   comments with the specific conflict, and stops. The PO resolves it
-   (in Antigravity/Gemini or otherwise) and re-tags `ready-for-architect`
-   to re-enter.
+   guess. It relabels the issue (the `type:user-story`, or a `type:subtask`
+   if the conflict surfaced during clarification-answering — see "Answering
+   Three Amigos clarification requests" below) to `status:needs-po-input`,
+   comments with the specific conflict, and stops. The PO resolves it (in
+   Antigravity/Gemini or otherwise) and relabels back to
+   `status:ready-for-architect` to re-enter — on a `type:user-story` this
+   means "redo the refinement/decomposition pass"; on a `type:subtask` it
+   means "incorporate my answer into this specific subtask," a lighter
+   re-entry than a full redo. Same label, different scope of work,
+   depending on which issue type it's applied to.
 
 **No iteration cap on this specific loop.** Every other agent-to-agent loop
 in this design (Three Amigos ↔ Architect, PR Reviewer ↔ Dev) is capped at 3
@@ -97,12 +117,13 @@ runaway-protect against. Don't apply the same cap here by habit.
 
 ## Issue structure
 
-- One optional **parent/epic issue** capturing the original requirement,
-  when the requirement doesn't fit in a single issue.
-- One or more **sub-issues**, linked to the parent via GitHub's native
-  sub-issue relationship (or a task-list checkbox `- [ ] #123` in the parent
-  body if native sub-issues aren't available in the target repo).
-- Declare cross-issue dependencies explicitly in the body (`Depends on #NNN`)
+- The **`type:user-story` issue** (created upstream by the PO, per "PO
+  drafting" above) is the parent — Architect doesn't create this, it reads
+  it.
+- One or more **`type:subtask` issues**, each linked back via the
+  `subtask.yml` template's `parent-story` field, and referenced from the
+  user story's own `subtasks` checklist field.
+- Declare cross-subtask dependencies via the template's `blocked-by` field
   so the Dev node — later — knows what order to work in.
 
 ## Output schema
@@ -162,13 +183,33 @@ This is now a **two-tier escalation**, not a straight line to the human:
    targeted clarification.
 2. **If Architect itself can't resolve it** — the question turns out to be a
    business call, not a technical one — it escalates further using the same
-   `needs-po-input` mechanism described above, rather than guessing or
+   `status:needs-po-input` mechanism described above, rather than guessing or
    bouncing the question back to Three Amigos unanswered.
+
+Full loop, tier 2 case (2026-08-23 — traced through completely, not just
+described):
+
+```
+type:subtask, status:review
+        v  Three Amigos: NEEDS_CLARIFICATION
+status:needs-clarification   (+ clarification_questions posted)
+        v  triggers headless Architect (tier 1)
+   Architect resolves it from repo knowledge?
+        |-- yes --> status:review  (back to Three Amigos, re-check)
+        |-- no  --> status:needs-po-input  (+ comment: exactly what needs deciding)
+                        v  PO answers in a comment, relabels
+                    status:ready-for-architect
+                        v  triggers headless Architect again — incorporate the
+                           PO's answer into this subtask, not re-decompose it
+                    status:review  (back to Three Amigos, re-check)
+```
 
 This exchange (Three Amigos ↔ Architect specifically, tier 1) is capped at 3
 rounds, same circuit breaker as the rest of the pipeline. The Architect ↔ PO
 tier (when it escalates further) has no cap, per "Headless technical
-refinement" above.
+refinement" above. **Once the PO actually answers, the tier-1 iteration
+count resets for that thread** — the cap exists to stop autonomous looping,
+not to penalize a case where a human already stepped in and resolved it.
 
 ## Prompt templates
 
@@ -254,21 +295,35 @@ architect_mode: HEADLESS.
 ## Creating the issues
 
 ```bash
-gh issue create --title "<title>" --body "<body + acceptance criteria>" --label "<labels>"
+gh issue create --title "[Subtask]: <title>" \
+  --body "<body, structured to match subtask.yml's fields — parent-story, target-repo, task-description, entry-points, acceptance-criteria, verification, size, complexity, blocked-by>" \
+  --label "type:subtask,status:review"
 ```
 
-For a parent/epic issue, create it first, capture its number, then reference
-it in each sub-issue body (or use `gh issue create --json` output plus the
-repo's native sub-issue linking if available).
+Fill in the `subtask.yml` template's fields directly (parent-story,
+target-repo, entry-points, acceptance-criteria, verification, size,
+complexity, blocked-by) rather than inventing a different body shape — that
+template already covers everything Architect needs to produce. Capture the
+new issue's number and add it to the parent user story's `subtasks`
+checklist field.
 
 ## Label taxonomy this node uses
 
+Reuses `crosstrainingapp`'s existing `type:user-story` / `type:subtask` /
+`status:definition` labels; adds the rest. Two labels are dual-purpose —
+same name, meaning depends on which issue type it's applied to:
+
 ```
-draft               PO is drafting with Gemini/Antigravity — not yet Architect's concern
-ready-for-architect  PO considers it ready — triggers the headless entry point
-needs-po-input       Architect escalated a conflict — PO must resolve, then re-tag ready-for-architect
-ready-for-review     Architect finished — hands off to Three Amigos (not built yet)
+status:definition        (existing) PO is drafting — not yet Architect's concern
+status:ready-for-architect  on type:user-story: PO considers the draft ready, run full refine+decompose
+                             on type:subtask: PO answered a needs-po-input escalation, incorporate it
+status:needs-po-input    Architect escalated a conflict — PO must resolve, then relabel status:ready-for-architect
+status:review            Architect created/updated this subtask — hands off to Three Amigos (not built yet)
 ```
+
+Full detail on the `type:user-story` / `type:subtask` templates being reused
+(and why subtasks get `status:review` instead of the template's own default
+`status:ready`) is in the top-level README's "Label taxonomy" section.
 
 ## Out of scope (do not build yet)
 
