@@ -1,5 +1,12 @@
 # Three Amigos Node (Readiness Gate)
 
+**Two interchangeable executors as of 2026-08-24** — the GitHub Actions
+implementation below, or an Antigravity scheduled task polling on a cron
+interval instead (added the day Gemini's free-tier daily quota was first
+exhausted mid-pipeline). Same responsibilities, same output contract, only
+one should be active at a time — see `docs/antigravity-scheduled-tasks.md`
+for the prompt, schedule, and the toggle between them.
+
 **Implemented and live-testing (2026-08-23)** —
 [`three-amigos.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/three-amigos.yml)
 in `crosstrainingapp`, merged via

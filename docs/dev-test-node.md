@@ -1,5 +1,14 @@
 # Dev & Test Node
 
+**Two interchangeable executors as of 2026-08-24** — the GitHub Actions
+implementation below, or an Antigravity scheduled task polling on a cron
+interval instead (added the same day, after this node's first automated run
+hit Gemini's free-tier daily quota exhaustion). Same responsibilities, same
+output contract, only one should be active at a time — see
+`docs/antigravity-scheduled-tasks.md` for the prompt, schedule, and the
+toggle between them, including the local-vs-CI `gradlew`/`gradlew.bat`
+distinction that flips direction for this executor.
+
 **Automated after all — reversed the same day, 2026-08-24.** Stayed manual
 for a few hours; the PO then decided PR Review had to become authoritative
 again (real GitHub review, gates the merge), and for the resulting
