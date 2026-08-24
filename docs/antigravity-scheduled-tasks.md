@@ -51,13 +51,43 @@ content for all three task files itself and staged them as a new 3-file diff
 a guess at the spec, not the spec — it must not be approved/merged; discard
 it and let the checkout sync properly instead.
 
-Fix: every prompt below now opens with an explicit
-`git fetch origin && git reset --hard origin/main` before referencing the
-instructions file at all, since that's the only step guaranteed to run
-before the file's existence is even checked. This assumes the task is never
-mid-implementation with uncommitted local changes worth keeping when a poll
-starts — true by design, since actual implementation work always happens on
-a fresh feature branch, never directly on `main`.
+Fix, attempt 1: put an explicit `git fetch origin && git reset --hard
+origin/main` in the inline prompt, before referencing the instructions
+file. This is what actually surfaced the real size of the Prompt field's
+limit — see the next section.
+
+## Third bug found via live testing: the Prompt field's real limit is ~60-70 characters, not "long"
+
+The attempt-1 fix above was itself truncated — live testing showed the
+prompt cut off at "First run: git checkout main && git fetch origin && git
+reset --hard" (68 characters), one word short of `origin/main`. The very
+first truncation (previous section) had cut at "This task covers both
+first-implementation and fix-up work for" (60 characters). Two independent
+data points in the same 60-70 character range — this field's actual limit
+is far smaller than "keep the prompt reasonably short" suggested; it can't
+fit both a sync command and a file reference no matter how tightly worded.
+
+The agent partially executed the truncated command (the sync succeeded —
+`git reset --hard` with no target defaults to `HEAD`, a no-op-equivalent
+sync-to-nothing that happened to still leave the checkout on `origin/main`
+from a manual reset moments earlier) and then stopped, since the rest of
+the prompt — the part telling it what to actually do — never arrived.
+
+**Fix, final: move the sync step out of the inline prompt entirely.** It's
+now step 0 inside each instructions file itself (see `.antigravity/tasks/`
+in `crosstrainingapp`) — self-healing on every run once the file is found,
+regardless of how stale the checkout was. The inline Prompt field is
+reduced to the bare minimum: `Run <path>`, nothing else. Filenames were
+also shortened (`three-amigos-scheduled.md` → `three-amigos.md`, etc.) to
+keep every inline prompt well under the ~60 character danger zone with
+margin to spare, since the exact limit still isn't confirmed precisely —
+only bounded to roughly that range by these two failures.
+
+This does mean the very first run against a stale/empty checkout could
+still fail to find the file and fall back to inventing one, exactly as
+before — that risk is now down to a single occurrence per checkout, not a
+recurring one, since every successful read from then on re-syncs itself
+before doing anything else.
 
 ## Both prompts start at the parent story, never at a subtask directly (2026-08-24)
 
@@ -169,17 +199,16 @@ redoing work it already did on a prior poll:
 | Schedule | Custom, `*/30 * * * *` (every 30 min — adjust to taste; nothing here is latency-sensitive) |
 | Type | Scheduled |
 
-Prompt (paste exactly — this is the whole Prompt field):
+Prompt (paste exactly — this is the whole Prompt field; keep it this short,
+see "Third bug" above):
 
 ```
-First run: git checkout main && git fetch origin && git reset --hard
-origin/main — to make sure this checkout is current before anything
-else. Then follow the instructions in
-.antigravity/tasks/three-amigos-scheduled.md in the crosstrainingapp
-repo root exactly. Read that file before doing anything else.
+Run .antigravity/tasks/three-amigos.md
 ```
 
-Full instructions: [`three-amigos-scheduled.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/three-amigos-scheduled.md).
+Full instructions: [`three-amigos.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/three-amigos.md)
+— its own step 0 re-syncs the checkout to `origin/main` before anything
+else, so the inline prompt doesn't need to.
 Summary: polls `type:user-story` + `status:review` issues, discovers
 subtasks only as children of the story being processed, batch-reviews them
 as a Product/Developer/QA panel, posts one verdict comment marked
@@ -204,18 +233,16 @@ which needed the non-`.bat` form. Same underlying gotcha, opposite
 direction — worth re-checking any time these instructions are copied
 elsewhere.
 
-Prompt (paste exactly — this is the whole Prompt field):
+Prompt (paste exactly — this is the whole Prompt field; keep it this short,
+see "Third bug" above):
 
 ```
-First run: git checkout main && git fetch origin && git reset --hard
-origin/main — to make sure this checkout is current before anything
-else. Then follow the instructions in
-.antigravity/tasks/dev-test-implement-scheduled.md in the
-crosstrainingapp repo root exactly. Read that file before doing anything
-else.
+Run .antigravity/tasks/dev-test-implement.md
 ```
 
-Full instructions: [`dev-test-implement-scheduled.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-implement-scheduled.md).
+Full instructions: [`dev-test-implement.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-implement.md)
+— its own step 0 re-syncs the checkout to `origin/main` before anything
+else, so the inline prompt doesn't need to.
 Summary: polls `type:user-story` + `status:ready` issues (the story's own
 label, never a subtask's), implements every subtask under it still labeled
 `status:awaiting-approval`, runs `.\gradlew.bat testDebugUnitTest` (up to 3
@@ -235,17 +262,16 @@ Never touches the story's own `status:ready` label.
 
 Same `.bat`-vs-CI note as Task 2 applies here.
 
-Prompt (paste exactly — this is the whole Prompt field):
+Prompt (paste exactly — this is the whole Prompt field; keep it this short,
+see "Third bug" above):
 
 ```
-First run: git checkout main && git fetch origin && git reset --hard
-origin/main — to make sure this checkout is current before anything
-else. Then follow the instructions in
-.antigravity/tasks/dev-test-fixup-scheduled.md in the crosstrainingapp
-repo root exactly. Read that file before doing anything else.
+Run .antigravity/tasks/dev-test-fixup.md
 ```
 
-Full instructions: [`dev-test-fixup-scheduled.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-fixup-scheduled.md).
+Full instructions: [`dev-test-fixup.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-fixup.md)
+— its own step 0 re-syncs the checkout to `origin/main` before anything
+else, so the inline prompt doesn't need to.
 Summary: polls stories for subtask PRs whose latest review is
 `CHANGES_REQUESTED`, skips any it already fixed since that review (checked
 by comparing commit/comment timestamps — the one part of this pipeline that
