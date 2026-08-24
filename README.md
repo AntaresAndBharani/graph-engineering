@@ -215,6 +215,13 @@ repo (4, not 3 — one was missing from the original plan):**
   than either credential-based fix, and consistent with how every other
   node in this pipeline already routes. See `docs/pr-review-node.md` for
   the full trail.
+- No node ever closed the *parent* story once all its subtasks finished —
+  each node closes/labels the one subtask/PR in front of it, and nothing
+  checked "was that the last one." Invisible until today's first real
+  multi-subtask story (#55) actually completed: all three subtasks
+  auto-closed via `Closes #N`, and #55 just sat there open. Fixed in
+  `merge.yml` (the moment a subtask finishes is the natural place to check)
+  — see `docs/merge-node.md`'s "Closing the parent story."
 
 ## Inter-agent communication principles
 

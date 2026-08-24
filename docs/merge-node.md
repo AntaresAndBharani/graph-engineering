@@ -2,10 +2,11 @@
 
 **Implemented and live (2026-08-24)** —
 [`merge.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/merge.yml)
-in `crosstrainingapp`, commit `82670a5` for the current trigger. Survived
-PR Review's advisory ↔ authoritative flip-flop untouched, but *did* need
-one change later the same day when PR Review dropped formal GitHub reviews
-entirely — see "Trigger moved from review state to a label" below.
+in `crosstrainingapp`, commit `25fc328` for the current version. Survived
+PR Review's advisory ↔ authoritative flip-flop untouched, needed one change
+when PR Review dropped formal GitHub reviews entirely (see "Trigger moved
+from review state to a label"), and gained a real second responsibility
+later the same day (see "Closing the parent story").
 
 - **Model:** none — fully deterministic, $0 cost.
 - **Trigger:** `pull_request: [labeled]` filtered to
@@ -14,7 +15,8 @@ entirely — see "Trigger moved from review state to a label" below.
   Review's authority reversal untouched — it only needed updating once the
   signal's shape changed (a label instead of a review state), not each time
   its origin changed (PO vs. Claude).
-- **Output:** the PR merged. Nothing else.
+- **Output:** the PR merged, and — if that was the last open subtask under
+  its parent story — the parent story closed too.
 
 ## Trigger moved from review state to a label (2026-08-24)
 
@@ -28,6 +30,33 @@ moved from `pull_request_review: [submitted]` + `review.state == approved`
 to `pull_request: [labeled]` + `label.name == 'review:approved'`. Nothing
 else about this node changed — still doesn't care who/what applied the
 label, same as it never cared who/what the prior review state came from.
+
+## Closing the parent story (2026-08-24)
+
+Found live, not designed ahead of time: story #55's three subtasks
+(#56/#57/#58) all merged and auto-closed via GitHub's own "Closes #N"
+handling — but the parent story itself stayed open forever. No node in
+this pipeline had ever checked "is this the last subtask, and should the
+story close too." Every other node reasons about the parent story
+explicitly (Three Amigos' batch review, Dev & Test's story-level
+`status:ready` gate); this was the one place that only ever looked at the
+single subtask/PR directly in front of it.
+
+Fixed here rather than as a new node, since this is the moment a subtask
+*finishes* — the natural place to ask "was it the last one." After
+merging: find the subtask the PR closes (`Closes #N` in the PR body, same
+convention used everywhere else), find that subtask's parent story (its
+own `### Parent user story` self-reference, via the new
+`find_parent_story.py` — the reverse direction of the existing
+`filter_subtasks_by_parent.py`, same regex, kept in sync on purpose), and
+check whether any `type:subtask` siblings are still open by reusing
+`filter_subtasks_by_parent.py` itself rather than re-deriving that
+parent-match logic a third time. If none are open, closes the story with a
+summary comment. Still fully deterministic — no model needed for any of
+this.
+
+Story #55 itself was closed manually with an explanatory comment, since it
+finished before this fix existed; every story from here on closes itself.
 
 ## What changed from the original design
 
@@ -47,6 +76,8 @@ review exists," regardless of who/what produces it:
 
 ```bash
 gh pr merge <pr_number> --auto --squash --delete-branch
+# Then: find the closed subtask, find its parent story, close the story
+# if no type:subtask siblings remain open under it (see above).
 ```
 
 `--auto` waits for required checks (the repo's own `build.yml`) to go green
@@ -64,7 +95,8 @@ judgment calls" principle used throughout.
 
 ## Terminal state
 
-This is the end of the graph for one requirement's issue(s). No loop-back
+This is the end of the graph for one subtask, and — once every sibling
+subtask is also done — for the parent story's issue(s) too. No loop-back
 edges — if something goes wrong here (merge conflict, `gh` failure), that's
 an infrastructure error to surface directly to the human, not something to
 retry against a model.
