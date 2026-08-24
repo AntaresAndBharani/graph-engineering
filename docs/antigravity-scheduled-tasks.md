@@ -30,6 +30,30 @@ definition-of-done, which the parent-first read grounds every action in —
 not just for Three Amigos' structural checks (split/merge/missing coverage),
 but for Dev & Test's actual implementation and fix-up work too.
 
+## The `status:ready` approval gate lives on the story here, not the subtask (2026-08-24)
+
+Pushed one level further than just discovery order: **the status label that
+actually authorizes implementation is checked on the parent
+`type:user-story` issue, never on a subtask.** Dev & Test's implementation
+poll below queries `type:user-story AND status:ready` — it never checks a
+subtask's own labels to decide whether to start work. This means Three
+Amigos' Antigravity prompt (Task 1) had to change too: on a `READY` batch
+verdict, it now adds `status:awaiting-approval` to the **story** itself (not
+only to each subtask, which it still does for per-subtask visibility), so
+the PO has one label to flip on the story — `status:awaiting-approval` →
+`status:ready` — to authorize the entire batch of subtasks underneath it at
+once, rather than relabeling every subtask individually.
+
+**This intentionally diverges from the GitHub Actions executor.**
+`dev-test.yml` (see `docs/dev-test-node.md`) still triggers off
+`status:ready` on an individual **subtask** — that design is unchanged and
+is what's actually live today. The two executors are not meant to run
+side by side with different subtasks approved through different labels; per
+the toggle above, only one executor is active per node at a time, so this
+divergence is safe as long as the PO knows which one is currently active and
+labels the right issue accordingly (**the story**, if Antigravity's Dev &
+Test task is the active one).
+
 ## Two executors, switchable at any time
 
 The GitHub Actions implementations (`three-amigos.yml`, `dev-test.yml`) are
@@ -76,9 +100,14 @@ redoing work it already did on a prior poll:
 - **Three Amigos** — naturally idempotent. Once a story's `status:review`
   label is removed (by the promotion or escalation step), it stops matching
   the query on the next poll. No extra bookkeeping needed.
-- **Dev & Test, implementation work** — naturally idempotent the same way:
-  `status:ready` is removed from a subtask the moment it's picked up, so a
-  story with no more ready subtasks stops producing new work on the next poll.
+- **Dev & Test, implementation work** — naturally idempotent, though the
+  mechanism is one level removed since the gate is on the story: a subtask's
+  `status:awaiting-approval` is removed the moment it's picked up, so once
+  every subtask under a `status:ready` story has moved past that label, the
+  story keeps matching the poll but there's nothing left under it to act on.
+  `status:ready` is deliberately never removed from the story itself — no
+  need, since a story with zero `status:awaiting-approval` subtasks left is
+  already a no-op every subsequent poll.
 - **Dev & Test, fix-up work — not naturally idempotent.** A PR's review stays
   `CHANGES_REQUESTED` until PR Review (Claude, on GitHub Actions, unchanged)
   re-reviews it on the next `synchronize` event — which won't happen until
@@ -146,8 +175,11 @@ For each matching story:
 7. Apply labels based on batch_verdict:
    - READY: on every subtask, remove whichever of status:pending-review,
      status:review, status:needs-revision, status:needs-clarification is
-     currently present, then add status:awaiting-approval. Then remove
-     status:review from the story issue.
+     currently present, then add status:awaiting-approval. Then, on the
+     STORY issue itself, remove status:review and add
+     status:awaiting-approval too — this is the label the PO will change
+     to status:ready to authorize the whole batch of subtasks at once.
+     Do not add status:ready anywhere yourself; only the PO applies that.
    - NEEDS_REVISION: remove status:review from the story, add
      status:needs-revision.
    - NEEDS_CLARIFICATION: remove status:review from the story, add
@@ -185,13 +217,18 @@ PRs directly as your starting point; only ever reach a subtask or its PR
 by discovering it as a child of the parent story you are currently
 processing.
 
-A. New implementation work — for each open issue labeled type:user-story:
+A. New implementation work — for each open issue labeled type:user-story
+AND status:ready. Check status:ready on the STORY only — this is the
+label that authorizes implementation; never check a subtask's own labels
+to decide whether to start work on it.
 1. Read the parent story's full title, body, and acceptance criteria for
    context (overall business intent, definition of done).
 2. Find its subtasks (issues labeled type:subtask whose body references
-   this story as parent, via "Parent User Story #N") that are labeled
-   status:ready. If none, skip this story.
-3. For each ready subtask found:
+   this story as parent, via "Parent User Story #N") that are still
+   labeled status:awaiting-approval — meaning Three Amigos batch-approved
+   them but they have not been implemented yet. If none, skip this
+   story; everything under it is already implemented or in progress.
+3. For each such subtask:
    a. Create branch feat/issue-<N> from the latest main.
    b. Implement the change described in the subtask's task description,
       entry points, and acceptance criteria — grounded in the parent
@@ -207,10 +244,12 @@ A. New implementation work — for each open issue labeled type:user-story:
       titled after the subtask (strip any "[Subtask]: " prefix), with a
       body containing what changed, the actual test result summary (not
       just "tests pass"), a link back to the parent story, and
-      "Closes #<N>". Then remove status:ready and add status:in-progress
-      on the subtask.
+      "Closes #<N>". Then remove status:awaiting-approval and add
+      status:in-progress on the subtask. Do not touch the story's own
+      status:ready label — leave it as-is so any other subtasks under
+      the same story keep getting picked up on later polls.
    e. If still failing after 3 attempts, or you hit a decision only the
-      PO can make: do not open a PR. Remove status:ready, add
+      PO can make: do not open a PR. Remove status:awaiting-approval, add
       status:needs-po-input, and comment on the subtask explaining what's
       blocking it.
 
