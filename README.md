@@ -196,19 +196,25 @@ repo (4, not 3 — one was missing from the original plan):**
   reviewing identity is the same one that opened the PR
   (`Can not request changes on your own pull request`) — and
   `ORCHESTRATION_PAT` is exactly that identity, since `dev-test.yml` uses
-  it to open every PR too. This is a structural conflict, not a transient
-  one: it broke on all three PRs open at the time (#59/#60/#62), the first
-  time this code path ever ran end-to-end (the real `gh pr review` call was
-  only added during the 2026-08-24 authority reversal — the earlier
-  advisory-only version just posted a comment, which has no such
-  restriction). Fixed by submitting the review as Claude's own GitHub App
-  identity instead of the PAT — `claude-code-action` exposes its
-  installation token via `outputs.github_token` for exactly this kind of
-  reuse — applied narrowly to just the `gh pr review` call itself, not the
-  whole step, so everything else (comments, follow-up issue filing) keeps
-  using `ORCHESTRATION_PAT` as before. Any future node where the same
-  identity both produces *and* reviews/approves something should expect
-  this same restriction.
+  it to open every PR too. Not a permissions issue — admin rights on the
+  same account don't bypass it. Structural, not transient: broke on all
+  three PRs open at the time (#59/#60/#62), the first time this code path
+  ever ran end-to-end (the real `gh pr review` call was only added during
+  the 2026-08-24 authority reversal). First fix attempt — submit the
+  review as Claude's own GitHub App identity via `claude-code-action`'s
+  `outputs.github_token` — looked right but didn't survive contact: the
+  action revokes that token as part of its own step's cleanup, before a
+  later step can reuse it (`HTTP 401: Bad credentials`, token confirmed
+  non-empty and correctly captured). **Actual fix: drop formal GitHub
+  review state entirely.** A plain `gh pr comment` has no identity
+  restriction at all, so `pr-review.yml` now posts the verdict as a marked
+  comment (`<!-- pr-review-verdict -->`, same pattern `three-amigos.yml`
+  already used) plus a `review:approved`/`review:changes-requested` label
+  — which is what `merge.yml` and `dev-test.yml`'s fix-up trigger actually
+  key off (`pull_request: [labeled]`, not `pull_request_review`). Simpler
+  than either credential-based fix, and consistent with how every other
+  node in this pipeline already routes. See `docs/pr-review-node.md` for
+  the full trail.
 
 ## Inter-agent communication principles
 
@@ -335,7 +341,18 @@ status:needs-clarification   Three Amigos has a targeted doubt — Architect tri
 status:awaiting-approval     Three Amigos returned READY — sitting at the PO approval gate
 status:ready                 (existing) PO said go — triggers Dev & Test (currently: pick it up in Antigravity)
 status:in-progress            (existing) someone's actively implementing it
+
+review:approved               PR Review verdict, on the PR itself — triggers Merge & Backlog
+review:changes-requested      PR Review verdict, on the PR itself — triggers Dev & Test's fix-up pass
 ```
+
+`review:approved`/`review:changes-requested` are PR-level, not issue-level
+— added 2026-08-24 when `pr-review.yml` moved off formal GitHub reviews
+(`gh pr review --approve`/`--request-changes`), which GitHub blocks when
+the reviewer and PR-author identity are the same account, always true here
+since `ORCHESTRATION_PAT` opens every PR too. See
+`docs/pr-review-node.md`'s "Real `gh pr review` needed a different identity
+than the PAT" for the full debugging trail.
 
 These need to actually exist as labels on the target repo before any
 `issues: [labeled]` trigger can fire — a setup step (create the six new

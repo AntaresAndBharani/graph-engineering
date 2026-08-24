@@ -2,20 +2,32 @@
 
 **Implemented and live (2026-08-24)** —
 [`merge.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/merge.yml)
-in `crosstrainingapp`, commit `620f261`, unmodified through PR Review's
-back-and-forth on authority the same day — this node genuinely never
-needed to change. Simpler than originally designed — see "What changed"
-below.
+in `crosstrainingapp`, commit `82670a5` for the current trigger. Survived
+PR Review's advisory ↔ authoritative flip-flop untouched, but *did* need
+one change later the same day when PR Review dropped formal GitHub reviews
+entirely — see "Trigger moved from review state to a label" below.
 
 - **Model:** none — fully deterministic, $0 cost.
-- **Trigger:** `pull_request_review: [submitted]` filtered to
-  `review.state == 'approved'`. As of `docs/pr-review-node.md`'s reversal
-  back to authoritative, this fires from **Claude's own automated
-  approval** — the same trigger condition that briefly meant "the PO's own
-  approval" for a few hours earlier the same day. This node was written
-  not to care which one it is, which is exactly why it didn't need
-  touching either time PR Review's authority changed.
+- **Trigger:** `pull_request: [labeled]` filtered to
+  `label.name == 'review:approved'`. This node was written not to care
+  *who or what* produces that signal, which is exactly why it survived PR
+  Review's authority reversal untouched — it only needed updating once the
+  signal's shape changed (a label instead of a review state), not each time
+  its origin changed (PO vs. Claude).
 - **Output:** the PR merged. Nothing else.
+
+## Trigger moved from review state to a label (2026-08-24)
+
+`pr-review.yml` dropped `gh pr review --approve`/`--request-changes`
+entirely — GitHub blocks a formal review from the same identity that
+opened the PR, which `ORCHESTRATION_PAT` always is here (see
+`docs/pr-review-node.md`'s "Real `gh pr review` needed a different identity
+than the PAT" for the full debugging trail). It now applies a
+`review:approved` label instead of a review state, so this node's trigger
+moved from `pull_request_review: [submitted]` + `review.state == approved`
+to `pull_request: [labeled]` + `label.name == 'review:approved'`. Nothing
+else about this node changed — still doesn't care who/what applied the
+label, same as it never cared who/what the prior review state came from.
 
 ## What changed from the original design
 

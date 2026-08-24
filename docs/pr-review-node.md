@@ -2,9 +2,11 @@
 
 **Implemented and live, authoritative (2026-08-24)** —
 [`pr-review.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/pr-review.yml)
-in `crosstrainingapp`, commit `81d9903`. **Went advisory-only for a few
-hours the same day, then reversed back** — see "Authority, reversed twice
-in one day" below for why, kept as the reasoning trail rather than erased.
+in `crosstrainingapp`, commit `82670a5` for the current design. Went through
+three shapes in one day — advisory-only, then a real GitHub review, then
+comment + label — see "Authority, reversed twice in one day" and "Real `gh
+pr review` needed a different identity than the PAT" below for the full
+trail, kept rather than erased.
 
 - **Model:** Claude Opus, via `anthropics/claude-code-action` authenticated
   with `CLAUDE_CODE_OAUTH_TOKEN` (subscription-based billing, not
@@ -12,9 +14,12 @@ in one day" below for why, kept as the reasoning trail rather than erased.
   free-tier status".
 - **Trigger:** `pull_request: [opened, synchronize]` — a PR opened by the
   now-automated Dev & Test node (`docs/dev-test-node.md`), not a human.
-- **Output:** a real GitHub review — `gh pr review --approve` /
-  `--request-changes` — whose state is what `docs/merge-node.md` actually
-  triggers on.
+- **Output:** a PR comment carrying the verdict (marked with
+  `<!-- pr-review-verdict -->`) plus a `review:approved` /
+  `review:changes-requested` label — **not** a formal GitHub review state.
+  That label is what `docs/merge-node.md` and Dev & Test's fix-up trigger
+  actually key off. See "Real `gh pr review` needed a different identity
+  than the PAT" for why a formal review isn't used.
 
 ## Authority, reversed twice in one day
 
@@ -30,10 +35,11 @@ in one day" below for why, kept as the reasoning trail rather than erased.
    Dev & Test off "stays manual" too (`docs/dev-test-node.md`) — the two
    decisions weren't separable once the loop needed to close on its own.
 
-Current behavior matches the original design: `verdict` drives a real
-`gh pr review`, `CHANGES_REQUESTED` triggers Dev & Test's fix-up pass (now
-automated), capped at 3 rounds (counted from prior `CHANGES_REQUESTED`
-reviews on the PR, checked before `pr-review.yml` runs Claude again).
+Current behavior matches the *intent* of the original design — `verdict`
+gates the merge for real, `CHANGES_REQUESTED` triggers Dev & Test's fix-up
+pass (now automated) — but not its literal mechanism. See the next section:
+the actual gate ended up being a label, not a formal GitHub review, because
+the review call itself turned out to be structurally impossible here.
 
 ## Real `gh pr review` needed a different identity than the PAT (2026-08-24)
 
@@ -58,26 +64,29 @@ review verdict" step tried to reuse it, even though the token was captured
 correctly (non-empty, properly masked as a secret in the logs). The token
 genuinely does not survive past the step boundary it was minted in.
 
-**Real fix needs a credential independent of Claude's own action
-lifecycle**, not a reused one. Two live options, both requiring something
-outside this workflow file:
-1. Let Claude submit the review itself, inside its own step (before its
-   token is revoked) — needs `Bash` added to `allowedTools`, since there's
-   no first-class "submit a formal review" tool in `claude-code-action`
-   (confirmed: it natively posts comments, not `APPROVE`/`REQUEST_CHANGES`
-   review state). Tradeoff: broadens what an LLM reading untrusted PR
-   content can directly execute in headless CI on a public repo — a real
-   injection-surface increase, not just a config tweak.
-2. A dedicated credential for review-submission specifically, independent
-   of `ORCHESTRATION_PAT` (still tied to the PR-author identity) and of
-   Claude's transient token — either a second PAT from a genuinely
-   different GitHub account, or a proper custom GitHub App installed just
-   for this. Keeps the existing "LLM writes structured output, a reviewed
-   script performs the privileged action" boundary intact, at the cost of
-   needing that separate identity actually created and installed.
+A credential-based fix needs something independent of Claude's own action
+lifecycle, not a reused one — two options existed (let Claude call `gh pr
+review` itself from inside its own step, which needs `Bash` added to
+`allowedTools` and broadens what an LLM reading untrusted PR content can
+execute; or a dedicated second identity — bot PAT or GitHub App — just for
+review-submission, which needs that identity actually created first).
 
-Not resolved yet — needs a decision on which path before implementing
-further, rather than another speculative attempt.
+**Resolved differently: drop the formal review requirement entirely.**
+The PO's call — since a plain `gh pr comment` has no identity restriction
+at all (anyone, including the PR author, can comment on their own PR), and
+this pipeline already routes everything else through labels, there was no
+real reason to fight GitHub's review-identity rule instead of just not
+using GitHub reviews. `pr-review.yml` now posts the verdict as a comment
+(prefixed with `<!-- pr-review-verdict -->`, same marker pattern
+`three-amigos.yml` already used for its own round-counting) and applies
+`review:approved` or `review:changes-requested` as a label — removing
+whichever of the two was present from a prior round first, same
+"remove every plausible prior label" lesson as the `status:awaiting-approval`
+promotion bug from earlier the same day. `docs/merge-node.md` and Dev &
+Test's fix-up trigger (`docs/dev-test-node.md`) both moved from
+`pull_request_review` events to `pull_request: [labeled]` on these two
+labels. Neither the Bash-in-allowedTools nor the second-identity option
+was needed in the end.
 
 ## The PR comment thread is the state
 
@@ -106,7 +115,7 @@ checkpointed record.
 {
   "verdict": "APPROVED | CHANGES_REQUESTED",
   "summary": "string",
-  "pr_review_markdown": "string — posted directly as the GitHub PR review body",
+  "pr_comment_markdown": "string — posted directly as the PR comment body",
   "blocking_issues": [
     { "file": "string", "issue": "string", "suggested_fix": "string" }
   ],
@@ -120,22 +129,28 @@ checkpointed record.
 
 ```bash
 gh pr diff <pr_number>
-gh pr review <pr_number> --approve -b "<pr_review_markdown>"       # verdict = APPROVED
-gh pr review <pr_number> --request-changes -b "<pr_review_markdown>"  # verdict = CHANGES_REQUESTED
+# Remove whichever prior verdict label is present, post the comment, add the new label:
+gh pr edit <pr_number> --remove-label "review:approved"
+gh pr edit <pr_number> --remove-label "review:changes-requested"
+gh pr comment <pr_number> --body-file <comment_with_marker>
+gh pr edit <pr_number> --add-label "review:approved"            # verdict = APPROVED
+gh pr edit <pr_number> --add-label "review:changes-requested"   # verdict = CHANGES_REQUESTED
 ```
 
 ## Routing & iteration cap
 
 ```
-CHANGES_REQUESTED -> Dev & Test node (fix-up pass, automated) -> PR Review (re-check via synchronize)
-APPROVED           -> Merge & Backlog node
+review:changes-requested -> Dev & Test node (fix-up pass, automated) -> PR Review (re-check via synchronize)
+review:approved           -> Merge & Backlog node
 ```
 
 Both edges fire automatically now (`docs/dev-test-node.md`,
-`docs/merge-node.md`). Capped at 3 review/fix rounds — counted from prior
-`CHANGES_REQUESTED` reviews on the PR (`gh pr view --json reviews`),
-checked before running Claude again on a `synchronize` event. At the cap,
-this node posts an escalation comment instead of reviewing again, and
-simply doesn't produce another review — since nothing merges without an
-`APPROVED` review, that alone is enough to stop the loop without needing a
+`docs/merge-node.md`), triggered by `pull_request: [labeled]` on these two
+labels rather than `pull_request_review` events. Capped at 3 review/fix
+rounds — counted from prior comments on the PR starting with
+`<!-- pr-review-verdict -->` and containing `CHANGES_REQUESTED`, checked
+before running Claude again on a `synchronize` event. At the cap, this node
+posts an escalation comment instead of reviewing again, and simply doesn't
+apply another verdict label — since nothing merges without
+`review:approved`, that alone is enough to stop the loop without needing a
 separate blocking state.

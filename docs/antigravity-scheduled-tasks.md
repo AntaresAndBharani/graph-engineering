@@ -37,8 +37,9 @@ pipeline.
 
 **Also split Dev & Test into two tasks** (Implement / Fix-up) instead of one
 combined prompt — shorter per task, and matches its two distinct GitHub
-Actions trigger modes (`issues: labeled` vs `pull_request_review:
-submitted`) rather than asking one prompt to branch between them itself.
+Actions trigger modes (`issues: labeled` vs `pull_request: labeled` on
+`review:changes-requested`) rather than asking one prompt to branch between
+them itself.
 
 ## Second bug found via live testing: the local checkout wasn't synced
 
@@ -226,8 +227,8 @@ long-term answer rather than a workaround.
 ## Known gap: polling has no event to key off of
 
 The GitHub Actions versions are triggered by a specific event
-(`issues: labeled`, `pull_request_review: submitted`) — by construction they
-run exactly once per event. A scheduled task instead re-scans GitHub state
+(`issues: labeled`, `pull_request: labeled`) — by construction they run
+exactly once per event. A scheduled task instead re-scans GitHub state
 from scratch every N minutes, so each prompt below has to explicitly avoid
 redoing work it already did on a prior poll:
 
@@ -242,13 +243,15 @@ redoing work it already did on a prior poll:
   `status:ready` is deliberately never removed from the story itself — no
   need, since a story with zero `status:awaiting-approval` subtasks left is
   already a no-op every subsequent poll.
-- **Dev & Test, fix-up work — not naturally idempotent.** A PR's review stays
-  `CHANGES_REQUESTED` until PR Review (Claude, on GitHub Actions, unchanged)
-  re-reviews it on the next `synchronize` event — which won't happen until
-  *after* a fix is pushed. Every poll in between would otherwise see the same
-  "this story has a subtask PR that needs a fix" state and redo it. The
-  prompt below explicitly checks for a commit/comment already posted after
-  the triggering review's timestamp before acting, to close this gap.
+- **Dev & Test, fix-up work — also naturally idempotent, as of PR Review's
+  2026-08-24 move off formal GitHub reviews.** The old design here had this
+  as the one non-idempotent case (a review's `CHANGES_REQUESTED` state
+  persists until the *next* review, so every poll in between would see the
+  same "needs a fix" state and redo it). Since PR Review now applies
+  `review:changes-requested` as a label instead, and this prompt removes
+  that label the moment it pushes a fix (see Task 3 below), the same
+  remove-on-pickup pattern as the other two tasks applies here too — no
+  timestamp bookkeeping needed anymore.
 
 ## Task 1 — Three Amigos
 
@@ -333,12 +336,10 @@ Run .antigravity/tasks/dev-test-fixup.md
 Full instructions: [`dev-test-fixup.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-fixup.md)
 — its own step 0 re-syncs the checkout to `origin/main` before anything
 else, so the inline prompt doesn't need to.
-Summary: polls stories for subtask PRs whose latest review is
-`CHANGES_REQUESTED`, skips any it already fixed since that review (checked
-by comparing commit/comment timestamps — the one part of this pipeline that
-isn't naturally idempotent under polling, see below), addresses the
-blocking issues, re-runs tests, and pushes a fix or comments on what's
-still blocking.
+Summary: polls stories for subtask PRs labeled `review:changes-requested`,
+reads the blocking issues from PR Review's latest comment, addresses them,
+re-runs tests, and pushes a fix (removing the label) or comments on what's
+still blocking (leaving it in place).
 
 ## What this doesn't change
 

@@ -24,8 +24,12 @@ being built, unlike every other node in this repo.
 
 - **Two triggers, one workflow:** `status:ready` on a `type:subtask`
   (first pass — the PO's own approval-gate relabel, unchanged) fires
-  `implement` mode; `pull_request_review` with `state: changes_requested`
-  fires `fixup` mode.
+  `implement` mode; a PR labeled `review:changes-requested` fires `fixup`
+  mode. That label replaced a `pull_request_review` (`state:
+  changes_requested`) trigger later the same day, once `pr-review.yml`
+  dropped formal GitHub reviews entirely — see
+  `docs/pr-review-node.md`'s "Real `gh pr review` needed a different
+  identity than the PAT" for why.
 - **Gemini runs its own implement→test→fix loop internally**, capped at 3
   attempts by the prompt (`docs/dev-test-node.md`'s own copy of the
   original design still describes the fields; the actual prompts live in
@@ -49,8 +53,8 @@ being built, unlike every other node in this repo.
   README's "Claude & Gemini auth / free-tier status").
 - **Trigger:** an issue labeled `status:ready` (the *existing* label in
   `crosstrainingapp`, reused as the final PO go-ahead — not a new label),
-  **or** a PR with PR-Review verdict `CHANGES_REQUESTED` (this node handles
-  both first implementation and fix-up passes — same actor, same
+  **or** a PR labeled `review:changes-requested` by PR Review (this node
+  handles both first implementation and fix-up passes — same actor, same
   responsibility). `status:ready` is applied by the **PO**, not
   automatically by Three Amigos' `READY` verdict — see
   `docs/three-amigos-node.md` "Routing" (2026-08-23 revision): `READY` lands
@@ -103,9 +107,10 @@ Per the "Interaction design for nodes 2 & 4" section in the top-level README,
 this node does **not** get a private channel back to the PR Reviewer. The
 GitHub PR comment thread is the shared artifact both sides read and write:
 
-- Read the reviewer's `blocking_issues` (from the PR Reviewer's structured
-  JSON output — see `docs/pr-review-node.md`) via `gh pr view --comments` or
-  the review body itself.
+- Read the reviewer's `blocking_issues` from its latest PR comment starting
+  with `<!-- pr-review-verdict -->` (`gh pr view --json comments`) — PR
+  Review posts its verdict as a comment now, not a formal review body; see
+  `docs/pr-review-node.md`.
 - Push a fix commit addressing each blocking item, and reply in the PR
   thread referencing what changed.
 - **Never set the review/merge-readiness verdict itself.** This node can say
