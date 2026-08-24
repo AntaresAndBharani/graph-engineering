@@ -125,11 +125,30 @@ entirely rather than just relocate it:
 `crosstrainingapp#61` and the `pipeline:locked` label were closed/deleted
 rather than left dangling once the mechanism was gone.
 
-**Known gap, accepted for now:** this doesn't protect against the *same*
+### Gap found immediately after: the open-PR check has a blind spot before the PR exists
+
+The open-PR check only covers the window *after* a PR has been opened. A
+story can sit mid-implementation for a while before that — branch created,
+files being edited, no PR yet — during which a second poll could pick a
+*different* story and both would mutate the same working tree, exactly the
+race the whole design exists to prevent. The PR-existence check alone
+can't see that window at all.
+
+Fix: `status:in-development` on the parent story, set by Implement the
+moment it commits to a story (before any git command runs), cleared once
+every subtask found in that pass has been attempted — PR opened or
+escalated, doesn't matter which. Implement's step 0 now checks *both*
+signals before starting anything: no open PR, **and** no story currently
+labeled `status:in-development`. The PR-existence check still governs
+everything after a PR opens exactly as before; this only closes the gap
+before one exists.
+
+**Known gap, accepted for now:** neither fix protects against the *same*
 task's own poll overlapping itself — e.g. an Implement run still mid-fix
-when the next poll fires 30 minutes later, before it's pushed anything.
-Not addressed yet; revisit if it actually happens (single-subtask Gemini
-passes are expected to finish well inside 30 minutes in practice).
+on one story when its own next poll fires 30 minutes later, before either
+the PR or the `status:in-development` label reflects that. Not addressed
+yet; revisit if it actually happens (single-subtask Gemini passes are
+expected to finish well inside 30 minutes in practice).
 
 ## Both prompts start at the parent story, never at a subtask directly (2026-08-24)
 
