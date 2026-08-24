@@ -2,22 +2,25 @@
 
 **Implemented and live (2026-08-24)** —
 [`merge.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/merge.yml)
-in `crosstrainingapp`, commit `620f261`. Simpler than originally designed —
-see "What changed" below.
+in `crosstrainingapp`, commit `620f261`, unmodified through PR Review's
+back-and-forth on authority the same day — this node genuinely never
+needed to change. Simpler than originally designed — see "What changed"
+below.
 
 - **Model:** none — fully deterministic, $0 cost.
 - **Trigger:** `pull_request_review: [submitted]` filtered to
-  `review.state == 'approved'` — **the PO's own GitHub PR approval**, not
-  PR Review's `verdict` (see `docs/pr-review-node.md` "Advisory, not
-  authoritative" — that node has no GitHub review state to trigger off of
-  at all).
+  `review.state == 'approved'`. As of `docs/pr-review-node.md`'s reversal
+  back to authoritative, this fires from **Claude's own automated
+  approval** — the same trigger condition that briefly meant "the PO's own
+  approval" for a few hours earlier the same day. This node was written
+  not to care which one it is, which is exactly why it didn't need
+  touching either time PR Review's authority changed.
 - **Output:** the PR merged. Nothing else.
 
 ## What changed from the original design
 
-Two simplifications, both because the trigger changed from "an automated
-verdict" to "the PO clicked approve" — at that point there's nothing left
-to decide:
+Two simplifications, both because merging only ever needed "an APPROVED
+review exists," regardless of who/what produces it:
 
 - **No backlog-issue creation here.** PR Review already files
   `followup_backlog_issues` immediately when it runs (see

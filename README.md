@@ -18,10 +18,12 @@ extends that rather than inventing a parallel one — label names below are
 taxonomy" further down for the full mapping.
 
 **Full pipeline built and live as of 2026-08-24** (`crosstrainingapp`
-commits `2be624e`, `620f261`) — with two scope decisions made at build time
-that changed the shape below from the original design, both driven by the
-PO wanting to stay hands-on at specific points. Details in "What changed
-from the original design during implementation" further down.
+commits through `81d9903`) — including a same-day scope reversal: PR
+Review and Dev & Test briefly went advisory/manual, then came back
+authoritative/automated within hours once the PO decided the loop between
+them needed to run without a human in it. Details in "What changed from
+the original design during implementation" further down — kept as the
+reasoning trail, not silently overwritten.
 
 ```
 [PO: you + Gemini/Antigravity draft a type:user-story]   (manual, external — not a graph node)
@@ -34,16 +36,13 @@ from the original design during implementation" further down.
         |  READY -> every subtask -> status:awaiting-approval
         v
 [PO APPROVAL GATE — status:awaiting-approval]      (manual checkpoint, not automated)
-        |  PO relabels status:ready (the EXISTING label — no new one needed;
-        |  this already triggers the interactive Antigravity Developer/Tester setup)
+        |  PO relabels status:ready (the EXISTING label — no new one needed)
         v
-3. Dev & Test               (manual by design — PO's choice, see below)
-        |  PO opens a PR
-        v
-4. PR Review                 (advisory — posts a comment, never approves/blocks)
-        |  PO reviews the diff + Claude's comment, approves via GitHub's own PR review
-        v
-5. Merge & Backlog           (triggered by the PO's approval, not Claude's verdict)
+3. Dev & Test  <--(CHANGES_REQUESTED, automated fix-up)--  4. PR Review
+        |  opens PR                                             |  APPROVED
+        |------------------------------------------------------->
+                                                                  v
+                                                     5. Merge & Backlog
 ```
 
 | # | Node | Role | Model tier |
@@ -51,37 +50,39 @@ from the original design during implementation" further down.
 | — | PO drafting | You + Gemini/Antigravity draft the User Story. Manual, external to the automated graph. | Gemini/Antigravity (subscription) |
 | 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose/restructure a whole subtask batch — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
 | 2 | Three Amigos | Batch readiness gate — reviews every subtask for a story together, can flag splits/merges/coverage gaps a single-subtask view would miss | Gemini 3.7 Flash (High) |
-| — | PO approval gate | Human checkpoint: nothing gets implemented until the PO explicitly says go, even after Three Amigos returns `READY`. Manual, not automated. | — |
-| 3 | Dev & Test | Implement the subtask, run local tests, open the PR — **manual by design**, the existing interactive `.antigravity` Developer/Tester flow | (n/a — human + Antigravity) |
-| 4 | PR Review | Advisory first-pass review of the diff — posts a comment, never approves/blocks | Claude Opus |
-| 5 | Merge & Backlog | `gh pr merge`, triggered by the PO's own GitHub approval | Deterministic ($0) |
+| — | PO approval gate | Human checkpoint: nothing gets implemented until the PO explicitly says go, even after Three Amigos returns `READY`. Manual, not automated — the one PO touchpoint left in the whole pipeline. | — |
+| 3 | Dev & Test | Implement the subtask, run the real test suite, open the PR — first pass and `CHANGES_REQUESTED` fix-up alike | Gemini 3.7 Flash (High) |
+| 4 | PR Review | Authoritative — real GitHub review (approve/request-changes), gates the merge | Claude Opus |
+| 5 | Merge & Backlog | `gh pr merge`, triggered by PR Review's own approval | Deterministic ($0) |
 
 Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
-points). **Gemini handles the batch readiness gate** (node 2). Node 5 is plain
-`gh` CLI, no model involved. The PO drafting step and approval gate are
-deliberately unnumbered — they're human checkpoints, not automated graph
-nodes, per "Add a node only when it demonstrably needs one" below.
+points). **Gemini handles the batch readiness gate and implementation** (nodes
+2 & 3). Node 5 is plain `gh` CLI, no model involved. The PO drafting step and
+approval gate are deliberately unnumbered — they're the only human
+checkpoints left, not automated graph nodes, per "Add a node only when it
+demonstrably needs one" below.
 
 ## What changed from the original design during implementation
 
-Two deliberate scope decisions, made 2026-08-24 while building nodes 3–5,
-after nodes 1–2 were already live and tested:
+Two rounds of the same scope question, both 2026-08-24:
 
-1. **Dev & Test stays manual, permanently, not just "not built yet."** The
-   PO wants to keep implementing via the existing interactive `.antigravity`
-   Developer/Tester setup. PR Review reacts to whatever PR shows up
-   regardless of who/what opened it, so nothing downstream needed to change
-   for this — it was never coupled to Dev & Test being automated.
-2. **PR Review became advisory, not authoritative.** The original design
-   (still described in `docs/pr-review-node.md`'s early sections, kept for
-   the reasoning trail) had Claude's `verdict` gate the merge. The PO wants
-   to review and approve every PR themselves via GitHub's native review
-   flow. So PR Review now posts a plain comment and nothing else, and
-   Merge & Backlog triggers on the PO's own `pull_request_review: approved`
-   event, not on Claude's verdict. The CHANGES_REQUESTED → Dev & Test →
-   re-check loop from the original design exists in the prompt/schema but
-   doesn't actually drive automation — see `docs/pr-review-node.md`
-   "Advisory, not authoritative" for the full reasoning.
+1. **First pass:** Dev & Test stayed manual (existing interactive
+   `.antigravity` flow) and PR Review became advisory (plain comment, PO's
+   own approval gated the merge) — the PO wanted to stay hands-on at the
+   implementation and PR-approval steps specifically.
+2. **Reversed within hours:** the PO decided PR Review had to be
+   authoritative again, and pointed out this couldn't work halfway — an
+   automated Opus↔Gemini review/fix loop isn't a loop if a human has to
+   sit in the middle of it. So Dev & Test became fully automated too (both
+   the first implementation pass and the `CHANGES_REQUESTED` fix-up),
+   closing the loop end-to-end. The one PO touchpoint that survived both
+   rounds unchanged: the `status:awaiting-approval` → `status:ready`
+   approval gate after Three Amigos — that's still manual, still
+   deliberate, never on the table.
+
+Both docs (`docs/pr-review-node.md`, `docs/dev-test-node.md`) keep the
+full back-and-forth as a reasoning trail rather than just reflecting the
+final state — useful if this ever needs reconsidering a third time.
 
 Nodes 2 & 3 moved from Gemini 3.1 Pro to **Gemini 3.7 Flash with High thinking
 effort** (2026-08-22) specifically to stay on Google AI Studio's free API
@@ -93,20 +94,22 @@ below for why, and the caveats that come with it.
 > **All five nodes are implemented and live in `crosstrainingapp`** as of
 > 2026-08-24 — Architect + Three Amigos
 > ([PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54),
-> then redesigned as a batch review in commit `2be624e`), PR Review + Merge
-> & Backlog (commit `620f261`). Dev & Test is the one exception, and
-> deliberately so — see "What changed from the original design during
-> implementation" above; it stays the existing manual `.antigravity` flow
-> by the PO's explicit choice, not an oversight. See "Implementation
-> lessons from live testing" below for what real-world testing surfaced.
+> then redesigned as a batch review in commit `2be624e`), PR Review, Dev &
+> Test, and Merge & Backlog all automated and authoritative as of commit
+> `81d9903`. The **only** remaining manual step is the PO approval gate
+> after Three Amigos — everything else, including PR review and the
+> resulting fix-up loop, runs unattended. See "What changed from the
+> original design during implementation" above for the same-day reversal,
+> and "Implementation lessons from live testing" below for what real-world
+> testing surfaced.
 
 Per-node specs:
 
 - [`docs/definition-node.md`](docs/definition-node.md) — Architect (**implemented, live**): PO drafting input, interactive vs. headless entry points, batch decompose/restructure/answer-clarifications modes, PO-escalation, issue schema, prompt templates.
 - [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (**implemented, live**): batch readiness gate across a whole story's subtasks, structural split/merge/gap detection, PO approval gate after `READY`.
-- [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (**deliberately manual**, not automated — the PO's choice, not a gap): the existing interactive Antigravity Developer/Tester flow.
-- [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (**implemented, live**): advisory-only review comment, blocking vs. follow-up split, does not gate the merge.
-- [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (**implemented, live**): deterministic merge triggered by the PO's own PR approval.
+- [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (**implemented, live**): automated implementation + test pass, and the automated fix-up response to PR Review's `CHANGES_REQUESTED`.
+- [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (**implemented, live, authoritative**): real GitHub review, gates the merge, drives the fix-up loop.
+- [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (**implemented, live**): deterministic merge triggered by PR Review's own approval.
 
 ## Implementation lessons from live testing (crosstrainingapp)
 

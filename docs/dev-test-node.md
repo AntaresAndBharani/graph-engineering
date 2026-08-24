@@ -1,13 +1,39 @@
 # Dev & Test Node
 
-**Deliberately staying manual — decided 2026-08-24, not just "not built
-yet."** With Architect, Three Amigos, PR Review, and Merge all live, this is
-the one node the PO explicitly chose to keep as the existing interactive
-`.antigravity` Developer/Tester workflow, not automate. The PO implements
-`status:ready` subtasks themselves via Antigravity and opens the PR by
-hand; PR Review (`docs/pr-review-node.md`) reacts to whatever PR shows up
-without caring who or what opened it. Revisit only if asked — this isn't a
-gap, it's the current design.
+**Automated after all — reversed the same day, 2026-08-24.** Stayed manual
+for a few hours; the PO then decided PR Review had to become authoritative
+again (real GitHub review, gates the merge), and for the resulting
+Opus↔Gemini review/fix loop to run without a human in it, Dev & Test had
+to stop being manual too — both the first implementation pass and the
+fix-up response to `CHANGES_REQUESTED` are automated now. Implemented and
+live —
+[`dev-test.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/dev-test.yml),
+commit `81d9903`. Highest-risk node in the pipeline by far: real code
+writes, real Gradle test runs, real branches/PRs — everything before this
+only manipulated issues/labels/comments. Went through Plan Mode before
+being built, unlike every other node in this repo.
+
+- **Two triggers, one workflow:** `status:ready` on a `type:subtask`
+  (first pass — the PO's own approval-gate relabel, unchanged) fires
+  `implement` mode; `pull_request_review` with `state: changes_requested`
+  fires `fixup` mode.
+- **Gemini runs its own implement→test→fix loop internally**, capped at 3
+  attempts by the prompt (`docs/dev-test-node.md`'s own copy of the
+  original design still describes the fields; the actual prompts live in
+  `crosstrainingapp`'s `dev-test-implement.md`/`dev-test-fixup.md`), rather
+  than this workflow re-invoking the CLI per retry — it already has full
+  bash/write access by default ("YOLO mode," observed unprompted in an
+  earlier Three Amigos run's logs), so one rich session that iterates on
+  its own is simpler than restarting a fresh CLI call each attempt.
+- **Real command, not the documented local one:** `./gradlew
+  testDebugUnitTest --stacktrace` (Linux CI form, matching `build.yml`) —
+  not `.\gradlew.bat`, which is documented for local Windows dev in
+  `GEMINI.md`/`.agents/rules/` and doesn't exist on the runner. Caught
+  before the first run, not after a failure.
+- **`ORCHESTRATION_PAT` needed re-scoping** — Contents write + Pull
+  requests write, in addition to its original Issues read/write. This is
+  the first node that does a raw `git push`, not just `gh` API calls for
+  issue/label/comment manipulation.
 
 - **Model:** Gemini 3.7 Flash, High thinking effort (changed 2026-08-22 from
   Gemini 3.1 Pro to stay on Google AI Studio's free tier — see the top-level
