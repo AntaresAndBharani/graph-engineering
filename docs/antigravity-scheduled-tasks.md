@@ -89,6 +89,45 @@ before — that risk is now down to a single occurrence per checkout, not a
 recurring one, since every successful read from then on re-syncs itself
 before doing anything else.
 
+## Global lock: what happens if a scheduled run is still going when the next poll fires (2026-08-24)
+
+Raised before it ever caused a real failure, unlike the three bugs above —
+worth naming as prevention, not a postmortem. All three tasks share one
+local checkout, and each already loops through *every* matching story in a
+single run — so the actual risk isn't two runs racing on the *same* story
+(a per-story label would only guard against that), it's two *different*
+runs, on two different stories, both mutating the one shared working tree
+at the same time. Any of the three tasks' own step 0 (`git reset --hard
+origin/main`) would silently discard whatever another still-running task
+had in progress — including Three Amigos' sync, since it touches the same
+checkout even though it never commits anything itself.
+
+Fix: a single global lock, checked before anything else (before even the
+sync). [Issue #61](https://github.com/AntaresAndBharani/crosstrainingapp/issues/61)
+in `crosstrainingapp` is a dedicated, never-closed tracking issue whose body
+holds the lock state:
+
+```
+Status: locked
+Locked by: <task name>
+Locked at: <UTC ISO 8601>
+```
+
+or `Status: unlocked` when free. Every task's step 0 now reads that body
+first — if locked and under 60 minutes old, it stops immediately, running
+no git command at all; otherwise it acquires the lock (edits the body, adds
+the `pipeline:locked` label for at-a-glance visibility in the issue list),
+does its sync + work, and releases the lock unconditionally at the end,
+success or failure. The 60-minute staleness window exists so a crashed run
+can't jam the lock forever — the next poll simply steals it instead of
+waiting on a lock nothing will ever release.
+
+This is best-effort, not a true atomic lock — two runs could still both
+read "unlocked" microseconds apart. Acceptable here: polls are 30 minutes
+apart, not milliseconds, so a genuine simultaneous read is realistically
+not going to happen; a perfect compare-and-swap isn't worth the complexity
+this pipeline's actual timing needs.
+
 ## Both prompts start at the parent story, never at a subtask directly (2026-08-24)
 
 Same principle as the Three Amigos batch redesign the day before
