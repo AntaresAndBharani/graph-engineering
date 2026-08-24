@@ -35,6 +35,29 @@ Current behavior matches the original design: `verdict` drives a real
 automated), capped at 3 rounds (counted from prior `CHANGES_REQUESTED`
 reviews on the PR, checked before `pr-review.yml` runs Claude again).
 
+## Real `gh pr review` needed a different identity than the PAT (2026-08-24)
+
+The reversal above was the *design* decision; the actual `gh pr review
+--approve`/`--request-changes` call was never exercised end-to-end until
+today, since the advisory version only ever posted a plain comment. First
+real run (PRs #59/#60/#62, all open simultaneously) failed on all three
+with the same GitHub error: `Can not request changes on your own pull
+request`. `ORCHESTRATION_PAT` is the identity `dev-test.yml` uses to open
+every PR — so this node was trying to review its own sibling node's work
+under the same GitHub account, which GitHub blocks outright, and always
+would have regardless of the transient Anthropic-overload issues debugged
+earlier the same day.
+
+Fixed by submitting only the `gh pr review` call itself as Claude's own
+GitHub App identity — `claude-code-action` exposes its installation token
+via `outputs.github_token` specifically for this kind of reuse — while
+everything else in that step (the escalation comment, follow-up backlog
+issue filing) keeps using `ORCHESTRATION_PAT`. See the top-level README's
+"Implementation lessons" for the full detail; noted here too since it's a
+structural property of this node's authority, not a one-off bug: any
+reviewer/approver identity that's also the producer's identity will hit
+this exact wall.
+
 ## The PR comment thread is the state
 
 Per the "no message-passing, use shared artifacts" principle in the top-level

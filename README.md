@@ -192,6 +192,23 @@ repo (4, not 3 — one was missing from the original plan):**
   explaining the overload rather than failing silently. Applied to both
   `pr-review.yml` and `architect.yml` — any future `claude-code-action` step
   should get the same treatment by default, not added reactively per node.
+- GitHub rejects `gh pr review --approve`/`--request-changes` when the
+  reviewing identity is the same one that opened the PR
+  (`Can not request changes on your own pull request`) — and
+  `ORCHESTRATION_PAT` is exactly that identity, since `dev-test.yml` uses
+  it to open every PR too. This is a structural conflict, not a transient
+  one: it broke on all three PRs open at the time (#59/#60/#62), the first
+  time this code path ever ran end-to-end (the real `gh pr review` call was
+  only added during the 2026-08-24 authority reversal — the earlier
+  advisory-only version just posted a comment, which has no such
+  restriction). Fixed by submitting the review as Claude's own GitHub App
+  identity instead of the PAT — `claude-code-action` exposes its
+  installation token via `outputs.github_token` for exactly this kind of
+  reuse — applied narrowly to just the `gh pr review` call itself, not the
+  whole step, so everything else (comments, follow-up issue filing) keeps
+  using `ORCHESTRATION_PAT` as before. Any future node where the same
+  identity both produces *and* reviews/approves something should expect
+  this same restriction.
 
 ## Inter-agent communication principles
 
