@@ -89,44 +89,47 @@ before — that risk is now down to a single occurrence per checkout, not a
 recurring one, since every successful read from then on re-syncs itself
 before doing anything else.
 
-## Global lock: what happens if a scheduled run is still going when the next poll fires (2026-08-24)
+## Concurrency: one story in flight at a time, no lock needed (2026-08-24, simplified same day)
 
-Raised before it ever caused a real failure, unlike the three bugs above —
-worth naming as prevention, not a postmortem. All three tasks share one
-local checkout, and each already loops through *every* matching story in a
-single run — so the actual risk isn't two runs racing on the *same* story
-(a per-story label would only guard against that), it's two *different*
-runs, on two different stories, both mutating the one shared working tree
-at the same time. Any of the three tasks' own step 0 (`git reset --hard
-origin/main`) would silently discard whatever another still-running task
-had in progress — including Three Amigos' sync, since it touches the same
-checkout even though it never commits anything itself.
+Raised before it ever caused a real failure — worth naming as prevention,
+not a postmortem. All three tasks share one local checkout, so the concern
+was two runs mutating that same working tree at once.
 
-Fix: a single global lock, checked before anything else (before even the
-sync). [Issue #61](https://github.com/AntaresAndBharani/crosstrainingapp/issues/61)
-in `crosstrainingapp` is a dedicated, never-closed tracking issue whose body
-holds the lock state:
+**First attempt: a dedicated lock issue.** Built a tracking issue
+(`crosstrainingapp#61`) whose body held `Status: locked/unlocked` plus an
+owner and timestamp, checked by every task before touching git, with a
+60-minute staleness window against a crashed run jamming it forever. It
+worked, but added a fourth GitHub artifact with no product meaning sitting
+in the same tracker as real stories — confusing on its own terms, and more
+mechanism than the actual problem needed.
 
-```
-Status: locked
-Locked by: <task name>
-Locked at: <UTC ISO 8601>
-```
+**Simplified same day, by explicit choice:** process one user story at a
+time — slower, but cheaper (fewer concurrent Gemini calls) and easier to
+reason about for now. This turns out to remove the lock requirement
+entirely rather than just relocate it:
 
-or `Status: unlocked` when free. Every task's step 0 now reads that body
-first — if locked and under 60 minutes old, it stops immediately, running
-no git command at all; otherwise it acquires the lock (edits the body, adds
-the `pipeline:locked` label for at-a-glance visibility in the issue list),
-does its sync + work, and releases the lock unconditionally at the end,
-success or failure. The 60-minute staleness window exists so a crashed run
-can't jam the lock forever — the next poll simply steals it instead of
-waiting on a lock nothing will ever release.
+- **Dev & Test: Implement** now checks `gh pr list --state open` before
+  doing anything else. If any PR is open — for any story — it stops; no
+  new implementation work starts this poll.
+- **Dev & Test: Fix-up** only ever acts on a PR that's already open. Since
+  Implement refuses to start while one exists, the two are mutually
+  exclusive by construction: whenever Fix-up has something to do, Implement
+  is guaranteed to skip, and whenever Implement is willing to touch git,
+  there's no open PR for Fix-up to act on either. No shared state needed to
+  enforce that — it falls out of the one-story-at-a-time rule for free.
+- **Three Amigos** never touched the working tree to begin with — pure
+  `gh` reads/writes on issues, no file edits, no git. It never needed
+  coordinating with the other two; the lock step was removed from it
+  entirely rather than simplified.
 
-This is best-effort, not a true atomic lock — two runs could still both
-read "unlocked" microseconds apart. Acceptable here: polls are 30 minutes
-apart, not milliseconds, so a genuine simultaneous read is realistically
-not going to happen; a perfect compare-and-swap isn't worth the complexity
-this pipeline's actual timing needs.
+`crosstrainingapp#61` and the `pipeline:locked` label were closed/deleted
+rather than left dangling once the mechanism was gone.
+
+**Known gap, accepted for now:** this doesn't protect against the *same*
+task's own poll overlapping itself — e.g. an Implement run still mid-fix
+when the next poll fires 30 minutes later, before it's pushed anything.
+Not addressed yet; revisit if it actually happens (single-subtask Gemini
+passes are expected to finish well inside 30 minutes in practice).
 
 ## Both prompts start at the parent story, never at a subtask directly (2026-08-24)
 
