@@ -1,29 +1,42 @@
 # Merge & Backlog Node
 
-**Not implemented — definition only**, per the current-scope note in the
-top-level README. Documented so the full pipeline can be reviewed together.
+**Implemented and live (2026-08-24)** —
+[`merge.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/merge.yml)
+in `crosstrainingapp`, commit `620f261`. Simpler than originally designed —
+see "What changed" below.
 
 - **Model:** none — fully deterministic, $0 cost.
-- **Trigger:** PR Review verdict `APPROVED`.
-- **Output:** a merged PR and new backlog issues for anything the reviewer
-  deferred.
+- **Trigger:** `pull_request_review: [submitted]` filtered to
+  `review.state == 'approved'` — **the PO's own GitHub PR approval**, not
+  PR Review's `verdict` (see `docs/pr-review-node.md` "Advisory, not
+  authoritative" — that node has no GitHub review state to trigger off of
+  at all).
+- **Output:** the PR merged. Nothing else.
+
+## What changed from the original design
+
+Two simplifications, both because the trigger changed from "an automated
+verdict" to "the PO clicked approve" — at that point there's nothing left
+to decide:
+
+- **No backlog-issue creation here.** PR Review already files
+  `followup_backlog_issues` immediately when it runs (see
+  `docs/pr-review-node.md`), rather than waiting for merge. Deferring that
+  to this node would have meant tracking follow-ups in state across the
+  now-unused review/fix loop for no benefit.
+- **No release logic to build.** `crosstrainingapp` already tags and
+  publishes a GitHub Release on every push to `main` (its existing
+  `release.yml`), so merging is the entire job.
 
 ## Actions
 
 ```bash
-gh pr merge <pr_number> --squash --delete-branch
+gh pr merge <pr_number> --auto --squash --delete-branch
 ```
 
-Then, for each entry in the PR Reviewer's `followup_backlog_issues`
-(`docs/pr-review-node.md`):
-
-```bash
-gh issue create --title "<title>" --body "<body>" --label "<labels>"
-```
-
-Recommended labels for these: `enhancement`, `tech-debt`, `backlog`, plus a
-reference back to the originating PR number in the body so context isn't
-lost.
+`--auto` waits for required checks (the repo's own `build.yml`) to go green
+rather than failing immediately if the PO's approval lands before CI
+finishes — approval and CI completion have no guaranteed order.
 
 ## Why no model here
 

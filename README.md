@@ -17,43 +17,71 @@ extends that rather than inventing a parallel one — label names below are
 `crosstrainingapp`'s actual names, not generic placeholders. See "Label
 taxonomy" further down for the full mapping.
 
+**Full pipeline built and live as of 2026-08-24** (`crosstrainingapp`
+commits `2be624e`, `620f261`) — with two scope decisions made at build time
+that changed the shape below from the original design, both driven by the
+PO wanting to stay hands-on at specific points. Details in "What changed
+from the original design during implementation" further down.
+
 ```
 [PO: you + Gemini/Antigravity draft a type:user-story]   (manual, external — not a graph node)
         |  relabel status:ready-for-architect
         v
 1. Architect  --(conflict/business call)--> back to PO (status:needs-po-input)
-        |  creates type:subtask issues, status:review
+        |  creates/updates/closes type:subtask issues (status:pending-review)
         v
-2. Three Amigos
-        |  READY
+2. Three Amigos  --(batch review: all subtasks together, can split/merge/find gaps)--
+        |  READY -> every subtask -> status:awaiting-approval
         v
 [PO APPROVAL GATE — status:awaiting-approval]      (manual checkpoint, not automated)
         |  PO relabels status:ready (the EXISTING label — no new one needed;
         |  this already triggers the interactive Antigravity Developer/Tester setup)
         v
-3. Dev & Test  <---(changes requested)--->  4. PR Review
-        |  approved
+3. Dev & Test               (manual by design — PO's choice, see below)
+        |  PO opens a PR
         v
-5. Merge & Backlog
+4. PR Review                 (advisory — posts a comment, never approves/blocks)
+        |  PO reviews the diff + Claude's comment, approves via GitHub's own PR review
+        v
+5. Merge & Backlog           (triggered by the PO's approval, not Claude's verdict)
 ```
 
 | # | Node | Role | Model tier |
 |---|------|------|------------|
 | — | PO drafting | You + Gemini/Antigravity draft the User Story. Manual, external to the automated graph. | Gemini/Antigravity (subscription) |
-| 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
-| 2 | Three Amigos | Product/Dev/QA readiness gate before coding starts; asks Architect targeted clarification questions when blocked | Gemini 3.7 Flash (High) |
+| 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose/restructure a whole subtask batch — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
+| 2 | Three Amigos | Batch readiness gate — reviews every subtask for a story together, can flag splits/merges/coverage gaps a single-subtask view would miss | Gemini 3.7 Flash (High) |
 | — | PO approval gate | Human checkpoint: nothing gets implemented until the PO explicitly says go, even after Three Amigos returns `READY`. Manual, not automated. | — |
-| 3 | Dev & Test | Implement the issue, run local tests, open the PR | Gemini 3.7 Flash (High) |
-| 4 | PR Review | Review diff vs. acceptance criteria; exchanges PR comments with Dev until Claude judges it merge-ready | Claude Opus |
-| 5 | Merge & Backlog | `gh pr merge` + `gh issue create` for follow-ups | Deterministic ($0) |
+| 3 | Dev & Test | Implement the subtask, run local tests, open the PR — **manual by design**, the existing interactive `.antigravity` Developer/Tester flow | (n/a — human + Antigravity) |
+| 4 | PR Review | Advisory first-pass review of the diff — posts a comment, never approves/blocks | Claude Opus |
+| 5 | Merge & Backlog | `gh pr merge`, triggered by the PO's own GitHub approval | Deterministic ($0) |
 
 Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
-points, and the two places a human or another agent needs a decision *from*
-Claude). **Gemini handles development and testing** (nodes 2 & 3, high-iteration
-work). Node 5 is plain `gh` CLI, no model involved. The PO drafting step and
-approval gate are deliberately unnumbered — they're human checkpoints, not
-automated graph nodes, per "Add a node only when it demonstrably needs one"
-below.
+points). **Gemini handles the batch readiness gate** (node 2). Node 5 is plain
+`gh` CLI, no model involved. The PO drafting step and approval gate are
+deliberately unnumbered — they're human checkpoints, not automated graph
+nodes, per "Add a node only when it demonstrably needs one" below.
+
+## What changed from the original design during implementation
+
+Two deliberate scope decisions, made 2026-08-24 while building nodes 3–5,
+after nodes 1–2 were already live and tested:
+
+1. **Dev & Test stays manual, permanently, not just "not built yet."** The
+   PO wants to keep implementing via the existing interactive `.antigravity`
+   Developer/Tester setup. PR Review reacts to whatever PR shows up
+   regardless of who/what opened it, so nothing downstream needed to change
+   for this — it was never coupled to Dev & Test being automated.
+2. **PR Review became advisory, not authoritative.** The original design
+   (still described in `docs/pr-review-node.md`'s early sections, kept for
+   the reasoning trail) had Claude's `verdict` gate the merge. The PO wants
+   to review and approve every PR themselves via GitHub's native review
+   flow. So PR Review now posts a plain comment and nothing else, and
+   Merge & Backlog triggers on the PO's own `pull_request_review: approved`
+   event, not on Claude's verdict. The CHANGES_REQUESTED → Dev & Test →
+   re-check loop from the original design exists in the prompt/schema but
+   doesn't actually drive automation — see `docs/pr-review-node.md`
+   "Advisory, not authoritative" for the full reasoning.
 
 Nodes 2 & 3 moved from Gemini 3.1 Pro to **Gemini 3.7 Flash with High thinking
 effort** (2026-08-22) specifically to stay on Google AI Studio's free API
@@ -62,29 +90,29 @@ below for why, and the caveats that come with it.
 
 ## Current scope
 
-> **Nodes 1 (Architect) and 2 (Three Amigos) are implemented and live in
-> `crosstrainingapp`** as of 2026-08-23 —
-> [PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54)
-> (`.github/workflows/architect.yml`, `three-amigos.yml`), merged to `main`,
-> currently being validated against a real test issue (#55). See
-> "Implementation lessons from live testing" below for what real-world
-> testing has surfaced so far — genuinely useful for whoever builds nodes
-> 3–5 next, not just historical notes. **Nodes 3–5 remain documented, not
-> implemented** — don't wire up automation for them until asked.
+> **All five nodes are implemented and live in `crosstrainingapp`** as of
+> 2026-08-24 — Architect + Three Amigos
+> ([PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54),
+> then redesigned as a batch review in commit `2be624e`), PR Review + Merge
+> & Backlog (commit `620f261`). Dev & Test is the one exception, and
+> deliberately so — see "What changed from the original design during
+> implementation" above; it stays the existing manual `.antigravity` flow
+> by the PO's explicit choice, not an oversight. See "Implementation
+> lessons from live testing" below for what real-world testing surfaced.
 
 Per-node specs:
 
-- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**implemented, live-testing**): PO drafting input, interactive vs. headless entry points, technical refinement + PO-escalation, issue schema, prompt templates.
-- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (**implemented, live-testing**): readiness gate, `NEEDS_REVISION` vs `NEEDS_CLARIFICATION` routing, PO approval gate after `READY`.
-- [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (defined, not built): implementation loop, handling PR Reviewer feedback.
-- [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (defined, not built): review schema, blocking vs. follow-up split, merge authority.
-- [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (defined, not built): deterministic merge + backlog issue creation.
+- [`docs/definition-node.md`](docs/definition-node.md) — Architect (**implemented, live**): PO drafting input, interactive vs. headless entry points, batch decompose/restructure/answer-clarifications modes, PO-escalation, issue schema, prompt templates.
+- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (**implemented, live**): batch readiness gate across a whole story's subtasks, structural split/merge/gap detection, PO approval gate after `READY`.
+- [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (**deliberately manual**, not automated — the PO's choice, not a gap): the existing interactive Antigravity Developer/Tester flow.
+- [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (**implemented, live**): advisory-only review comment, blocking vs. follow-up split, does not gate the merge.
+- [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (**implemented, live**): deterministic merge triggered by the PO's own PR approval.
 
 ## Implementation lessons from live testing (crosstrainingapp)
 
-Real-world testing surfaced gaps the design phase couldn't have — captured
-here because the same classes of issue will very likely recur when nodes
-3–5 get built, not because they're just crosstrainingapp trivia.
+Real-world testing surfaced gaps the design phase couldn't have — kept here
+as a durable record of what actually broke and why, not just historical
+notes.
 
 **Confirmed prerequisites for headless Claude/Gemini nodes in any target
 repo (4, not 3 — one was missing from the original plan):**
@@ -122,11 +150,32 @@ repo (4, not 3 — one was missing from the original plan):**
   closing line. Avoided entirely in the final version by moving
   mode-specific prompt text into separate committed `.md` files instead of
   inline heredocs — simpler and safer than fighting `<<-`/tabs.
+- `claude-code-action`'s headless "agent" mode runs in Claude Code's
+  default (Manual) permission mode with no model specified — meaning it
+  silently used Sonnet instead of Opus, *and* every Write tool call got
+  denied with no human able to approve it (confirmed via the run's own JSON
+  summary: 9 turns, real cost spent, `architect_output.json` never
+  produced). Fix: `claude_args: '--model claude-opus-5 --permission-mode
+  dontAsk --allowedTools "Read" "Grep" "Glob" "Write"'` — an explicit,
+  locked-down allowlist, not `bypassPermissions` (that phrase itself
+  tripped this session's own auto-mode classifier when committing the fix,
+  since it pattern-matches "unmonitored autonomous agent loop" language;
+  `dontAsk` + allowlist reads as the opposite pattern and didn't).
+- Gemini CLI refuses to operate in a directory it hasn't been told to
+  trust, and a fresh `actions/checkout` on an ephemeral runner is never
+  pre-trusted — no interactive prompt is possible in CI to answer it live.
+  Fix: `GEMINI_CLI_TRUST_WORKSPACE: "true"` in the step's `env:`.
+- When promoting a batch of subtasks to `status:awaiting-approval`, remove
+  *every* plausible prior status label, not just the one you expect —
+  `--remove-label status:pending-review` silently no-ops (and the intended
+  fallback silently gives up) if the subtask actually still carries
+  `status:review` from an earlier pass, leaving both labels stuck on it.
+  Caught on the first real batch-review run (#56/#58).
 
 ## Inter-agent communication principles
 
-These apply across all five nodes, including the ones (3–5) not built yet,
-and are drawn from Anthropic's published guidance on agent design
+These apply across all five nodes, all implemented now, and are
+drawn from Anthropic's published guidance on agent design
 ([Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents),
 [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)):
 
@@ -160,9 +209,9 @@ and are drawn from Anthropic's published guidance on agent design
   PR must leave it readable on its own, without needing to know these
   schemas to understand what happened and why.
 
-## Interaction design for nodes 2 & 4 (documented now, not built)
+## Interaction design for nodes 2 & 4 (as designed — node 4 simplified since, see "What changed" above)
 
-Captured here so the decision isn't lost before these nodes are implemented:
+Captured here as the reasoning trail for how these decisions were reached:
 
 - **Three Amigos → Architect:** when Three Amigos (Gemini) can't resolve a
   doubt itself, it does not get a live chat channel to Claude. It emits
@@ -211,7 +260,7 @@ In practice most of this is materialized as GitHub labels/comments (per
 "Prefer shared, persistent artifacts" above), not a literal state object —
 this table is the logical shape, not a schema some database enforces.
 
-## Implementation substrate (node 2 built and live; 3–5 decided, not yet built)
+## Implementation substrate (all nodes built and live)
 
 Nodes 2–5 are event-triggered GitHub Actions workflows, not scheduled/cron
 jobs and not a standalone polling script — GitHub already emits the exact

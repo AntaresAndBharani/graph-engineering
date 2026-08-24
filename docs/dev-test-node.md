@@ -1,7 +1,13 @@
 # Dev & Test Node
 
-**Not implemented — definition only**, per the current-scope note in the
-top-level README. Documented so the full pipeline can be reviewed together.
+**Deliberately staying manual — decided 2026-08-24, not just "not built
+yet."** With Architect, Three Amigos, PR Review, and Merge all live, this is
+the one node the PO explicitly chose to keep as the existing interactive
+`.antigravity` Developer/Tester workflow, not automate. The PO implements
+`status:ready` subtasks themselves via Antigravity and opens the PR by
+hand; PR Review (`docs/pr-review-node.md`) reacts to whatever PR shows up
+without caring who or what opened it. Revisit only if asked — this isn't a
+gap, it's the current design.
 
 - **Model:** Gemini 3.7 Flash, High thinking effort (changed 2026-08-22 from
   Gemini 3.1 Pro to stay on Google AI Studio's free tier — see the top-level
