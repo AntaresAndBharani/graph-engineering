@@ -189,6 +189,53 @@ divergence is safe as long as the PO knows which one is currently active and
 labels the right issue accordingly (**the story**, if Antigravity's Dev &
 Test task is the active one).
 
+## Fourth bug found via live testing: Implement and Fix-up raced on the same cron tick (2026-08-24)
+
+The concurrency section above ("one story in flight at a time") reasoned
+about the two tasks as mutually exclusive *by construction* — Fix-up only
+acts on an already-open PR, and Implement refuses to start while one is
+open. That's true at the level of *which story* each task is allowed to
+touch. It says nothing about *when* each task's own poll fires.
+
+Both `Dev & Test: Implement` and `Dev & Test: Fix-up` were configured on
+the identical `*/15 * * * *` schedule — literally the same clock ticks
+(`:00`, `:15`, `:30`, `:45`) — sharing one local `crosstrainingapp`
+checkout. Live testing caught this directly: a screenshot of Fix-up's run
+log showed it still mid-poll while the PO separately observed
+`Dev & Test - CrossTrainingApp` (Implement) "still looking at jobs" at the
+same time. Investigating the actual GitHub timeline (issue/PR label
+history, comment timestamps, workflow run timestamps) ruled out the
+alternate theory — a duplicate Antigravity "PR Reviewer" task double-firing
+GitHub Actions' `pr-review.yml` — that task didn't exist in the current
+Scheduled Tasks list at all; only three tasks were ever configured
+(Implement, Fix-up, Three Amigos), confirmed by opening Antigravity's
+Scheduled Tasks panel directly. The two same-cron Dev & Test tasks were the
+real cause.
+
+**Fix: merge `dev-test-implement.md` + `dev-test-fixup.md` into one file,
+one task, one schedule** — [`dev-test.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test.md).
+Each poll now runs Fix-up's check first (any PR labeled
+`review:changes-requested`? handle it, stop) and only falls through to the
+open-PR / `status:in-development` / Implement logic if Fix-up found nothing
+to do. This doesn't add coordination between two processes — it removes the
+second process entirely, so the race is gone by construction rather than
+managed. The PO's framing driving this fix: *"why do we have to have 2
+different nodes/scheduled tasks for a similar PR status... Simple and
+plain."*
+
+The old `Dev & Test: Fix-up` Antigravity task was deleted (not just
+disabled) once its logic was absorbed — it had already self-stopped on its
+own next poll after `dev-test-fixup.md` was removed from the repo, the same
+"don't invent content for a missing file" safety behavior documented above
+under "Second bug." `Dev & Test - CrossTrainingApp`'s prompt was repointed
+from `Run .antigravity/tasks/dev-test-implement.md` to
+`Run .antigravity/tasks/dev-test.md`; its schedule (`*/15 * * * *`) and task
+name were left unchanged, since one task on that cron was never the
+problem — two of them were.
+
+Three Amigos was never part of this race (see "Concurrency" section above
+— it never touches the working tree) and needed no change.
+
 ## Two executors, switchable at any time
 
 **Current state (2026-08-24): Antigravity is the only active executor for
@@ -259,8 +306,8 @@ redoing work it already did on a prior poll:
   persists until the *next* review, so every poll in between would see the
   same "needs a fix" state and redo it). Since PR Review now applies
   `review:changes-requested` as a label instead, and this prompt removes
-  that label the moment it pushes a fix (see Task 3 below), the same
-  remove-on-pickup pattern as the other two tasks applies here too — no
+  that label the moment it pushes a fix (see Task 2 below), the same
+  remove-on-pickup pattern as the other tasks applies here too — no
   timestamp bookkeeping needed anymore.
 
 ## Task 1 — Three Amigos
@@ -290,14 +337,19 @@ as a Product/Developer/QA panel, posts one verdict comment marked
 and the story itself to `status:awaiting-approval` — never adding
 `status:ready` itself.
 
-## Task 2 — Dev & Test: Implement
+## Task 2 — Dev & Test
+
+**Merged from two tasks into one on 2026-08-24** — see "Fourth bug" above
+for why. Originally split into `Dev & Test: Implement` / `Dev & Test:
+Fix-up`; that split is what caused the same-tick race, so it no longer
+exists.
 
 | | |
 |---|---|
-| Antigravity task name | `Dev & Test: Implement (crosstrainingapp)` |
+| Antigravity task name | `Dev & Test - CrossTrainingApp (crosstrainingapp)` |
 | Repository / folder | `crosstrainingapp` |
-| Node replaced | Dev & Test, first-implementation pass (`docs/dev-test-node.md`) |
-| Schedule | Custom, `*/30 * * * *` (adjust to taste) |
+| Node replaced | Dev & Test, both passes (`docs/dev-test-node.md`) |
+| Schedule | Custom, `*/15 * * * *` |
 | Type | Scheduled |
 
 **Runs locally on Windows, not CI** — the instructions file uses the `.bat`
@@ -311,45 +363,22 @@ Prompt (paste exactly — this is the whole Prompt field; keep it this short,
 see "Third bug" above):
 
 ```
-Run .antigravity/tasks/dev-test-implement.md
+Run .antigravity/tasks/dev-test.md
 ```
 
-Full instructions: [`dev-test-implement.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-implement.md)
+Full instructions: [`dev-test.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test.md)
 — its own step 0 re-syncs the checkout to `origin/main` before anything
 else, so the inline prompt doesn't need to.
-Summary: polls `type:user-story` + `status:ready` issues (the story's own
-label, never a subtask's), implements every subtask under it still labeled
-`status:awaiting-approval`, runs `.\gradlew.bat testDebugUnitTest` (up to 3
-attempts), and on success opens a PR and relabels the subtask
+Summary: each poll checks, in order — (1) any subtask PR labeled
+`review:changes-requested`? address it, push a fix, remove the label, stop
+here this poll; (2) else, any PR open at all, or any story labeled
+`status:in-development`? stop, nothing to do; (3) else, poll
+`type:user-story` + `status:ready` issues (the story's own label, never a
+subtask's), implement every subtask under it still labeled
+`status:awaiting-approval`, run `.\gradlew.bat testDebugUnitTest` (up to 3
+attempts), and on success open a PR and relabel the subtask
 `status:in-progress` — or `status:needs-po-input` on failure/escalation.
 Never touches the story's own `status:ready` label.
-
-## Task 3 — Dev & Test: Fix-up
-
-| | |
-|---|---|
-| Antigravity task name | `Dev & Test: Fix-up (crosstrainingapp)` |
-| Repository / folder | `crosstrainingapp` |
-| Node replaced | Dev & Test, PR-Review fix-up pass (`docs/dev-test-node.md`) |
-| Schedule | Custom, `*/30 * * * *` (adjust to taste) |
-| Type | Scheduled |
-
-Same `.bat`-vs-CI note as Task 2 applies here.
-
-Prompt (paste exactly — this is the whole Prompt field; keep it this short,
-see "Third bug" above):
-
-```
-Run .antigravity/tasks/dev-test-fixup.md
-```
-
-Full instructions: [`dev-test-fixup.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-fixup.md)
-— its own step 0 re-syncs the checkout to `origin/main` before anything
-else, so the inline prompt doesn't need to.
-Summary: polls stories for subtask PRs labeled `review:changes-requested`,
-reads the blocking issues from PR Review's latest comment, addresses them,
-re-runs tests, and pushes a fix (removing the label) or comments on what's
-still blocking (leaving it in place).
 
 ## What this doesn't change
 

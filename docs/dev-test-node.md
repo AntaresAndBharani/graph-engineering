@@ -32,12 +32,16 @@ being built, unlike every other node in this repo.
   identity than the PAT" for why.
 - **Gemini runs its own implement→test→fix loop internally**, capped at 3
   attempts by the prompt (`docs/dev-test-node.md`'s own copy of the
-  original design still describes the fields; the actual prompts live in
-  `crosstrainingapp`'s `dev-test-implement.md`/`dev-test-fixup.md`), rather
-  than this workflow re-invoking the CLI per retry — it already has full
-  bash/write access by default ("YOLO mode," observed unprompted in an
-  earlier Three Amigos run's logs), so one rich session that iterates on
-  its own is simpler than restarting a fresh CLI call each attempt.
+  original design still describes the fields; the actual prompt for the
+  GitHub Actions executor lives in `crosstrainingapp`'s `dev-test.yml`,
+  and for the Antigravity executor in `.antigravity/tasks/dev-test.md` —
+  one merged file as of 2026-08-24, see
+  `docs/antigravity-scheduled-tasks.md`'s "Fourth bug" for why it was
+  originally two and got merged back into one), rather than this workflow
+  re-invoking the CLI per retry — it already has full bash/write access by
+  default ("YOLO mode," observed unprompted in an earlier Three Amigos
+  run's logs), so one rich session that iterates on its own is simpler
+  than restarting a fresh CLI call each attempt.
 - **Real command, not the documented local one:** `./gradlew
   testDebugUnitTest --stacktrace` (Linux CI form, matching `build.yml`) —
   not `.\gradlew.bat`, which is documented for local Windows dev in
