@@ -48,15 +48,36 @@ under the same GitHub account, which GitHub blocks outright, and always
 would have regardless of the transient Anthropic-overload issues debugged
 earlier the same day.
 
-Fixed by submitting only the `gh pr review` call itself as Claude's own
+First fix attempt: submit only the `gh pr review` call as Claude's own
 GitHub App identity — `claude-code-action` exposes its installation token
-via `outputs.github_token` specifically for this kind of reuse — while
-everything else in that step (the escalation comment, follow-up backlog
-issue filing) keeps using `ORCHESTRATION_PAT`. See the top-level README's
-"Implementation lessons" for the full detail; noted here too since it's a
-structural property of this node's authority, not a one-off bug: any
-reviewer/approver identity that's also the producer's identity will hit
-this exact wall.
+via `outputs.github_token` for exactly this kind of reuse. **This didn't
+actually work.** `claude-code-action` revokes that token as part of its own
+step's internal cleanup, which runs before the next step in the job gets
+control — confirmed via `HTTP 401: Bad credentials` when the later "Apply
+review verdict" step tried to reuse it, even though the token was captured
+correctly (non-empty, properly masked as a secret in the logs). The token
+genuinely does not survive past the step boundary it was minted in.
+
+**Real fix needs a credential independent of Claude's own action
+lifecycle**, not a reused one. Two live options, both requiring something
+outside this workflow file:
+1. Let Claude submit the review itself, inside its own step (before its
+   token is revoked) — needs `Bash` added to `allowedTools`, since there's
+   no first-class "submit a formal review" tool in `claude-code-action`
+   (confirmed: it natively posts comments, not `APPROVE`/`REQUEST_CHANGES`
+   review state). Tradeoff: broadens what an LLM reading untrusted PR
+   content can directly execute in headless CI on a public repo — a real
+   injection-surface increase, not just a config tweak.
+2. A dedicated credential for review-submission specifically, independent
+   of `ORCHESTRATION_PAT` (still tied to the PR-author identity) and of
+   Claude's transient token — either a second PAT from a genuinely
+   different GitHub account, or a proper custom GitHub App installed just
+   for this. Keeps the existing "LLM writes structured output, a reviewed
+   script performs the privileged action" boundary intact, at the cost of
+   needing that separate identity actually created and installed.
+
+Not resolved yet — needs a decision on which path before implementing
+further, rather than another speculative attempt.
 
 ## The PR comment thread is the state
 
