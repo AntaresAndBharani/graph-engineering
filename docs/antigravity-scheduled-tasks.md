@@ -40,6 +40,25 @@ combined prompt — shorter per task, and matches its two distinct GitHub
 Actions trigger modes (`issues: labeled` vs `pull_request_review:
 submitted`) rather than asking one prompt to branch between them itself.
 
+## Second bug found via live testing: the local checkout wasn't synced
+
+The very next run of `Dev & Test: Fix-up`, after the file-pointer fix above,
+didn't read `dev-test-fixup-scheduled.md` either — its local `crosstrainingapp`
+checkout didn't have the commit that added `.antigravity/tasks/` yet. Rather
+than fail when the referenced file wasn't there, the agent invented plausible
+content for all three task files itself and staged them as a new 3-file diff
+(`+62 -0` — i.e. genuinely new to that checkout, not modified). That diff is
+a guess at the spec, not the spec — it must not be approved/merged; discard
+it and let the checkout sync properly instead.
+
+Fix: every prompt below now opens with an explicit
+`git fetch origin && git reset --hard origin/main` before referencing the
+instructions file at all, since that's the only step guaranteed to run
+before the file's existence is even checked. This assumes the task is never
+mid-implementation with uncommitted local changes worth keeping when a poll
+starts — true by design, since actual implementation work always happens on
+a fresh feature branch, never directly on `main`.
+
 ## Both prompts start at the parent story, never at a subtask directly (2026-08-24)
 
 Same principle as the Three Amigos batch redesign the day before
@@ -153,9 +172,11 @@ redoing work it already did on a prior poll:
 Prompt (paste exactly — this is the whole Prompt field):
 
 ```
-Follow the instructions in .antigravity/tasks/three-amigos-scheduled.md
-in the crosstrainingapp repo root exactly. Read that file before doing
-anything else.
+First run: git checkout main && git fetch origin && git reset --hard
+origin/main — to make sure this checkout is current before anything
+else. Then follow the instructions in
+.antigravity/tasks/three-amigos-scheduled.md in the crosstrainingapp
+repo root exactly. Read that file before doing anything else.
 ```
 
 Full instructions: [`three-amigos-scheduled.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/three-amigos-scheduled.md).
@@ -186,7 +207,9 @@ elsewhere.
 Prompt (paste exactly — this is the whole Prompt field):
 
 ```
-Follow the instructions in
+First run: git checkout main && git fetch origin && git reset --hard
+origin/main — to make sure this checkout is current before anything
+else. Then follow the instructions in
 .antigravity/tasks/dev-test-implement-scheduled.md in the
 crosstrainingapp repo root exactly. Read that file before doing anything
 else.
@@ -215,9 +238,11 @@ Same `.bat`-vs-CI note as Task 2 applies here.
 Prompt (paste exactly — this is the whole Prompt field):
 
 ```
-Follow the instructions in .antigravity/tasks/dev-test-fixup-scheduled.md
-in the crosstrainingapp repo root exactly. Read that file before doing
-anything else.
+First run: git checkout main && git fetch origin && git reset --hard
+origin/main — to make sure this checkout is current before anything
+else. Then follow the instructions in
+.antigravity/tasks/dev-test-fixup-scheduled.md in the crosstrainingapp
+repo root exactly. Read that file before doing anything else.
 ```
 
 Full instructions: [`dev-test-fixup-scheduled.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test-fixup-scheduled.md).
