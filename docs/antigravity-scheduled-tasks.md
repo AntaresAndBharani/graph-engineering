@@ -191,6 +191,16 @@ Test task is the active one).
 
 ## Two executors, switchable at any time
 
+**Current state (2026-08-24): Antigravity is the only active executor for
+Gemini.** Both `three-amigos.yml` and `dev-test.yml` are disabled
+(`gh workflow disable`, confirmed via `gh workflow list --all` showing
+`disabled_manually`) — found live when `three-amigos.yml` fired on issue
+#67 despite the PO's intent being Antigravity-only for now. Architect and
+PR Review (both Claude, not Gemini) are unaffected and stay on GitHub
+Actions. Flip back to GitHub Actions for either node at any time with the
+`gh workflow enable` commands below — nothing about the disabled workflow
+files themselves changed, only whether they auto-trigger.
+
 The GitHub Actions implementations (`three-amigos.yml`, `dev-test.yml`) are
 **not being removed**. Both executors read and write the exact same GitHub
 state — issue labels, comments, branches, PRs — so `pr-review.yml` and
