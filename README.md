@@ -174,6 +174,24 @@ repo (4, not 3 — one was missing from the original plan):**
   fallback silently gives up) if the subtask actually still carries
   `status:review` from an earlier pass, leaving both labels stuck on it.
   Caught on the first real batch-review run (#56/#58).
+- `id-token: write` regressions don't announce themselves — `architect.yml`
+  silently lost the permission during the 2026-08-23 batch-redesign rewrite
+  (a large diff hunk replaced the whole `permissions:` block without
+  preserving it) and nothing caught it until an unrelated `pr-review.yml`
+  failure (PR #62) prompted an audit of every workflow using
+  `claude-code-action`. A workflow missing this permission looks completely
+  fine until the exact moment it actually runs. Worth a standing checklist
+  item whenever a `permissions:` block gets touched during a larger rewrite,
+  not just a one-time fix.
+- `claude-code-action`'s own internal retry (10 attempts, exponential
+  backoff, ~3 minutes total) isn't long enough for a sustained Anthropic API
+  overload (`529`) — PR #62 hit it twice in a row, ~5 minutes apart, with
+  the SDK exhausting its own retry budget both times. Fixed by adding an
+  outer retry layer in the workflow itself: up to 3 attempts at the whole
+  Claude step, 5 minutes apart, before giving up and posting a comment
+  explaining the overload rather than failing silently. Applied to both
+  `pr-review.yml` and `architect.yml` — any future `claude-code-action` step
+  should get the same treatment by default, not added reactively per node.
 
 ## Inter-agent communication principles
 
