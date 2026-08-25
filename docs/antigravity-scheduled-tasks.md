@@ -413,15 +413,20 @@ Full instructions: [`dev-test.md`](https://github.com/AntaresAndBharani/crosstra
 — its own step 0 re-syncs the checkout to `origin/main` before anything
 else, so the inline prompt doesn't need to.
 Summary: each poll checks, in order — (1) any subtask PR labeled
-`review:changes-requested`? address it, push a fix, remove the label, stop
-here this poll; (2) else, any PR open at all, or any story labeled
-`status:in-development`? stop, nothing to do; (3) else, poll
-`type:user-story` + `status:ready` issues (the story's own label, never a
-subtask's — set automatically by Three Amigos as of 2026-08-25, see Task 1
-above), discover its subtasks via the real Sub-issues relationship
-(changed 2026-08-25, was body-text matching), implement every one still
-labeled `status:awaiting-approval`, run `.\gradlew.bat testDebugUnitTest`
-(up to 3 attempts), and on success open a PR and relabel the subtask
+`review:approved` with a real merge conflict (`mergeable: CONFLICTING`)?
+rebase it onto `main`, re-test, push, stop here this poll (new
+2026-08-25 — see `docs/dev-test-node.md`'s "Resolving approved-but-conflicting
+PRs"; highest priority since it unblocks every other queued story); (2)
+else, any subtask PR labeled `review:changes-requested`? address it, push
+a fix, remove the label, stop here this poll; (3) else, any PR open at
+all, or any story labeled `status:in-development`? stop, nothing to do;
+(4) else, poll `type:user-story` + `status:ready` issues (the story's own
+label, never a subtask's — set automatically by Three Amigos as of
+2026-08-25, see Task 1 above), discover its subtasks via the real
+Sub-issues relationship (changed 2026-08-25, was body-text matching),
+implement every one still labeled `status:awaiting-approval`, run
+`.\gradlew.bat testDebugUnitTest` (up to 3 attempts), and on success open a
+PR and relabel the subtask
 `status:in-progress` — or `status:needs-po-input` on failure/escalation.
 Never touches the story's own `status:ready` label.
 

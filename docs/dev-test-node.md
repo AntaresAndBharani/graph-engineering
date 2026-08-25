@@ -125,6 +125,47 @@ GitHub PR comment thread is the shared artifact both sides read and write:
   `review_status: APPROVED`. That authority boundary is deliberate (see
   README's "Authority for a verdict stays with the node responsible for it").
 
+## Resolving approved-but-conflicting PRs (2026-08-25 — new responsibility)
+
+Found live: PR #148 was `review:approved` but had fallen behind `main`
+(many other subtask PRs merged while it waited) and developed a real git
+conflict. Dev & Test's own "any PR open? stop" gate (see `docs/antigravity-scheduled-tasks.md`'s
+"Concurrency") has no way to distinguish "waiting on review" from "stuck
+and will never resolve itself" — so this one PR silently jammed 11 other
+`status:ready` stories with no visible error anywhere, until the PO
+noticed and asked why.
+
+**Fix, not just a flag: Dev & Test now checks for this first, before even
+fix-up work** (see `.antigravity/tasks/dev-test.md`'s Step 1). For any
+subtask PR that's `review:approved` with `mergeable: CONFLICTING`: rebase
+onto `main`, re-run the real test suite, and push. Only resolve a conflict
+hunk when it's unambiguously additive on both sides (the two real
+instances seen so far were both `CHANGELOG.md` entries from concurrent
+PRs); anything requiring judgment about which side's logic should win
+escalates to `status:needs-po-input` rather than guessing.
+
+**Why this belongs in Dev & Test, not Merge & Backlog:** Merge & Backlog
+is deliberately deterministic/model-free (see `docs/merge-node.md` "Why no
+model here") — conflict resolution sometimes needs judgment, so it belongs
+where the judgment-capable actor already is. Dev & Test already owns
+"keep this PR moving toward mergeable" (that's what fix-up does for review
+feedback); this is the same responsibility for a different kind of
+not-yet-mergeable state, not a new one.
+
+**Complementary fix, not a replacement:** `crosstrainingapp`'s
+`.gitattributes` now sets `CHANGELOG.md merge=union` — git's built-in
+union merge driver takes both sides instead of conflicting on the specific
+collision shape seen twice so far (two PRs each appending an entry to the
+same `## [Unreleased]` section). Verified locally against a synthetic
+two-sided conflict before relying on it. This doesn't cover every conflict
+class (a real code conflict still needs the step above, or a human) — it
+just removes the one recurring cause before it produces a stuck PR at all.
+
+**Doesn't extend to GitHub Actions' `dev-test.yml`** (disabled) — it's
+purely event-triggered per subtask/PR, with no polling mechanism to hang a
+"check for stale conflicting PRs" pass off of. Same category of
+Antigravity-only exception already established for Backlog Triage.
+
 ## State fields this node reads/writes
 
 ```
