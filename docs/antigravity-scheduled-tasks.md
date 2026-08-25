@@ -331,11 +331,13 @@ Full instructions: [`three-amigos.md`](https://github.com/AntaresAndBharani/cros
 — its own step 0 re-syncs the checkout to `origin/main` before anything
 else, so the inline prompt doesn't need to.
 Summary: polls `type:user-story` + `status:review` issues, discovers
-subtasks only as children of the story being processed, batch-reviews them
+subtasks via the real GitHub Sub-issues relationship (`gh api
+.../sub_issues`, not body text — changed 2026-08-25), batch-reviews them
 as a Product/Developer/QA panel, posts one verdict comment marked
-`<!-- three-amigos-verdict -->`, and on `READY` promotes both every subtask
-and the story itself to `status:awaiting-approval` — never adding
-`status:ready` itself.
+`<!-- three-amigos-verdict -->`, and on `READY` promotes every subtask to
+`status:awaiting-approval` (its own "cleared for pickup" marker) and the
+story itself straight to **`status:ready`** — no PO relabel step as of
+2026-08-25; see `docs/three-amigos-node.md` "Routing."
 
 ## Task 2 — Dev & Test
 
@@ -374,9 +376,11 @@ Summary: each poll checks, in order — (1) any subtask PR labeled
 here this poll; (2) else, any PR open at all, or any story labeled
 `status:in-development`? stop, nothing to do; (3) else, poll
 `type:user-story` + `status:ready` issues (the story's own label, never a
-subtask's), implement every subtask under it still labeled
-`status:awaiting-approval`, run `.\gradlew.bat testDebugUnitTest` (up to 3
-attempts), and on success open a PR and relabel the subtask
+subtask's — set automatically by Three Amigos as of 2026-08-25, see Task 1
+above), discover its subtasks via the real Sub-issues relationship
+(changed 2026-08-25, was body-text matching), implement every one still
+labeled `status:awaiting-approval`, run `.\gradlew.bat testDebugUnitTest`
+(up to 3 attempts), and on success open a PR and relabel the subtask
 `status:in-progress` — or `status:needs-po-input` on failure/escalation.
 Never touches the story's own `status:ready` label.
 

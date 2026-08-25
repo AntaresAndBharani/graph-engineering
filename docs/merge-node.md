@@ -16,7 +16,7 @@ later the same day (see "Closing the parent story").
   signal's shape changed (a label instead of a review state), not each time
   its origin changed (PO vs. Claude).
 - **Output:** the PR merged, and — if that was the last open subtask under
-  its parent story — the parent story closed too.
+  its parent story — the parent story relabeled `status:done` and closed.
 
 ## Trigger moved from review state to a label (2026-08-24)
 
@@ -45,18 +45,32 @@ single subtask/PR directly in front of it.
 Fixed here rather than as a new node, since this is the moment a subtask
 *finishes* — the natural place to ask "was it the last one." After
 merging: find the subtask the PR closes (`Closes #N` in the PR body, same
-convention used everywhere else), find that subtask's parent story (its
-own `### Parent user story` self-reference, via the new
-`find_parent_story.py` — the reverse direction of the existing
-`filter_subtasks_by_parent.py`, same regex, kept in sync on purpose), and
-check whether any `type:subtask` siblings are still open by reusing
-`filter_subtasks_by_parent.py` itself rather than re-deriving that
-parent-match logic a third time. If none are open, closes the story with a
-summary comment. Still fully deterministic — no model needed for any of
-this.
+convention used everywhere else), find that subtask's parent story, and
+check whether any sibling subtasks are still open. If none are open,
+closes the story with a summary comment. Still fully deterministic — no
+model needed for any of this.
 
 Story #55 itself was closed manually with an explanatory comment, since it
 finished before this fix existed; every story from here on closes itself.
+
+**2026-08-25: both lookups moved onto GitHub's real Sub-issues API,
+replacing the two Python scripts this originally used.** The subtask→parent
+lookup (`find_parent_story.py`, which regex-matched a subtask's own body
+text) is now `GET /repos/{o}/{r}/issues/{subtask}/parent` — one call, no
+script. The open-siblings check (`filter_subtasks_by_parent.py`) is now
+`GET /repos/{o}/{r}/issues/{story}/sub_issues`, filtered to open state via
+`jq`. Both scripts are deleted — nothing references either one anymore
+(confirmed via repo-wide grep before deleting). See `docs/definition-node.md`
+for where the relationship actually gets created (Architect, on subtask
+creation).
+
+**Also as of 2026-08-25: closing a story now relabels it, not just closes
+it.** Previously the story was left carrying `status:ready` forever after
+closing — no label distinguished it from one still in flight. Now, right
+before `gh issue close`, the story loses `status:ready` and gains
+`status:done` (a new label, created once via `gh label create`). Makes a
+finished story queryable/filterable, not just "closed" in GitHub's own
+state.
 
 ## What changed from the original design
 
@@ -76,8 +90,10 @@ review exists," regardless of who/what produces it:
 
 ```bash
 gh pr merge <pr_number> --auto --squash --delete-branch
-# Then: find the closed subtask, find its parent story, close the story
-# if no type:subtask siblings remain open under it (see above).
+# Then: find the closed subtask, find its parent story
+# (GET .../issues/<subtask>/parent), close the story
+# (relabeling status:ready -> status:done first) if no sub-issues
+# remain open under it (GET .../issues/<story>/sub_issues).
 ```
 
 `--auto` waits for required checks (the repo's own `build.yml`) to go green

@@ -33,10 +33,7 @@ reasoning trail, not silently overwritten.
         |  creates/updates/closes type:subtask issues (status:pending-review)
         v
 2. Three Amigos  --(batch review: all subtasks together, can split/merge/find gaps)--
-        |  READY -> every subtask -> status:awaiting-approval
-        v
-[PO APPROVAL GATE — status:awaiting-approval]      (manual checkpoint, not automated)
-        |  PO relabels status:ready (the EXISTING label — no new one needed)
+        |  READY -> every subtask -> status:awaiting-approval, story -> status:ready
         v
 3. Dev & Test  <--(CHANGES_REQUESTED, automated fix-up)--  4. PR Review
         |  opens PR                                             |  APPROVED
@@ -45,40 +42,57 @@ reasoning trail, not silently overwritten.
                                                      5. Merge & Backlog
 ```
 
+**No PO approval gate between nodes 2 and 3 as of 2026-08-25** — see "What
+changed from the original design" below for the full history; the earlier
+version of this diagram had a `[PO APPROVAL GATE]` box here that the PO
+explicitly removed.
+
 | # | Node | Role | Model tier |
 |---|------|------|------------|
 | — | PO drafting | You + Gemini/Antigravity draft the User Story. Manual, external to the automated graph. | Gemini/Antigravity (subscription) |
 | 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose/restructure a whole subtask batch — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
-| 2 | Three Amigos | Batch readiness gate — reviews every subtask for a story together, can flag splits/merges/coverage gaps a single-subtask view would miss | Gemini 3.7 Flash (High) |
-| — | PO approval gate | Human checkpoint: nothing gets implemented until the PO explicitly says go, even after Three Amigos returns `READY`. Manual, not automated — the one PO touchpoint left in the whole pipeline. | — |
+| 2 | Three Amigos | Batch readiness gate — reviews every subtask for a story together, can flag splits/merges/coverage gaps a single-subtask view would miss; on `READY` promotes the story straight to `status:ready` | Gemini 3.7 Flash (High) |
 | 3 | Dev & Test | Implement the subtask, run the real test suite, open the PR — first pass and `CHANGES_REQUESTED` fix-up alike | Gemini 3.7 Flash (High) |
 | 4 | PR Review | Authoritative — real GitHub review (approve/request-changes), gates the merge | Claude Opus |
-| 5 | Merge & Backlog | `gh pr merge`, triggered by PR Review's own approval | Deterministic ($0) |
+| 5 | Merge & Backlog | `gh pr merge`, triggered by PR Review's own approval; closes the parent story (`status:done`) once every subtask under it is done | Deterministic ($0) |
 
 Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
 points). **Gemini handles the batch readiness gate and implementation** (nodes
-2 & 3). Node 5 is plain `gh` CLI, no model involved. The PO drafting step and
-approval gate are deliberately unnumbered — they're the only human
-checkpoints left, not automated graph nodes, per "Add a node only when it
-demonstrably needs one" below.
+2 & 3). Node 5 is plain `gh` CLI, no model involved. The PO drafting step is
+deliberately unnumbered — external to the automated graph, per "Add a node
+only when it demonstrably needs one" below. Unlike drafting, the approval
+gate that used to sit between nodes 2 and 3 was fully removed (not just
+left unnumbered) — see below.
 
 ## What changed from the original design during implementation
 
-Two rounds of the same scope question, both 2026-08-24:
+Three rounds of the same scope question — how much of this pipeline stays
+human-gated:
 
-1. **First pass:** Dev & Test stayed manual (existing interactive
-   `.antigravity` flow) and PR Review became advisory (plain comment, PO's
-   own approval gated the merge) — the PO wanted to stay hands-on at the
-   implementation and PR-approval steps specifically.
-2. **Reversed within hours:** the PO decided PR Review had to be
-   authoritative again, and pointed out this couldn't work halfway — an
+1. **First pass (2026-08-24):** Dev & Test stayed manual (existing
+   interactive `.antigravity` flow) and PR Review became advisory (plain
+   comment, PO's own approval gated the merge) — the PO wanted to stay
+   hands-on at the implementation and PR-approval steps specifically.
+2. **Reversed within hours (2026-08-24):** the PO decided PR Review had to
+   be authoritative again, and pointed out this couldn't work halfway — an
    automated Opus↔Gemini review/fix loop isn't a loop if a human has to
    sit in the middle of it. So Dev & Test became fully automated too (both
    the first implementation pass and the `CHANGES_REQUESTED` fix-up),
-   closing the loop end-to-end. The one PO touchpoint that survived both
-   rounds unchanged: the `status:awaiting-approval` → `status:ready`
-   approval gate after Three Amigos — that's still manual, still
-   deliberate, never on the table.
+   closing the loop end-to-end. At the time, the one PO touchpoint that
+   survived: the `status:awaiting-approval` → `status:ready` approval gate
+   after Three Amigos — called out then as "still manual, still
+   deliberate, never on the table."
+3. **That gate removed too (2026-08-25).** It was, in fact, on the table —
+   the PO's reasoning for removing it mirrors round 2's exactly: no
+   PO-in-the-loop step should sit between two nodes whose job is to hand
+   off to each other automatically. Three Amigos now promotes a `READY`
+   verdict straight to `status:ready` (see `docs/three-amigos-node.md`
+   "Routing"). Explicitly **not** a merge of Three Amigos and Dev & Test
+   into one node — the PO was specific that they stay separate pipeline
+   stages; only the manual checkpoint between them is gone. The lesson
+   this round leaves for next time: don't describe a remaining manual step
+   as permanent just because it survived one round of automation — ask
+   what's left before assuming it's load-bearing.
 
 Both docs (`docs/pr-review-node.md`, `docs/dev-test-node.md`) keep the
 full back-and-forth as a reasoning trail rather than just reflecting the
@@ -96,17 +110,19 @@ below for why, and the caveats that come with it.
 > ([PR #54](https://github.com/AntaresAndBharani/crosstrainingapp/pull/54),
 > then redesigned as a batch review in commit `2be624e`), PR Review, Dev &
 > Test, and Merge & Backlog all automated and authoritative as of commit
-> `81d9903`. The **only** remaining manual step is the PO approval gate
-> after Three Amigos — everything else, including PR review and the
-> resulting fix-up loop, runs unattended. See "What changed from the
-> original design during implementation" above for the same-day reversal,
-> and "Implementation lessons from live testing" below for what real-world
-> testing surfaced.
+> `81d9903`. **As of 2026-08-25, there is no manual step left in the happy
+> path** — the PO approval gate after Three Amigos (the one exception noted
+> here as of 2026-08-24) was removed the next day; a `READY` verdict now
+> promotes straight to `status:ready` with no relabel. The PO still gets
+> pulled in for escalations (`status:needs-po-input`) at any stage. See
+> "What changed from the original design during implementation" above for
+> both reversals, and "Implementation lessons from live testing" below for
+> what real-world testing surfaced.
 
 Per-node specs:
 
 - [`docs/definition-node.md`](docs/definition-node.md) — Architect (**implemented, live**): PO drafting input, interactive vs. headless entry points, batch decompose/restructure/answer-clarifications modes, PO-escalation, issue schema, prompt templates.
-- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (**implemented, live**): batch readiness gate across a whole story's subtasks, structural split/merge/gap detection, PO approval gate after `READY`.
+- [`docs/three-amigos-node.md`](docs/three-amigos-node.md) — Three Amigos (**implemented, live**): batch readiness gate across a whole story's subtasks, structural split/merge/gap detection, promotes `READY` straight to `status:ready` (no PO relabel as of 2026-08-25).
 - [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (**implemented, live**): automated implementation + test pass, and the automated fix-up response to PR Review's `CHANGES_REQUESTED`.
 - [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (**implemented, live, authoritative**): real GitHub review, gates the merge, drives the fix-up loop.
 - [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (**implemented, live**): deterministic merge triggered by PR Review's own approval.
@@ -295,7 +311,6 @@ po_escalation             {issue, conflict} | null          (Architect -> PO, un
 github_issue_ids         [int]
 current_issue_id         int | null
 clarification_questions  [{issue, field, question}]         (Three Amigos -> Architect, tier 1, capped)
-po_approval                PENDING | APPROVED | null         (the PO approval gate after Three Amigos READY)
 branch_name               string
 pr_number                 int | null
 pr_diff                   string
@@ -318,15 +333,22 @@ jobs and not a standalone polling script — GitHub already emits the exact
 events this graph's edges correspond to, so there's no need to build or host
 a poller:
 
+**Updated 2026-08-25 — the rows below reflect what's actually live, not the
+original design.** Several rows changed since this table was first written:
+PR Review and Merge & Backlog moved off formal GitHub review states onto
+labels (`review:approved` / `review:changes-requested`, see
+`docs/pr-review-node.md`), Dev & Test became fully automated (both passes),
+and the PO approval gate row was removed entirely, not just updated — see
+"What changed from the original design" above for why each one changed.
+
 | Node | Trigger event |
 |---|---|
 | **Architect — headless entry** | `issues: [labeled]` — `status:ready-for-architect` on `type:user-story` (full refine+decompose) or `type:subtask` (incorporate a PO answer) |
-| Three Amigos | `issues: [labeled]` — `status:review` on a `type:subtask`, applied by Architect (either entry point, or after resolving a clarification) |
-| **PO approval gate** | *Not a workflow* — the PO reviews the `status:awaiting-approval` subtask and manually relabels `status:ready` when ready to proceed |
-| Dev & Test (first pass) | Currently manual/interactive (existing `.antigravity` Developer/Tester setup) — reacts to `status:ready`, the **existing** label, applied by the **PO**, never automatically by Three Amigos' `READY` |
+| Three Amigos | `issues: [labeled]` — `status:review` on the `type:user-story` (batch review, not per-subtask), applied by Architect |
+| Dev & Test (first pass) | Antigravity: `status:ready` on the **story**, set automatically by Three Amigos' `READY` verdict (no PO relabel, as of 2026-08-25). GitHub Actions (disabled): `issues: [labeled]` `status:ready` on an individual **subtask**, same automatic promotion, different granularity — see `docs/antigravity-scheduled-tasks.md`. |
 | PR Review | `pull_request: [opened, synchronize]` |
-| Dev & Test (fix-up pass) | `pull_request_review: [submitted]` filtered to `changes_requested` |
-| Merge & Backlog | `pull_request_review: [submitted]` filtered to `approved` |
+| Dev & Test (fix-up pass) | Antigravity: PR labeled `review:changes-requested` (polled, checked first each cycle). GitHub Actions (disabled): `pull_request: [labeled]` filtered to the same label. |
+| Merge & Backlog | `pull_request: [labeled]` filtered to `review:approved` |
 
 ### Label taxonomy
 
@@ -341,13 +363,16 @@ status:ready-for-architect  on type:user-story: PO says the draft is ready, run 
                               on type:subtask: PO answered a needs-po-input escalation, incorporate it
 status:needs-po-input       Architect escalated a conflict/business call (either issue type) — PO resolves,
                               then relabels status:ready-for-architect
-status:review                Architect created/updated this subtask — hands off to Three Amigos
+status:review                Architect created/updated this story's subtask batch — hands off to Three Amigos
+                              (applied to the type:user-story; batch-reviewed all at once, not per-subtask)
 status:needs-revision        Three Amigos: issue is wrong/incomplete — full rework by Architect
 status:needs-clarification   Three Amigos has a targeted doubt — Architect tries to resolve (tier 1, capped
                               at 3), may escalate to status:needs-po-input (tier 2, uncapped)
-status:awaiting-approval     Three Amigos returned READY — sitting at the PO approval gate
-status:ready                 (existing) PO said go — triggers Dev & Test (currently: pick it up in Antigravity)
+status:awaiting-approval     on a subtask: Three Amigos' own "cleared for pickup" marker, not a PO gate
+status:ready                 (existing) as of 2026-08-25, set automatically by Three Amigos' READY verdict
+                              (no PO relabel step anymore) — triggers Dev & Test
 status:in-progress            (existing) someone's actively implementing it
+status:done                   (new, 2026-08-25) every subtask under this story is closed — story closed too
 
 review:approved               PR Review verdict, on the PR itself — triggers Merge & Backlog
 review:changes-requested      PR Review verdict, on the PR itself — triggers Dev & Test's fix-up pass

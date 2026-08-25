@@ -88,27 +88,53 @@ Two distinct failure paths, not one — this is the refinement from the
 
 ## Posting a readable summary (2026-08-22 — not optional)
 
-The `verdict` JSON drives routing; it is not what the PO reads. Since `READY`
-now lands on the PO approval gate (see "Routing" below), the PO is reading
-the actual GitHub issue to decide whether to say go — so before or when
-applying `status:awaiting-approval`, Three Amigos must also post a comment
-synthesizing `product_analysis`, `developer_analysis`, and `qa_analysis`
-into plain language: what was checked, what the BDD scenarios are, anything
-worth the PO's attention even though it didn't block readiness. Same for
-`NEEDS_REVISION` / `NEEDS_CLARIFICATION` — the feedback/questions should be
-visible as a comment on the issue, not only passed as JSON to Architect,
-so there's a readable audit trail of why the issue bounced.
+The `verdict` JSON drives routing; it is not what the PO reads. `READY` no
+longer waits on a PO relabel (see "Routing" below), but the comment is
+still not optional — it's the audit trail the PO reads *after the fact* to
+understand why a story moved on without them, and what to check if
+something downstream goes wrong. Before or when applying `status:ready`,
+Three Amigos must post a comment synthesizing `product_analysis`,
+`developer_analysis`, and `qa_analysis` into plain language: what was
+checked, what the BDD scenarios are, anything worth the PO's attention
+even though it didn't block readiness. Same for `NEEDS_REVISION` /
+`NEEDS_CLARIFICATION` — the feedback/questions should be visible as a
+comment on the issue, not only passed as JSON to Architect, so there's a
+readable audit trail of why the issue bounced.
 
 ## Routing
 
 ```
-READY               -> status:awaiting-approval -> PO relabels status:ready (reusing the EXISTING
-                        label crosstrainingapp's Antigravity Developer/Tester setup already
-                        picks up) -> Dev & Test, once the PO says go
+READY               -> status:ready directly -> Dev & Test picks it up on its own
 NEEDS_REVISION       -> status:needs-revision -> Architect (SMART Decomposition)
 NEEDS_CLARIFICATION  -> status:needs-clarification -> Architect (headless, may further
                         escalate to status:needs-po-input) -> status:review -> Three Amigos (re-check)
 ```
+
+**No PO relabel step as of 2026-08-25 — reversed from the original design
+below.** `READY` originally landed on `status:awaiting-approval` and waited
+for the PO to manually relabel `status:ready` before Dev & Test would
+touch it (the "explicit human checkpoint" reasoning further down predates
+this change and is kept for history, not as current behavior). The PO's
+explicit call: Three Amigos and Dev & Test stay separate nodes, but the
+manual checkpoint between them is gone, the same shape of change PR
+Review's authority went through the day before. `status:ready` is still
+the *existing* label this repo already used for "ready to be picked up" —
+only *who* sets it changed, from the PO's hand to Three Amigos' own READY
+verdict.
+
+**Where this label lands differs by executor**, an earlier, still-intentional
+divergence (see `docs/antigravity-scheduled-tasks.md`): the live Antigravity
+flow sets `status:ready` on the **story** (Dev & Test's gate is story-level
+there); the disabled GitHub Actions flow sets it on **each subtask**
+individually (`dev-test.yml`'s gate is subtask-level). Both skip the manual
+step now, just at different granularity, matching each flow's own gate
+shape. Subtask-level `status:awaiting-approval` still exists in the
+Antigravity flow — it's Three Amigos' own "cleared for pickup" marker, not
+a PO gate, and is unaffected by this change.
+
+The paragraph below describes the *original* design rationale for the
+human checkpoint (2026-08-22) — read as history, since that checkpoint no
+longer exists in the live flow.
 
 `READY` no longer routes straight into Dev & Test (2026-08-22 revision) — it
 lands on an explicit human checkpoint instead. The point of this pipeline's
@@ -163,6 +189,17 @@ DECISION RULE:
 OUTPUT FORMAT:
 Output ONLY valid JSON matching the schema in docs/three-amigos-node.md.
 ```
+
+## Subtask discovery (2026-08-25 — real GitHub relationship, not text)
+
+This node evaluates a story's subtasks in one batch (2026-08-23 redesign,
+see the top of this doc). Finding those subtasks used to mean listing every
+open `type:subtask` issue and regex-matching a "Parent user story #N" line
+in each body — replaced with GitHub's native Sub-issues API
+(`GET .../issues/<story>/sub_issues`), which Architect now populates
+directly when it creates each subtask (see `docs/definition-node.md`). Same
+principle as the routing change above: remove a manual/fragile step once a
+real mechanism exists, rather than keep working around its absence.
 
 ## Interfaces this node depends on
 

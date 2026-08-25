@@ -313,9 +313,19 @@ gh issue create --title "[Subtask]: <title>" \
 Fill in the `subtask.yml` template's fields directly (parent-story,
 target-repo, entry-points, acceptance-criteria, verification, size,
 complexity, blocked-by) rather than inventing a different body shape — that
-template already covers everything Architect needs to produce. Capture the
-new issue's number and add it to the parent user story's `subtasks`
-checklist field.
+template already covers everything Architect needs to produce.
+
+**Link as a real GitHub sub-issue too (2026-08-25).** The `parent-story`
+body field is a human-readable reference, not a structural link — every
+node downstream that needs to walk the story↔subtask relationship (Three
+Amigos, Merge & Backlog, Architect's own restructure-mode discovery) used
+to regex-match that text across every open `type:subtask` issue. Replaced
+with GitHub's real Sub-issues relationship: immediately after `gh issue
+create` for a new subtask, call `POST /repos/{o}/{r}/issues/{story}/sub_issues`
+with the new subtask's integer database `id` (**not** the GraphQL node id
+`gh issue view --json id` returns — confirmed live, that shape 422s).
+The parent-story text field stays in the body too, as a harmless
+human-readable fallback — this is additive, not a replacement for it.
 
 ## Label taxonomy this node uses
 

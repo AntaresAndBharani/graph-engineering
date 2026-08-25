@@ -56,19 +56,22 @@ being built, unlike every other node in this repo.
   Gemini 3.1 Pro to stay on Google AI Studio's free tier — see the top-level
   README's "Claude & Gemini auth / free-tier status").
 - **Trigger:** an issue labeled `status:ready` (the *existing* label in
-  `crosstrainingapp`, reused as the final PO go-ahead — not a new label),
-  **or** a PR labeled `review:changes-requested` by PR Review (this node
-  handles both first implementation and fix-up passes — same actor, same
-  responsibility). `status:ready` is applied by the **PO**, not
-  automatically by Three Amigos' `READY` verdict — see
-  `docs/three-amigos-node.md` "Routing" (2026-08-23 revision): `READY` lands
-  on `status:awaiting-approval` first, and only the PO's explicit relabel to
-  `status:ready` applies. Don't wire this node to trigger directly off
-  Three Amigos' `READY`. **Also unchanged for now:** this node is currently
-  the existing interactive `.antigravity/agents/developer.md` +
-  `tester.md` + `android-tdd.md` setup, used by hand, not automated — this
-  doc describes the target design if/when it's automated, not a replacement
-  being built now.
+  `crosstrainingapp`, reused as the go-ahead — not a new label), **or** a PR
+  labeled `review:changes-requested` by PR Review (this node handles both
+  first implementation and fix-up passes — same actor, same
+  responsibility). **As of 2026-08-25, `status:ready` is applied
+  automatically by Three Amigos' `READY` verdict**, not by the PO — see
+  `docs/three-amigos-node.md` "Routing." The original 2026-08-23 design
+  (quoted below for history) had the PO relabel manually after Three
+  Amigos landed on `status:awaiting-approval`; the PO's explicit call was
+  to remove that checkpoint so the Opus↔Gemini review/fix loop can run
+  fully without a human in it, same shape of change PR Review's authority
+  went through. Which label this node actually gates on differs by
+  executor (see `docs/antigravity-scheduled-tasks.md`): the live
+  Antigravity flow's trigger is `status:ready` on the **story**; the
+  disabled GitHub Actions `dev-test.yml` below still triggers per
+  **subtask** — both are now set automatically, just at different
+  granularity, unchanged from before this revision.
 - **Output:** a branch, commits, and an open (or updated) PR.
 - **Local test runner cost:** $0 — no LLM involved in actually running tests.
 
