@@ -258,6 +258,28 @@ repo (4, not 3 — one was missing from the original plan):**
   auto-closed via `Closes #N`, and #55 just sat there open. Fixed in
   `merge.yml` (the moment a subtask finishes is the natural place to check)
   — see `docs/merge-node.md`'s "Closing the parent story."
+- **A single stale, conflicting PR silently jams the entire pipeline, with
+  no detection or escalation (2026-08-25 — found live, not yet fixed as a
+  design gap).** Dev & Test's "one story in flight at a time" simplification
+  (see `docs/antigravity-scheduled-tasks.md`'s "Concurrency") means Step 2a
+  of its own gate is "any PR open at all? stop." A PR that's been open for a
+  while and fallen behind `main` (many other subtask PRs merged in the
+  meantime) can develop a real git conflict — `gh pr merge --auto` in
+  `merge.yml` can't do anything about that; it just sits forever, `--auto`
+  silently waiting on a state that will never resolve itself. Nothing polls
+  for or escalates this, so every other queued story stops advancing with
+  no visible error anywhere — found only because the PO noticed 11
+  `status:ready` stories sitting untouched and asked why. Root-caused via
+  `gh pr view --json mergeable,mergeStateStatus`
+  (`CONFLICTING`/`DIRTY`), fixed for this one instance by manually
+  rebasing the branch and force-pushing — not yet a systemic fix. Two real
+  design questions this surfaces, neither resolved yet: should something
+  (Dev & Test's own poll? a new check?) detect a `CONFLICTING` PR and
+  either auto-rebase or escalate to the PO, and does "one story at a
+  time" still make sense now that Backlog Triage can autonomously queue
+  many stories at once (see `docs/backlog-triage-node.md`) — the backlog
+  clears one story per bottleneck-PR at whatever cadence Dev & Test polls,
+  which may not scale with how fast stories can now be generated.
 
 ## Inter-agent communication principles
 
