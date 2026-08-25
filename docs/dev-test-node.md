@@ -9,6 +9,17 @@ output contract, only one should be active at a time — see
 toggle between them, including the local-vs-CI `gradlew`/`gradlew.bat`
 distinction that flips direction for this executor.
 
+**Antigravity execution detail (2026-08-25):** the live Antigravity
+executor now runs Three Amigos' logic first, unconditionally, at the start
+of every poll that would otherwise just run this node's steps — a cost
+optimization (fewer separate scheduled-task sessions), not a change to
+either node's responsibilities. See
+`docs/antigravity-scheduled-tasks.md`'s "Three Amigos merged into Dev &
+Test" and `docs/three-amigos-node.md`. This node's own step order below
+(now Steps 2-5 in the merged file, Steps 1-4 as originally designed here)
+and output contract are unchanged. The disabled GitHub Actions twin
+(`dev-test.yml`) is untouched and remains its own separate workflow.
+
 **Automated after all — reversed the same day, 2026-08-24.** Stayed manual
 for a few hours; the PO then decided PR Review had to become authoritative
 again (real GitHub review, gates the merge), and for the resulting

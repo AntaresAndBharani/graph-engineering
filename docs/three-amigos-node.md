@@ -7,6 +7,16 @@ exhausted mid-pipeline). Same responsibilities, same output contract, only
 one should be active at a time — see `docs/antigravity-scheduled-tasks.md`
 for the prompt, schedule, and the toggle between them.
 
+**Antigravity execution detail (2026-08-25):** the live Antigravity
+executor now runs this node's logic in the same scheduled-task session as
+Dev & Test, purely to cut per-poll session overhead — see
+`docs/antigravity-scheduled-tasks.md`'s "Three Amigos merged into Dev &
+Test." This node's own responsibilities, output contract, and routing
+below are unaffected; it's still a logically distinct node, just executed
+back-to-back with Dev & Test instead of in its own session. The disabled
+GitHub Actions twin (`three-amigos.yml`) is untouched and remains its own
+separate workflow.
+
 **Implemented and live-testing (2026-08-23)** —
 [`three-amigos.yml`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.github/workflows/three-amigos.yml)
 in `crosstrainingapp`, merged via

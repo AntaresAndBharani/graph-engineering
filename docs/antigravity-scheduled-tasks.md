@@ -10,16 +10,17 @@ runs a plain natural-language prompt against a local repo checkout — no
 workflow YAML, no `gemini_api_key` secret, no free-tier RPD ceiling shared
 across every node.
 
-This file documents the Antigravity side of Tasks 1 and 2 (**alternate
-executor for Three Amigos & Dev & Test** — the nodes themselves are
+This file documents the Antigravity side of Task 1 (**alternate executor
+for Three Amigos & Dev & Test**, merged into one scheduled task 2026-08-25
+purely for session-cost efficiency — the two nodes themselves are
 unchanged and still fully specified in `docs/three-amigos-node.md` and
-`docs/dev-test-node.md`; what's new here is *who runs the node's logic*, not
-what the node does) plus Task 3 (**Backlog Triage**, 2026-08-25 — shipped
-as "Tech-Debt Triage," generalized to also cover `enhancement` issues
-before it had even completed its first poll cycle, see Task 3 below), a
-brand new node built directly as a scheduled task with no GitHub Actions
-equivalent at all — see `docs/backlog-triage-node.md` for that one's full
-design.
+`docs/dev-test-node.md`; what's new here is *who runs the node's logic and
+how many sessions it costs*, not what either node does) plus Task 2
+(**Backlog Triage**, 2026-08-25 — shipped as "Tech-Debt Triage,"
+generalized to also cover `enhancement` issues before it had even
+completed its first poll cycle, see Task 2 below), a brand new node built
+directly as a scheduled task with no GitHub Actions equivalent at all —
+see `docs/backlog-triage-node.md` for that one's full design.
 
 ## Prompts live in files, not inline (2026-08-24 — found via live testing)
 
@@ -274,6 +275,41 @@ Amigos hadn't actually been caught misbehaving from this yet — fixed
 proactively anyway, since it shares the exact same reasoning gap and this
 is now a confirmed failure mode in this project, not a theoretical one.
 
+## Three Amigos merged into Dev & Test (2026-08-25 — a deliberate cost optimization, not a bug fix)
+
+Worth flagging as a different kind of change from everything else on this
+page: nothing was broken here. The PO hit Gemini's 5-hour quota on the
+Antigravity plan and asked for scheduled tasks to be more efficient.
+Every poll spawns a brand-new session — confirmed live by opening one of
+Backlog Triage's own past runs and finding it archived — and that
+session-setup cost (loading instructions, syncing the checkout, initial
+context) is paid once per poll regardless of how much real work happens
+inside. Three Amigos and Dev & Test were paying that cost separately, on
+separate schedules; folding Three Amigos in as an unconditional first step
+pays it once instead of twice, without changing how often either node's
+*expensive* work actually runs — Three Amigos' panel review still only
+fires when a story is genuinely at `status:review`.
+
+Because Three Amigos never touches git or the working tree, it doesn't
+need to stop-and-return after running the way every other step in this
+file does (each of those stops the moment it finds something to do,
+deliberately, so only one git-touching operation happens per poll). Three
+Amigos runs unconditionally, then always falls through to the rest of the
+chain regardless of what it found — a real latency bonus on top of the
+cost savings: a story it just promoted to `status:ready` can be picked up
+by the implementation step in the *same* poll instead of waiting for the
+next one.
+
+`three-amigos.md` deleted; `dev-test.md` renamed to
+`three-amigos-and-dev-test.md` (the second merge of this file — the first,
+2026-08-24, folded Dev & Test's own Implement/Fix-up split together; see
+"Fourth bug" above) with Three Amigos' full, unchanged procedure as the
+new Step 1, and the file's four existing steps renumbered 2 through 5.
+Backlog Triage was deliberately left out of this merge — it has a
+materially different responsibility (synthesizing new stories from
+backlog, not reviewing or implementing existing ones) and never shared the
+"stop after first match" step chain the other two already did.
+
 ## Two executors, switchable at any time
 
 **Current state (2026-08-24): Antigravity is the only active executor for
@@ -344,55 +380,34 @@ redoing work it already did on a prior poll:
   persists until the *next* review, so every poll in between would see the
   same "needs a fix" state and redo it). Since PR Review now applies
   `review:changes-requested` as a label instead, and this prompt removes
-  that label the moment it pushes a fix (see Task 2 below), the same
+  that label the moment it pushes a fix (see Task 1 below), the same
   remove-on-pickup pattern as the other tasks applies here too — no
   timestamp bookkeeping needed anymore.
 
-## Task 1 — Three Amigos
+## Task 1 — Three Amigos + Dev & Test
+
+**Merged into one task on 2026-08-25** — the second merge of this file
+(the first, 2026-08-24, folded Dev & Test's own Implement/Fix-up split
+together; see "Fourth bug" above). This time it's a different node
+entirely (Three Amigos) folding into Dev & Test, purely a cost move: the
+PO hit Gemini's 5-hour Antigravity quota and asked for scheduled tasks to
+be more efficient. Every poll spawns a brand-new session (confirmed live
+— a past Backlog Triage run was found archived) and pays a session-setup
+cost regardless of how much work happens inside; running both nodes'
+logic in one session pays that cost once per poll instead of twice.
+Three Amigos never touches git or the working tree, so it doesn't need to
+stop-and-return like the other steps — it runs unconditionally first,
+then always falls through to the rest of the chain, meaning a story it
+just promoted to `status:ready` can be picked up by the implementation
+step in the *same* poll. Full reasoning in `docs/three-amigos-node.md` and
+`docs/dev-test-node.md`.
 
 | | |
 |---|---|
-| Antigravity task name | `Three Amigos (crosstrainingapp)` |
+| Antigravity task name | `Three Amigos + Dev & Test - CrossTrainingApp (crosstrainingapp)` |
 | Repository / folder | `crosstrainingapp` |
-| Node replaced | Three Amigos batch review (`docs/three-amigos-node.md`) |
-| Schedule | Custom, `*/30 * * * *` (every 30 min — adjust to taste; nothing here is latency-sensitive) |
-| Type | Scheduled |
-
-Prompt (paste exactly — this is the whole Prompt field; keep it this short,
-see "Third bug" above):
-
-```
-Run .antigravity/tasks/three-amigos.md
-```
-
-Full instructions: [`three-amigos.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/three-amigos.md)
-— its own step 0 re-syncs the checkout to `origin/main` before anything
-else, so the inline prompt doesn't need to. **This line was inaccurate
-until 2026-08-25** — this task originally had no sync step at all (see
-"Fifth bug" above); added proactively once Backlog Triage was caught
-running stale logic from the exact same reasoning gap.
-Summary: polls `type:user-story` + `status:review` issues, discovers
-subtasks via the real GitHub Sub-issues relationship (`gh api
-.../sub_issues`, not body text — changed 2026-08-25), batch-reviews them
-as a Product/Developer/QA panel, posts one verdict comment marked
-`<!-- three-amigos-verdict -->`, and on `READY` promotes every subtask to
-`status:awaiting-approval` (its own "cleared for pickup" marker) and the
-story itself straight to **`status:ready`** — no PO relabel step as of
-2026-08-25; see `docs/three-amigos-node.md` "Routing."
-
-## Task 2 — Dev & Test
-
-**Merged from two tasks into one on 2026-08-24** — see "Fourth bug" above
-for why. Originally split into `Dev & Test: Implement` / `Dev & Test:
-Fix-up`; that split is what caused the same-tick race, so it no longer
-exists.
-
-| | |
-|---|---|
-| Antigravity task name | `Dev & Test - CrossTrainingApp (crosstrainingapp)` |
-| Repository / folder | `crosstrainingapp` |
-| Node replaced | Dev & Test, both passes (`docs/dev-test-node.md`) |
-| Schedule | Custom, `*/15 * * * *` |
+| Node replaced | Three Amigos batch review (`docs/three-amigos-node.md`) **and** Dev & Test, both passes (`docs/dev-test-node.md`) |
+| Schedule | Custom, `*/15 * * * *` (Dev & Test's existing cadence, not Three Amigos' former slower one — its own discovery check is cheap enough to run this often, and doing so is a responsiveness improvement, not a new cost) |
 | Type | Scheduled |
 
 **Runs locally on Windows, not CI** — the instructions file uses the `.bat`
@@ -406,31 +421,38 @@ Prompt (paste exactly — this is the whole Prompt field; keep it this short,
 see "Third bug" above):
 
 ```
-Run .antigravity/tasks/dev-test.md
+Run .antigravity/tasks/three-amigos-and-dev-test.md
 ```
 
-Full instructions: [`dev-test.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/dev-test.md)
+Full instructions: [`three-amigos-and-dev-test.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/three-amigos-and-dev-test.md)
 — its own step 0 re-syncs the checkout to `origin/main` before anything
 else, so the inline prompt doesn't need to.
-Summary: each poll checks, in order — (1) any subtask PR labeled
-`review:approved` with a real merge conflict (`mergeable: CONFLICTING`)?
-rebase it onto `main`, re-test, push, stop here this poll (new
-2026-08-25 — see `docs/dev-test-node.md`'s "Resolving approved-but-conflicting
-PRs"; highest priority since it unblocks every other queued story); (2)
-else, any subtask PR labeled `review:changes-requested`? address it, push
-a fix, remove the label, stop here this poll; (3) else, any PR open at
-all, or any story labeled `status:in-development`? stop, nothing to do;
-(4) else, poll `type:user-story` + `status:ready` issues (the story's own
-label, never a subtask's — set automatically by Three Amigos as of
-2026-08-25, see Task 1 above), discover its subtasks via the real
-Sub-issues relationship (changed 2026-08-25, was body-text matching),
-implement every one still labeled `status:awaiting-approval`, run
-`.\gradlew.bat testDebugUnitTest` (up to 3 attempts), and on success open a
-PR and relabel the subtask
+
+Summary: **Step 1** (always runs, never stops the chain) — polls
+`type:user-story` + `status:review` issues, discovers subtasks via the
+real GitHub Sub-issues relationship, batch-reviews them as a
+Product/Developer/QA panel, posts one verdict comment marked
+`<!-- three-amigos-verdict -->`, and on `READY` promotes every subtask to
+`status:awaiting-approval` and the story itself straight to
+`status:ready` — no PO relabel step. Then, every poll regardless of what
+Step 1 found — **Step 2**: any subtask PR labeled `review:approved` with a
+real merge conflict (`mergeable: CONFLICTING`)? rebase it onto `main`,
+re-test, push, stop here this poll (highest remaining priority, unblocks
+every other queued story — see `docs/dev-test-node.md`'s "Resolving
+approved-but-conflicting PRs"); **Step 3** (only if Step 2 found nothing):
+any subtask PR labeled `review:changes-requested`? address it, push a fix,
+remove the label, stop here this poll; **Step 4** (only if Steps 2-3 found
+nothing): any PR open at all, or any story labeled `status:in-development`?
+stop, nothing to do; **Step 5** (only if Step 4 didn't stop): poll
+`type:user-story` + `status:ready` issues (the story's own label, never a
+subtask's — including one Step 1 just set this same poll), discover its
+subtasks via Sub-issues, implement every one still labeled
+`status:awaiting-approval`, run `.\gradlew.bat testDebugUnitTest` (up to 3
+attempts), and on success open a PR and relabel the subtask
 `status:in-progress` — or `status:needs-po-input` on failure/escalation.
 Never touches the story's own `status:ready` label.
 
-## Task 3 — Backlog Triage (2026-08-25 — Antigravity-only, no GitHub Actions counterpart)
+## Task 2 — Backlog Triage (2026-08-25 — Antigravity-only, no GitHub Actions counterpart)
 
 Unlike Tasks 1 and 2, this one didn't move from an existing GitHub Actions
 workflow — it's a brand new node (see `docs/backlog-triage-node.md`),
@@ -487,9 +509,10 @@ confirming the full automatic chain works with zero PO steps.
 ## What this doesn't change
 
 - Architect and PR Review stay on Claude via GitHub Actions — the
-  executor-toggle switch (Tasks 1 and 2) is scoped to the two Gemini-backed
-  nodes with a GitHub Actions twin, per the PO's request. Backlog Triage
-  has no such twin (see Task 3 above) so this doesn't apply to it.
+  executor-toggle switch (Task 1, covering both Three Amigos and Dev &
+  Test) is scoped to the two Gemini-backed nodes with a GitHub Actions
+  twin, per the PO's request. Backlog Triage has no such twin (see Task 2
+  above) so this doesn't apply to it.
 - Merge & Backlog (`merge.yml`) needs no changes under either executor — it
   already only checks for an `APPROVED` review, regardless of source.
 - The output contracts (labels, comment markers, PR body structure) are
