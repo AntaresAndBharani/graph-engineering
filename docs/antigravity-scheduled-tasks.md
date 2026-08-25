@@ -1,4 +1,4 @@
-# Antigravity Scheduled Tasks (alternate executor for Three Amigos & Dev & Test)
+# Antigravity Scheduled Tasks
 
 **Added 2026-08-24**, same day the GitHub Actions `dev-test.yml` run first hit
 Gemini's free-tier daily quota exhaustion (see the top-level README's
@@ -10,11 +10,14 @@ runs a plain natural-language prompt against a local repo checkout — no
 workflow YAML, no `gemini_api_key` secret, no free-tier RPD ceiling shared
 across every node.
 
-This file documents the Antigravity side only. The nodes themselves —
-responsibilities, output schema, routing, iteration caps — are unchanged and
-still fully specified in `docs/three-amigos-node.md` and
-`docs/dev-test-node.md`. What's new here is *who runs the node's logic*, not
-what the node does.
+This file documents the Antigravity side of Tasks 1 and 2 (**alternate
+executor for Three Amigos & Dev & Test** — the nodes themselves are
+unchanged and still fully specified in `docs/three-amigos-node.md` and
+`docs/dev-test-node.md`; what's new here is *who runs the node's logic*, not
+what the node does) plus Task 3 (**Tech-Debt Triage**, 2026-08-25), a brand
+new node built directly as a scheduled task with no GitHub Actions
+equivalent at all — see `docs/tech-debt-triage-node.md` for that one's full
+design.
 
 ## Prompts live in files, not inline (2026-08-24 — found via live testing)
 
@@ -384,10 +387,46 @@ labeled `status:awaiting-approval`, run `.\gradlew.bat testDebugUnitTest`
 `status:in-progress` — or `status:needs-po-input` on failure/escalation.
 Never touches the story's own `status:ready` label.
 
+## Task 3 — Tech-Debt Triage (2026-08-25 — Antigravity-only, no GitHub Actions counterpart)
+
+Unlike Tasks 1 and 2, this one didn't move from an existing GitHub Actions
+workflow — it's a brand new node (see `docs/tech-debt-triage-node.md`),
+built directly as a scheduled task since it needs to poll (no GitHub event
+exists for "N tech-debt issues have accumulated"). There's nothing to keep
+in parity with, so no disabled `.yml` twin exists for this one.
+
+| | |
+|---|---|
+| Antigravity task name | `Tech-Debt Triage (crosstrainingapp)` |
+| Repository / folder | `crosstrainingapp` |
+| Node replaced | None — new node, `docs/tech-debt-triage-node.md` |
+| Schedule | Custom, `0 */6 * * *` (every 6 hours — deliberately slower than the other two; not latency-sensitive) |
+| Type | Scheduled |
+
+Prompt (paste exactly — this is the whole Prompt field; keep it this short,
+see "Third bug" above):
+
+```
+Run .antigravity/tasks/tech-debt-triage.md
+```
+
+Full instructions: [`tech-debt-triage.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/tech-debt-triage.md)
+— no checkout sync needed, same reason as Three Amigos: pure `gh issue`
+reads/writes, no file edits, no git.
+Summary: lists the open `tech-debt` backlog, clusters it by theme (a lone
+issue with no cluster-mate still gets its own solo story — confirmed by
+the PO, don't leave anything waiting indefinitely for company), synthesizes
+one `type:user-story` per cluster labeled `status:ready-for-architect`
+directly (no PO definition pass — each source issue already came from a
+real PR Review pass with concrete detail), and closes every absorbed
+source issue with a comment naming the new story.
+
 ## What this doesn't change
 
-- Architect and PR Review stay on Claude via GitHub Actions — this switch is
-  scoped to the two Gemini-backed nodes only, per the PO's request.
+- Architect and PR Review stay on Claude via GitHub Actions — the
+  executor-toggle switch (Tasks 1 and 2) is scoped to the two Gemini-backed
+  nodes with a GitHub Actions twin, per the PO's request. Tech-Debt Triage
+  has no such twin (see Task 3 above) so this doesn't apply to it.
 - Merge & Backlog (`merge.yml`) needs no changes under either executor — it
   already only checks for an `APPROVED` review, regardless of source.
 - The output contracts (labels, comment markers, PR body structure) are
