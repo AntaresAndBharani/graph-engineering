@@ -42,15 +42,16 @@ reasoning trail, not silently overwritten.
                                                      5. Merge & Backlog
 ```
 
-PR Review also files non-blocking follow-ups as `tech-debt` issues (not
-shown above — a side effect of node 4, not a routed edge). A second,
-independent loop feeds those back into node 1 as a fresh input:
+PR Review also files non-blocking follow-ups as `tech-debt` or
+`enhancement` issues (not shown above — a side effect of node 4, not a
+routed edge). A second, independent loop feeds those back into node 1 as a
+fresh input:
 
 ```
-[tech-debt issues]  (filed by PR Review, accumulate with no type: label)
+[tech-debt / enhancement issues]  (filed by PR Review, accumulate with no type: label)
         |
         v  poll, every 6h
-Tech-Debt Triage  --(clustered by theme)-->  new type:user-story, status:ready-for-architect
+Backlog Triage  --(clustered by theme, per label, never mixed)-->  new type:user-story, status:ready-for-architect
         |                                              |
         v                                              v
 source issue(s) closed                    re-enters at 1. Architect (top)
@@ -64,21 +65,21 @@ explicitly removed.
 | # | Node | Role | Model tier |
 |---|------|------|------------|
 | — | PO drafting | You + Gemini/Antigravity draft the User Story. Manual, external to the automated graph. | Gemini/Antigravity (subscription) |
-| — | Tech-Debt Triage | Side input into node 1, not part of the main chain: polls the `tech-debt` backlog PR Review files, clusters it by theme, synthesizes `type:user-story` issues straight to `status:ready-for-architect`, closes the absorbed source issues. See `docs/tech-debt-triage-node.md`. | Gemini 3.7 Flash (High) |
+| — | Backlog Triage | Side input into node 1, not part of the main chain: polls the `tech-debt`/`enhancement` backlog PR Review files (run separately per label, never mixed), clusters each by theme, synthesizes `type:user-story` issues straight to `status:ready-for-architect`, closes the absorbed source issues. See `docs/backlog-triage-node.md`. | Gemini 3.7 Flash (High) |
 | 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose/restructure a whole subtask batch — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
 | 2 | Three Amigos | Batch readiness gate — reviews every subtask for a story together, can flag splits/merges/coverage gaps a single-subtask view would miss; on `READY` promotes the story straight to `status:ready` | Gemini 3.7 Flash (High) |
 | 3 | Dev & Test | Implement the subtask, run the real test suite, open the PR — first pass and `CHANGES_REQUESTED` fix-up alike | Gemini 3.7 Flash (High) |
-| 4 | PR Review | Authoritative — real GitHub review (approve/request-changes), gates the merge; files `tech-debt` follow-up issues, which Tech-Debt Triage above eventually turns back into stories | Claude Opus |
+| 4 | PR Review | Authoritative — real GitHub review (approve/request-changes), gates the merge; files `tech-debt`/`enhancement` follow-up issues, which Backlog Triage above eventually turns back into stories | Claude Opus |
 | 5 | Merge & Backlog | `gh pr merge`, triggered by PR Review's own approval; closes the parent story (`status:done`) once every subtask under it is done | Deterministic ($0) |
 
 Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
 points). **Gemini handles the batch readiness gate and implementation** (nodes
-2 & 3), plus the batch judgment call Tech-Debt Triage makes. Node 5 is plain
-`gh` CLI, no model involved. The PO drafting step and Tech-Debt Triage are
+2 & 3), plus the batch judgment call Backlog Triage makes. Node 5 is plain
+`gh` CLI, no model involved. The PO drafting step and Backlog Triage are
 deliberately unnumbered — both feed node 1 as inputs rather than sitting in
 the main 1→5 chain, per "Add a node only when it demonstrably needs one"
-below (which is also why Tech-Debt Triage is its own node rather than a mode
-of Merge & Backlog or Architect — see `docs/tech-debt-triage-node.md`).
+below (which is also why Backlog Triage is its own node rather than a mode
+of Merge & Backlog or Architect — see `docs/backlog-triage-node.md`).
 Unlike drafting, the approval gate that used to sit between nodes 2 and 3
 was fully removed (not just left unnumbered) — see below.
 
@@ -144,7 +145,7 @@ Per-node specs:
 - [`docs/dev-test-node.md`](docs/dev-test-node.md) — Dev & Test (**implemented, live**): automated implementation + test pass, and the automated fix-up response to PR Review's `CHANGES_REQUESTED`.
 - [`docs/pr-review-node.md`](docs/pr-review-node.md) — PR Review (**implemented, live, authoritative**): real GitHub review, gates the merge, drives the fix-up loop.
 - [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (**implemented, live**): deterministic merge triggered by PR Review's own approval.
-- [`docs/tech-debt-triage-node.md`](docs/tech-debt-triage-node.md) — Tech-Debt Triage (**implemented, live**): polls the `tech-debt` backlog, clusters it into stories, closes the absorbed source issues.
+- [`docs/backlog-triage-node.md`](docs/backlog-triage-node.md) — Backlog Triage (**implemented, live**): polls the `tech-debt`/`enhancement` backlog (separately per label), clusters into stories, closes the absorbed source issues.
 
 ## Implementation lessons from live testing (crosstrainingapp)
 
@@ -362,7 +363,7 @@ and the PO approval gate row was removed entirely, not just updated — see
 
 | Node | Trigger event |
 |---|---|
-| Tech-Debt Triage | Poll, `0 */6 * * *` — reads the open `tech-debt` backlog PR Review files; see `docs/tech-debt-triage-node.md` |
+| Backlog Triage | Poll, `0 */6 * * *` — reads the open `tech-debt`/`enhancement` backlog PR Review files, one label at a time; see `docs/backlog-triage-node.md` |
 | **Architect — headless entry** | `issues: [labeled]` — `status:ready-for-architect` on `type:user-story` (full refine+decompose) or `type:subtask` (incorporate a PO answer) |
 | Three Amigos | `issues: [labeled]` — `status:review` on the `type:user-story` (batch review, not per-subtask), applied by Architect |
 | Dev & Test (first pass) | Antigravity: `status:ready` on the **story**, set automatically by Three Amigos' `READY` verdict (no PO relabel, as of 2026-08-25). GitHub Actions (disabled): `issues: [labeled]` `status:ready` on an individual **subtask**, same automatic promotion, different granularity — see `docs/antigravity-scheduled-tasks.md`. |
@@ -397,10 +398,16 @@ status:done                   (new, 2026-08-25) every subtask under this story i
 review:approved               PR Review verdict, on the PR itself — triggers Merge & Backlog
 review:changes-requested      PR Review verdict, on the PR itself — triggers Dev & Test's fix-up pass
 
-tech-debt                     PR Review's non-blocking follow-up, filed as its own issue (no type: label —
-                               invisible to every other node by construction). As of 2026-08-25, actively
-                               triaged rather than pure backlog — see `docs/tech-debt-triage-node.md`.
+tech-debt                     PR Review's non-blocking follow-up (hygiene/hardening), filed as its own
+                               issue (no type: label — invisible to every other node by construction).
+enhancement                   Same as tech-debt, but for a genuine improvement rather than hygiene —
+                               same LLM judgment call, different category.
 ```
+
+Both `tech-debt` and `enhancement` are, as of 2026-08-25, actively triaged
+rather than pure backlog — see `docs/backlog-triage-node.md`. They're
+handled by the same scheduled task but never clustered together, even when
+issues from each touch the same file — confirmed explicitly by the PO.
 
 `review:approved`/`review:changes-requested` are PR-level, not issue-level
 — added 2026-08-24 when `pr-review.yml` moved off formal GitHub reviews
