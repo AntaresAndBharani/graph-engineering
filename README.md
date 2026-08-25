@@ -66,10 +66,10 @@ explicitly removed.
 |---|------|------|------------|
 | — | PO drafting | You + Gemini/Antigravity draft the User Story. Manual, external to the automated graph. | Gemini/Antigravity (subscription) |
 | — | Backlog Triage | Side input into node 1, not part of the main chain: polls the `tech-debt`/`enhancement` backlog PR Review files (run separately per label, never mixed), clusters each by theme, synthesizes `type:user-story` issues straight to `status:ready-for-architect`, closes the absorbed source issues. See `docs/backlog-triage-node.md`. | Gemini 3.7 Flash (High) |
-| 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose/restructure a whole subtask batch — escalates real conflicts back to the PO instead of guessing. | Claude Opus |
+| 1 | Architect (**Definition**) | Interactive: refine the requirement live with the human, then decompose. Headless: light technical refinement grounded in the repo, then decompose/restructure a whole subtask batch — escalates real conflicts back to the PO instead of guessing. | Claude Opus, **Sonnet 5 for `origin:backlog-triage` stories** (2026-08-25 cost split) |
 | 2 | Three Amigos | Batch readiness gate — reviews every subtask for a story together, can flag splits/merges/coverage gaps a single-subtask view would miss; on `READY` promotes the story straight to `status:ready` | Gemini 3.7 Flash (High) |
 | 3 | Dev & Test | Implement the subtask, run the real test suite, open the PR — first pass and `CHANGES_REQUESTED` fix-up alike | Gemini 3.7 Flash (High) |
-| 4 | PR Review | Authoritative — real GitHub review (approve/request-changes), gates the merge; files `tech-debt`/`enhancement` follow-up issues, which Backlog Triage above eventually turns back into stories | Claude Opus |
+| 4 | PR Review | Authoritative — real GitHub review (approve/request-changes), gates the merge; files `tech-debt`/`enhancement` follow-up issues, which Backlog Triage above eventually turns back into stories | Claude Sonnet 5 (moved off Opus 2026-08-25, cost) |
 | 5 | Merge & Backlog | `gh pr merge`, triggered by PR Review's own approval; closes the parent story (`status:done`) once every subtask under it is done | Deterministic ($0) |
 
 Split: **Claude handles definition and review** (nodes 1 & 4, high cost-of-error
@@ -80,6 +80,17 @@ deliberately unnumbered — both feed node 1 as inputs rather than sitting in
 the main 1→5 chain, per "Add a node only when it demonstrably needs one"
 below (which is also why Backlog Triage is its own node rather than a mode
 of Merge & Backlog or Architect — see `docs/backlog-triage-node.md`).
+
+**Model tier within Claude's two nodes is no longer uniform (2026-08-25,
+PO's cost call).** PR Review dropped Opus entirely — every review runs
+Sonnet 5 now, flat, no conditional. Architect kept Opus as its default
+(a PO-drafted story, or its own PO-escalation loop, still carries the
+judgment risk that justified Claude over Gemini in the first place) but
+runs Sonnet 5 specifically for `origin:backlog-triage` stories — those
+started life as PR Review's own well-specified follow-up issues, not a
+raw PO idea, so decomposing them is lower risk. The two nodes' cost
+decisions are deliberately asymmetric; don't read the PR Review change as
+implying Architect should also go flat-Sonnet, or vice versa.
 Unlike drafting, the approval gate that used to sit between nodes 2 and 3
 was fully removed (not just left unnumbered) — see below.
 
@@ -430,6 +441,10 @@ tech-debt                     PR Review's non-blocking follow-up (hygiene/harden
                                issue (no type: label — invisible to every other node by construction).
 enhancement                   Same as tech-debt, but for a genuine improvement rather than hygiene —
                                same LLM judgment call, different category.
+origin:backlog-triage         (new, 2026-08-25) on a type:user-story: this story was synthesized by
+                               Backlog Triage, not PO-drafted. Read by Architect to pick Sonnet 5 over
+                               Opus for this story (cost) - persists across restructure/
+                               answer_clarifications re-entries on the same story, not just the first pass.
 ```
 
 Both `tech-debt` and `enhancement` are, as of 2026-08-25, actively triaged

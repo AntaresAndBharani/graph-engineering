@@ -8,8 +8,12 @@ comment + label — see "Authority, reversed twice in one day" and "Real `gh
 pr review` needed a different identity than the PAT" below for the full
 trail, kept rather than erased.
 
-- **Model:** Claude Opus, via `anthropics/claude-code-action` authenticated
-  with `CLAUDE_CODE_OAUTH_TOKEN` (subscription-based billing, not
+- **Model:** Claude Sonnet 5 (moved off Opus 2026-08-25, PO's explicit cost
+  call — flat across every review, no conditional; contrast with
+  Architect, which kept Opus as its default and only went Sonnet for a
+  specific story origin, see `docs/definition-node.md`), via
+  `anthropics/claude-code-action` authenticated with
+  `CLAUDE_CODE_OAUTH_TOKEN` (subscription-based billing, not
   `ANTHROPIC_API_KEY`) — see the top-level README's "Claude & Gemini auth /
   free-tier status".
 - **Trigger:** `pull_request: [opened, synchronize]` — a PR opened by the

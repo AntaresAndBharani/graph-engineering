@@ -24,7 +24,20 @@ If this pipeline is ever pointed at a different repo, map onto whatever that
 repo's existing conventions are the same way, rather than reintroducing these
 exact names by default.
 
-- **Model:** Claude Opus (highest reasoning tier available).
+- **Model:** Claude Opus by default (highest reasoning tier available) —
+  **Sonnet 5 instead, specifically for stories labeled
+  `origin:backlog-triage`** (2026-08-25, PO's explicit cost call). Those
+  stories were synthesized by Backlog Triage (`docs/backlog-triage-node.md`)
+  from PR Review's own well-specified `tech-debt`/`enhancement` follow-ups,
+  not a raw PO idea — lower judgment risk to decompose, so the cheaper
+  model is a deliberate choice there, not a blanket downgrade. Opus stays
+  the default for everything else: PO-drafted stories, and the
+  PO-escalation loop (`status:needs-po-input`). The label persists across
+  every later Architect re-entry on the same story (`restructure`,
+  `answer_clarifications`), so the model choice tracks the story's actual
+  origin, not just its first pass. Implemented in `architect.yml`'s
+  `Determine mode` step, which reuses the label fetch it already does for
+  mode selection — no extra API call.
 - **Output:** GitHub issues created via `gh issue create`, following the
   schema below.
 

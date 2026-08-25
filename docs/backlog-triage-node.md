@@ -83,7 +83,11 @@ nothing else — the procedure itself doesn't change per label.
    what it actually is (engineering-hygiene cleanup for `tech-debt`, a
    genuine improvement for `enhancement`), never a fabricated product
    story with invented business impact/OKRs. The body explicitly lists
-   every source issue number and which label it came from.
+   every source issue number and which label it came from. Also labeled
+   `origin:backlog-triage` (2026-08-25) — originally just for origin
+   tracking, now also read by Architect (`docs/definition-node.md`) to
+   pick Sonnet 5 over Opus for this story, a cost decision. Don't drop
+   this label even for a single-issue solo-cluster story.
 4. Close each absorbed issue with a comment naming the new story, using
    the same wording the PO's own manual precedent used. The original
    label stays on the closed issue — still searchable by label after
