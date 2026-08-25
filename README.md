@@ -194,6 +194,11 @@ Per-node specs:
 - [`docs/merge-node.md`](docs/merge-node.md) — Merge & Backlog (**implemented, live**): deterministic merge triggered by PR Review's own approval.
 - [`docs/backlog-triage-node.md`](docs/backlog-triage-node.md) — Backlog Triage (**implemented, live**): polls the `tech-debt`/`enhancement` backlog (separately per label), clusters into stories, closes the absorbed source issues.
 
+Cross-cutting architectural standards:
+
+- [`docs/e2e-testing-recommendations.md`](docs/e2e-testing-recommendations.md) — E2E Testing Architecture & Recommendations (**implemented, live in `crosstrainingapp`**): the 5 pillars of agentic E2E testing (declarative flows, delta execution mapping via `flow-mapping.json`, deterministic runner scripts, external QA repository archival, sticky PR evidence reporting), cross-node integration contracts, and cross-stack blueprints (Mobile/Maestro, Web/Playwright, CLI/Pester).
+- [`docs/antigravity-scheduled-tasks.md`](docs/antigravity-scheduled-tasks.md) — Antigravity Scheduled Tasks (**implemented, live**): alternate cron-based executor for Three Amigos, Dev & Test, and Backlog Triage.
+
 ## Implementation lessons from live testing (crosstrainingapp)
 
 Real-world testing surfaced gaps the design phase couldn't have — kept here
@@ -332,7 +337,20 @@ repo (4, not 3 — one was missing from the original plan):**
   `docs/backlog-triage-node.md`) — the backlog still clears one story per
   bottleneck-PR at whatever cadence Dev & Test polls, which may not scale
   with how fast stories can now be generated. A faster-clearing queue
-  wasn't today's ask; only "don't let one stuck PR silently jam it" was.
+- **End-to-End (E2E) testing must be fast, delta-targeted, and sticky on PRs —
+  found live in `crosstrainingapp` (2026-08-20 to 2026-08-25).** Autonomous agents
+  modifying UI code can easily introduce visual regressions or layout bugs that pass
+  unit tests. Running the entire E2E suite on every subtask proved too slow for
+  agent iteration. The solution: **Delta execution mapping** (`e2e/flow-mapping.json`)
+  that maps changed file patterns to targeted test tags (e.g. `auth`, `logging`,
+  `theme`), coupled with **sticky in-place PR reporting** (`<!-- e2e-evidence -->`
+  marker updated via GitHub API) and **external QA asset storage** (`virgymia-qa`
+  releases for screenshots and HTML reports). Critical implementation hardening:
+  write PR comment bodies to OS temp files (`[System.IO.Path]::GetTempPath()`) to
+  prevent git workspace pollution, make comment publishing non-fatal so reporting
+  glitches never fail builds, and pre-validate remote release asset existence before
+  rendering image links to avoid 404 dead links. See `docs/e2e-testing-recommendations.md`
+  for the full architecture.
 
 ## Inter-agent communication principles
 

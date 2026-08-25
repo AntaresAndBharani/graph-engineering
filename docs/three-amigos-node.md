@@ -48,7 +48,9 @@ Three independent perspectives, evaluated together:
    modes (network, auth, state) addressed?
 3. **QA** — are acceptance criteria deterministic and testable? Are negative
    paths and boundary conditions explicit? Formulate Given/When/Then
-   scenarios from them.
+   scenarios from them, and identify matching E2E flow tags (e.g. `auth`,
+   `logging`, `history`, `library`, `theme`, `coach`) for delta test execution
+   (see `docs/e2e-testing-recommendations.md`).
 
 ## Output schema
 

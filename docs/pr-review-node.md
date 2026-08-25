@@ -107,9 +107,13 @@ checkpointed record.
 2. **Architecture & code quality** — separation of concerns, state management
    patterns, security (hardcoded secrets, validation, permissions),
    performance (rebuilds, leaks, unclosed streams).
-3. **Blocking vs. follow-up** — blocking = broken acceptance criteria,
-   security flaws, regressions, unhandled crashes; must be fixed before
-   merge. Non-blocking = refactors, minor perf, valuable-but-out-of-scope
+3. **E2E & Functional Evidence Verification** — inspect the PR comment thread
+   for the `<!-- e2e-evidence -->` table and unit test summary. If UI components
+   were modified, confirm that delta E2E flows passed and examine any failure
+   screenshots (see `docs/e2e-testing-recommendations.md`).
+4. **Blocking vs. follow-up** — blocking = broken acceptance criteria,
+   failing E2E flows, security flaws, regressions, unhandled crashes; must be
+   fixed before merge. Non-blocking = refactors, minor perf, valuable-but-out-of-scope
    enhancements — never block the PR for these, log them as separate issues
    instead (handled by the Merge & Backlog node).
 
