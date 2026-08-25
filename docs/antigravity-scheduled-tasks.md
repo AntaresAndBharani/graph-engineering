@@ -238,8 +238,41 @@ from `Run .antigravity/tasks/dev-test-implement.md` to
 name were left unchanged, since one task on that cron was never the
 problem — two of them were.
 
-Three Amigos was never part of this race (see "Concurrency" section above
-— it never touches the working tree) and needed no change.
+Three Amigos was never part of *this* race (see "Concurrency" section
+above — it never mutates the working tree, so two runs can't clobber each
+other's edits). It later turned out "never touches the working tree" had
+been used to justify skipping something else it did need — see "Fifth
+bug" below.
+
+## Fifth bug found via live testing: "doesn't touch the working tree" isn't the same as "doesn't need to sync it" (2026-08-25)
+
+Three Amigos and (initially) Backlog Triage were both built with the same
+reasoning: *this task only ever reads/writes GitHub issues via `gh`, never
+edits files or runs git, so it doesn't need to sync a checkout.* True for
+their own actions — but every Antigravity task's *instructions* are a file
+on disk in that same shared local checkout, and only Dev & Test (on its
+`*/15` cron) was actually keeping that checkout fresh. A task polling less
+often than Dev & Test syncs can read stale instructions in the window
+right after a push, regardless of whether the task itself ever touches
+git.
+
+Caught live, immediately: `backlog-triage.md` was renamed from
+`tech-debt-triage.md` the same day it shipped (see "Generalized" in
+`docs/backlog-triage-node.md`). The very next poll executed logic that
+matched the *deleted* file's old single-label wording almost verbatim
+("stop — nothing to do this poll" vs. the new file's "move on to the next
+label") — it checked `tech-debt` only, silently never checked
+`enhancement`, and reported "nothing to triage" despite 3 open
+`enhancement` issues sitting right there. Root cause confirmed, not
+guessed: only Dev & Test was syncing the checkout both tasks share, and
+Backlog Triage's 6-hour cadence gave it a wide window to run stale before
+Dev & Test's next 15-minute sync caught up.
+
+**Fix: both `backlog-triage.md` and `three-amigos.md` now sync the
+checkout as step 0**, same pattern `dev-test.md` already used. Three
+Amigos hadn't actually been caught misbehaving from this yet — fixed
+proactively anyway, since it shares the exact same reasoning gap and this
+is now a confirmed failure mode in this project, not a theoretical one.
 
 ## Two executors, switchable at any time
 
@@ -334,7 +367,10 @@ Run .antigravity/tasks/three-amigos.md
 
 Full instructions: [`three-amigos.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/three-amigos.md)
 — its own step 0 re-syncs the checkout to `origin/main` before anything
-else, so the inline prompt doesn't need to.
+else, so the inline prompt doesn't need to. **This line was inaccurate
+until 2026-08-25** — this task originally had no sync step at all (see
+"Fifth bug" above); added proactively once Backlog Triage was caught
+running stale logic from the exact same reasoning gap.
 Summary: polls `type:user-story` + `status:review` issues, discovers
 subtasks via the real GitHub Sub-issues relationship (`gh api
 .../sub_issues`, not body text — changed 2026-08-25), batch-reviews them
@@ -422,8 +458,10 @@ Run .antigravity/tasks/backlog-triage.md
 ```
 
 Full instructions: [`backlog-triage.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/backlog-triage.md)
-— no checkout sync needed, same reason as Three Amigos: pure `gh issue`
-reads/writes, no file edits, no git.
+— its own step 0 re-syncs the checkout to `origin/main` before anything
+else (added 2026-08-25 after "Fifth bug" above caught this task running
+stale, deleted-file logic without it), even though its own actions never
+touch git beyond that sync.
 Summary: for each label (`tech-debt`, `enhancement`) independently — lists
 the open backlog for that label, clusters it by theme (a lone issue with
 no cluster-mate still gets its own solo story — confirmed by the PO, don't
