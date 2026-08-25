@@ -17,6 +17,42 @@ extends that rather than inventing a parallel one — label names below are
 `crosstrainingapp`'s actual names, not generic placeholders. See "Label
 taxonomy" further down for the full mapping.
 
+**Second target repo (2026-08-25):**
+[`AntaresAndBharani/stock-manager-cli`](https://github.com/AntaresAndBharani/stock-manager-cli)
+(Python 3.10+ / Typer / pytest / ruff / mypy CLI) —
+[PR #46](https://github.com/AntaresAndBharani/stock-manager-cli/pull/46).
+Unlike crosstrainingapp, this repo had **no existing pipeline scaffolding**
+at all (no labels, no issue templates, no `.antigravity/`); every file was
+built fresh, adapted from crosstrainingapp's live-tested implementation
+rather than reconstructed from these docs alone. Two differences from
+crosstrainingapp's build, both PO-confirmed up front rather than discovered
+mid-build: the full pipeline was built in one pass (crosstrainingapp
+started with Architect + Three Amigos only and added nodes over several
+days), and Three Amigos + Dev & Test started on **Antigravity Scheduled
+Tasks** as the active executor from day one, with the GitHub Actions
+equivalents shipped disabled as a fallback — crosstrainingapp only moved to
+Antigravity later, after hitting Gemini free-tier quota exhaustion on the
+GitHub Actions path (see "Implementation lessons" below).
+
+**New implementation lesson from this build, with no crosstrainingapp
+precedent:** stock-manager-cli's `ci.yml` has a `version-check` job that
+fails any PR that doesn't bump `__version__` in
+`src/tradingtools_stock/__init__.py` above the base branch's value —
+crosstrainingapp has no equivalent gate. Dev & Test's implement and fix-up
+paths (both executors) now bump the patch version as part of every commit.
+Deliberately handled deterministically by the workflow/task logic itself,
+not left to an instruction in the LLM prompt — an early draft duplicated
+the requirement into both the prompt file and the workflow's own commit
+step, which would have double-bumped the version on every GitHub-Actions-
+executed pass (harmless to CI, since the result is still monotonically
+increasing, but wasteful and a sign the responsibility split was unclear).
+Fixed by keeping the bump solely in the deterministic step and telling the
+prompt explicitly not to touch that file, matching the existing pattern
+where git commit/push is always the workflow's job, never the LLM's. Any
+future target repo with a similar CI-enforced version/changelog gate
+should get the same treatment: bump it in the deterministic step, not the
+prompt.
+
 **Full pipeline built and live as of 2026-08-24** (`crosstrainingapp`
 commits through `81d9903`) — including a same-day scope reversal: PR
 Review and Dev & Test briefly went advisory/manual, then came back
