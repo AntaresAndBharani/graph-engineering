@@ -1,5 +1,15 @@
 # Backlog Triage Node
 
+**Executor cut over to local CLI (2026-08-26)** — the Antigravity IDE
+scheduled task described below is now disabled; this node runs via
+`scripts/local-pipeline/run-backlog-triage.ps1` + Windows Task Scheduler
+instead, on the same `0 */6 * * *` cadence. See
+`docs/local-cli-pipeline.md` for the executor mechanics (the Fetch →
+Judge → Act split, session handling, the PowerShell native-process bugs
+found and fixed along the way). This node's own responsibilities, output
+contract, and the "every issue lands in exactly one cluster" guarantee
+below are unchanged — only *who runs the logic* changed, not what it does.
+
 **Implemented and live (2026-08-25)** —
 [`backlog-triage.md`](https://github.com/AntaresAndBharani/crosstrainingapp/blob/main/.antigravity/tasks/backlog-triage.md)
 in `crosstrainingapp`, an Antigravity scheduled task. A **new node**, not an

@@ -452,7 +452,20 @@ attempts), and on success open a PR and relabel the subtask
 `status:in-progress` — or `status:needs-po-input` on failure/escalation.
 Never touches the story's own `status:ready` label.
 
-## Task 2 — Backlog Triage (2026-08-25 — Antigravity-only, no GitHub Actions counterpart)
+## Retired: Backlog Triage moved to the local CLI executor (2026-08-26)
+
+The Antigravity scheduled task described in Task 2 below is now
+**disabled**. This node's executor is now `scripts/local-pipeline/run-backlog-triage.ps1`
++ Windows Task Scheduler (`CTA-BacklogTriage`, same `0 */6 * * *` cadence)
+— see `docs/local-cli-pipeline.md` for why (the Flash-model lock on this
+IDE feature specifically, and the per-poll session-setup cost) and for the
+new executor's own mechanics. Task 2's description below is kept as
+history, same as a disabled GitHub Actions workflow is kept rather than
+deleted. Task 1 (Three Amigos + Dev & Test) is unaffected for now — it
+remains on this Antigravity executor until its own local-CLI migration
+(planned next, see `docs/local-cli-pipeline.md`'s migration order table).
+
+## Task 2 — Backlog Triage (2026-08-25 — Antigravity-only, no GitHub Actions counterpart) — RETIRED 2026-08-26, see above
 
 Unlike Tasks 1 and 2, this one didn't move from an existing GitHub Actions
 workflow — it's a brand new node (see `docs/backlog-triage-node.md`),
