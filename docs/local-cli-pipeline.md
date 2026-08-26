@@ -236,6 +236,29 @@ self-reported "I don't have that tool" text is suggestive but not proof
 (ask for a real, checkable side effect: a file that should or shouldn't
 appear, a command whose live output can't be guessed).
 
+## Reasoning effort: Medium across every call (2026-08-26)
+
+Every model call in every wrapper now sets Medium reasoning effort
+explicitly, but the two CLIs need different mechanisms — found live
+before committing, not assumed:
+
+- **`claude.exe` (Architect, PR Review):** a real, separate `--effort
+  medium` flag — Claude model names (`claude-opus-5`, `claude-sonnet-5`)
+  don't encode effort level, so this is an independent dial.
+- **`agy.exe` (Backlog Triage, Three Amigos judge, Dev & Test's agentic
+  implement/fix-up):** **no** `--effort` flag — verified live that
+  `--model gemini-3.7-flash-high --effort medium` errors outright
+  ("conflicts with --effort=medium"), because `agy.exe` bakes effort
+  directly into the Gemini model name itself
+  (`gemini-3.7-flash-high`/`-medium`/`-low` are three distinct model
+  identifiers, not one model with an adjustable dial). Set Medium there
+  by changing the model name in every wrapper's default parameter
+  (`gemini-3.7-flash-high` → `gemini-3.7-flash-medium`) instead of adding
+  a flag.
+
+Both mechanisms verified with a direct CLI call before committing to any
+wrapper, same standard as every other CLI-behavior claim in this doc.
+
 ## Migration order
 
 Same reasoning as every other staged rollout in this pipeline: safest node
