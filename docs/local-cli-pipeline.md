@@ -247,9 +247,27 @@ of fixes.
 | Order | Node | CLI | Risk | Status |
 |---|---|---|---|---|
 | 1 | Backlog Triage | `agy.exe` | No git writes | **Live** (2026-08-26) — see below |
-| 2 | PR Review | `claude.exe` | Label/comment only, no git push | Built, not yet cut over — see below |
+| 2 | PR Review | `claude.exe` | Label/comment only, no git push | **Live** (2026-08-26) — see below |
 | 3 | Architect | `claude.exe` | Issue/label only, no git push | **Live** (2026-08-26) — see below |
-| 4 | Three Amigos + Dev & Test | `agy.exe` | Real branches/pushes — highest risk | Pending |
+| 4 | Three Amigos + Dev & Test | `agy.exe` | Real branches/pushes — highest risk | **Live** (2026-08-26) — see below |
+
+**Full pipeline cut over the same day it started.** All four Task
+Scheduler entries (`CTA-BacklogTriage`, `CTA-PRReview`, `CTA-Architect`,
+`CTA-ThreeAmigosDevTest`) are live. The Antigravity IDE's last remaining
+scheduled task ("Three Amigos + Dev & Test") and every relevant GitHub
+Actions workflow are disabled — the local CLI executor is now the sole
+live path for all four migrated nodes.
+
+**Full end-to-end confirmed working, not just per-node** (2026-08-26):
+a real backlog issue's citation error went Backlog Triage → Architect
+(story #323, decompose) → Three Amigos (READY verdict) → Dev & Test
+(subtask #339 implemented, tested, PR #340 opened) → PR Review (APPROVED)
+→ Merge & Backlog (merged, untouched/deterministic, outside this
+migration's scope) → the repo's own Release workflow triggered on merge
+to main. Every link in the chain from a raw backlog issue to a shipped
+release ran through the new local executor except the final merge/release
+steps, which were never part of this migration and worked exactly as
+they already did.
 
 **Order deviated from the plan once, for a real reason:** Architect was
 migrated before PR Review's live cutover was finished, because migrating
@@ -291,7 +309,7 @@ Architect's batch run should now produce naturally via Three Amigos + Dev
   `.gitignore` (added `logs/local-pipeline/`); Windows Task Scheduler
   `CTA-BacklogTriage`; Antigravity IDE's "Backlog Triage" task disabled.
 
-### Task 2 — PR Review (2026-08-26, built, not yet cut over)
+### Task 2 — PR Review (2026-08-26, cut over)
 
 - **Wrapper:** `scripts/local-pipeline/run-pr-review.ps1`. **Prompt
   template:** `.claude/tasks/pr-review.md`, trimmed from
@@ -312,18 +330,18 @@ Architect's batch run should now produce naturally via Three Amigos + Dev
   dedicated marker (`<!-- pr-review-escalated -->`) rather than matching
   on the escalation message's wording, for the same reason every other
   state check in this pipeline prefers a marker over prose-matching.
-- **Verified:** the zero-cost idle path, live (zero open PRs in the repo
-  at build time — fetch found nothing, exited without invoking
-  `claude.exe`). The Judge/Act path (posting a real verdict, applying
-  labels, filing follow-up issues) is **not yet verified against a real
-  PR** — none existed to test against. Architect's live cutover (Task 3)
-  should produce one naturally via the still-Antigravity-executed Three
-  Amigos + Dev & Test, which will complete this node's validation without
-  needing a synthetic test PR.
-- **Not yet cut over:** GitHub Actions' `pr-review.yml` is already
-  disabled (part of the PO's blanket GH Actions shutdown), but no Task
-  Scheduler entry exists yet — held until the Judge/Act path is proven
-  against a real PR.
+- **Verified against a real PR, same day the prediction was made:** the
+  zero-cost idle path first (zero open PRs — fetch found nothing, exited
+  without invoking `claude.exe`), then the full Judge/Act path against
+  real PR #340 (produced naturally by Dev & Test's first successful
+  implementation run, see Task 4) — correctly detected it needed review
+  (no prior verdict comment), fetched the linked issue, ran a genuinely
+  grounded review (verified each acceptance criterion against the actual
+  diff, not just trusting the PR description), returned `APPROVED`, and
+  correctly applied the `review:approved` label with both the verdict and
+  `pr-review-sha` markers.
+- **Cut over:** GitHub Actions' `pr-review.yml` was already disabled;
+  `CTA-PRReview` (every 5 minutes) is now the live executor.
 - **Files touched:** `crosstrainingapp`'s
   `scripts/local-pipeline/run-pr-review.ps1` (new),
   `.claude/tasks/pr-review.md` (new).
@@ -377,12 +395,17 @@ Architect's batch run should now produce naturally via Three Amigos + Dev
   `status:ready-for-architect` to `status:review`,
   `origin:backlog-triage`/model-tier selection preserved. Output quality
   was consistently grounded in real file/line references, including one
-  story (#323) where the model used `git log`/`git show` (via its
-  Read/Grep/Glob-adjacent Bash-free tool access — actually just Glob/Grep
-  over the working tree, `git show` isn't available without Bash, worth
-  double-checking exactly how that citation got resolved if revisited) to
-  confirm a stray CHANGELOG.md issue citation was genuinely unrelated
-  before removing it, rather than guessing.
+  story (#323) whose subtask description narrated a `git log`/`git show`
+  investigation into a stray CHANGELOG.md citation — flagged at the time
+  as needing a closer look, since decompose mode only has Read/Grep/Glob,
+  not Bash, so it couldn't have run those commands itself. **Resolved**:
+  the subtask's task_description was prescriptive (instructions for
+  the later implementer), not a claim of already-verified fact — Dev &
+  Test's actual implementation of that subtask (#339, Task 4) had real
+  Bash access and genuinely ran that exact investigation, confirmed by
+  the resulting PR #340's description matching it precisely. No
+  hallucinated-tool-use problem, just an ambiguous phrasing worth noting
+  for future prompt wording.
 - **Cut over:** GitHub Actions' `architect.yml` was already disabled (part
   of the PO's blanket shutdown); `CTA-Architect` (every 5 minutes,
   `-MultipleInstances IgnoreNew`, `-StartWhenAvailable`) is now the live
@@ -392,3 +415,102 @@ Architect's batch run should now produce naturally via Three Amigos + Dev
   `-OnlyIssueNumbers` validation-only filter and the `WorkingDirectory`
   addition to `Invoke-NativeProcess`), the three `.claude/tasks/architect-*.md`
   templates (new); Windows Task Scheduler `CTA-Architect`.
+
+### Task 4 — Three Amigos + Dev & Test (2026-08-26, cut over — last node, highest risk)
+
+- **Wrapper:** `scripts/local-pipeline/run-three-amigos-and-dev-test.ps1`,
+  the one node that is NOT a uniform Fetch → Judge → Act pipeline
+  throughout — it mirrors the mixed 5-step character of the original
+  Antigravity task instead:
+  - **Step 1 (Three Amigos review):** judgment-only, `agy.exe`, no tool
+    access — same pattern as Backlog Triage/PR Review. Always runs, never
+    stops the chain. Prompt: `.claude/tasks/three-amigos-judge.md`.
+  - **Step 2 (approved-but-conflicting PR resolution):** fully
+    deterministic, zero LLM involvement — `.gitattributes`'s `merge=union`
+    driver already resolves the unambiguously-additive case during
+    rebase; anything git can't auto-resolve is exactly the "needs a
+    human" case, so it escalates rather than guesses. Queries
+    `review:approved` PRs directly (not an unverified per-subtask
+    `--search linked:N` qualifier considered and rejected during design).
+  - **Step 3 (fix-up) / Step 5 (new implementation):** the one place in
+    this whole migration that keeps the *original* fully agentic shape —
+    deterministic discovery in the wrapper (which PR/subtask), then
+    `agy.exe --dangerously-skip-permissions` for the actual work. Real
+    file/bash access is the point here, deliberately, unlike every
+    judgment-only call elsewhere in this pipeline: writing code and
+    iterating on test failures can't be reduced to one structured call.
+    Prompts: `.antigravity/tasks/dev-test-fixup.md`,
+    `dev-test-implement.md` — trimmed from the original Steps 3/5 to
+    describe execution against an already-chosen target, since discovery
+    now happens in the wrapper.
+  - **Step 4 (in-flight check):** fully deterministic, unchanged.
+
+- **Two real bugs found building this node, both fixed the same day and
+  backported to the other three wrappers where they applied:**
+
+  1. **`claude.exe`'s `--allowedTools`/`--disallowedTools` don't reliably
+     restrict tool access in `--print` mode** — see the "Critical" section
+     above. Found here first (Architect's `--allowedTools "Read Grep
+     Glob"` briefly ran live with the model actually able to invoke Bash),
+     root-caused to the `--tools <list>` flag being the one that actually
+     works, and fixed across Architect and PR Review the same day.
+  2. **`@($text | ConvertFrom-Json)` — wrapping a live pipeline in `@()` —
+     can nest an already-correct parsed array inside another
+     single-element array instead of flattening it.** Found here:
+     `gh issue list`'s real 9-story JSON array parsed to `Count=1` with
+     every story's number concatenated into one field, reproducibly, with
+     no code difference between runs — isolated after extensive testing
+     down to this exact one-line difference (`$x = $text |
+     ConvertFrom-Json` then a separate `@($x)` always worked; the combined
+     one-liner didn't). New `ConvertFrom-JsonSafeArray` helper captures
+     first, checks `-is [array]`, wraps only if needed. The other three
+     wrappers already happened to use the safe two-step pattern
+     throughout when they were built, so they didn't carry this bug —
+     confirmed by reading every call site, not assumed. A red herring
+     along the way: an earlier `Out-String`-based theory (avoiding
+     PowerShell's display-formatting subsystem for reassembling captured
+     native output) was applied everywhere first and kept as a reasonable
+     defensive practice, but was **not** the actual root cause of this
+     specific bug — worth knowing if this class of symptom ever
+     resurfaces, so the real fix (this section) gets tried, not the
+     abandoned one.
+
+- **A third, purely operational lesson**: while actively editing any
+  wrapper script with its Task Scheduler entry still enabled, that
+  entry's own `git checkout main && fetch && reset --hard origin/main`
+  sync step can fire mid-edit and silently wipe *any* uncommitted change
+  in the shared checkout, not just changes to its own file — every wrapper
+  shares one repo checkout. Lost the `ConvertFrom-JsonSafeArray` fix to
+  exactly this once before catching it. Disable every Task Scheduler
+  entry touching the shared checkout while actively developing any one of
+  them, and commit immediately after every edit rather than batching
+  several before running anything.
+
+- **Verified live, in stages, safest first:** an `-OnlyThreeAmigos` filter
+  (manual-validation only) scoped the first real runs to Step 1 alone —
+  processed all 9 real stories waiting at `status:review`, all correctly
+  reviewed and promoted to `status:ready` with real BDD-scenario-grounded
+  verdict comments. Then the full wrapper (Steps 2-5) ran against real
+  data for the first time: Steps 2-4 correctly found nothing and fell
+  through; Step 5 picked story #323's one subtask (#339), implemented the
+  actual fix, ran both real test suites, committed, pushed, and opened PR
+  #340 — the CLI process itself then exited with a non-fatal code 1 for
+  reasons not yet understood (empty stderr, but the real work had already
+  completed successfully; flagged for future investigation, not blocking).
+- **Full loop closed the same day**: PR #340 → PR Review (Task 2)
+  APPROVED it → Merge & Backlog (untouched, outside this migration)
+  merged it → the repo's own Release workflow triggered on the merge to
+  `main`. See the "Full end-to-end confirmed working" note in the
+  migration-order table above.
+- **Cut over:** the Antigravity IDE's "Three Amigos + Dev & Test"
+  scheduled task is disabled; `CTA-ThreeAmigosDevTest` (every 15 minutes,
+  matching the retired task's cadence) is now the live executor. Only 1
+  of 16 total subtasks across the 9 originally-stuck stories has actually
+  been implemented so far — the remaining 15 flow through automatically
+  over subsequent polls (Step 5 processes one story's subtasks per poll,
+  by design, mirroring the original Antigravity task's own pacing).
+- **Files touched:** `crosstrainingapp`'s
+  `scripts/local-pipeline/run-three-amigos-and-dev-test.ps1` (new),
+  `.claude/tasks/three-amigos-judge.md` (new),
+  `.antigravity/tasks/dev-test-fixup.md` and `dev-test-implement.md`
+  (new); Windows Task Scheduler `CTA-ThreeAmigosDevTest`.

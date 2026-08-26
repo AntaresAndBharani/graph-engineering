@@ -384,7 +384,15 @@ redoing work it already did on a prior poll:
   remove-on-pickup pattern as the other tasks applies here too — no
   timestamp bookkeeping needed anymore.
 
-## Task 1 — Three Amigos + Dev & Test
+## Task 1 — Three Amigos + Dev & Test — RETIRED 2026-08-26
+
+**Retired the same day as Backlog Triage (see above).** This was the
+last node still running on this executor — its local CLI replacement
+(`scripts/local-pipeline/run-three-amigos-and-dev-test.ps1`,
+`docs/local-cli-pipeline.md` Task 4) is now live on
+`CTA-ThreeAmigosDevTest`. This Antigravity scheduled task is disabled;
+every node this repo's pipeline defines now runs via the local executor.
+Description below kept as history.
 
 **Merged into one task on 2026-08-25** — the second merge of this file
 (the first, 2026-08-24, folded Dev & Test's own Implement/Fix-up split
