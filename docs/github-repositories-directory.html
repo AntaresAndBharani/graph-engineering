@@ -474,19 +474,19 @@
                 <span class="badge-org">AntaresAndBharani & Antares1980</span>
             </h1>
             <div style="font-size: 12px; color: var(--text-secondary);">
-                Snapshot Generated: <code>2026-08-27 16:26:33</code>
+                Direct SDLC Access Portal
             </div>
         </div>
-        <p class="subtitle">Direct access to <strong>OPEN User Stories (is:open label:type:user-story)</strong>, <strong>Pull Requests</strong>, and <strong>GitHub Actions CI/CD</strong>.</p>
+        <p class="subtitle">Direct access to <strong>OPEN User Stories (`is:open label:type:user-story`)</strong>, <strong>Pull Requests</strong>, and <strong>GitHub Actions CI/CD</strong>.</p>
 
         <!-- Live Action Toolbar -->
         <div class="toolbar">
             <div class="btn-action-group">
                 <button class="btn-tool primary" onclick="refreshStatusFromGitHub()" id="btnLiveStatus">
-                    âš¡ Refresh Status in GitHub.com
+                    ⚡ Refresh Status in GitHub.com
                 </button>
                 <button class="btn-tool" onclick="refreshLocalView()">
-                    ðŸ”„ Refresh Directory View
+                    🔄 Refresh Directory View
                 </button>
             </div>
             <div class="btn-action-group">
@@ -501,11 +501,11 @@
 
         <div class="controls">
             <div class="search-box">
-                <span class="search-icon">ðŸ”</span>
+                <span class="search-icon">🔍</span>
                 <input type="text" id="searchInput" placeholder="Filter repositories by name, description, or owner..." onkeyup="filterRepos()">
             </div>
             <div class="filter-tags">
-                <button class="filter-btn active" onclick="setCategoryFilter('all', this)">All</button>
+                <button class="filter-btn active" onclick="setCategoryFilter('all', this)">All (34)</button>
                 <button class="filter-btn" onclick="setCategoryFilter('sdlc', this)">Graph SDLC</button>
                 <button class="filter-btn" onclick="setCategoryFilter('trading', this)">Trading & Quant</button>
                 <button class="filter-btn" onclick="setCategoryFilter('fitness', this)">Gym & Fitness</button>
@@ -522,9 +522,8 @@
 </div>
 
 <script>
-    const repositoriesData = [{"defaultBranchRef":{"name":"main"},"description":"gh-development-dashboard","isFork":false,"isPrivate":false,"name":"gh-development-dashboard","nameWithOwner":"AntaresAndBharani/gh-development-dashboard","pushedAt":"2026-08-27T14:08:36Z","url":"https://github.com/AntaresAndBharani/gh-development-dashboard"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"graph-engineering","nameWithOwner":"AntaresAndBharani/graph-engineering","pushedAt":"2026-08-27T12:18:11Z","url":"https://github.com/AntaresAndBharani/graph-engineering"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"crosstrainingapp","nameWithOwner":"AntaresAndBharani/crosstrainingapp","pushedAt":"2026-08-27T09:14:50Z","url":"https://github.com/AntaresAndBharani/crosstrainingapp"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"darwin-trader","nameWithOwner":"AntaresAndBharani/darwin-trader","pushedAt":"2026-08-27T08:22:55Z","url":"https://github.com/AntaresAndBharani/darwin-trader"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"stock-manager-cli","nameWithOwner":"AntaresAndBharani/stock-manager-cli","pushedAt":"2026-08-25T15:19:42Z","url":"https://github.com/AntaresAndBharani/stock-manager-cli"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"virgymia-qa","nameWithOwner":"AntaresAndBharani/virgymia-qa","pushedAt":"2026-08-22T19:05:46Z","url":"https://github.com/AntaresAndBharani/virgymia-qa"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"dotfiles","nameWithOwner":"AntaresAndBharani/dotfiles","pushedAt":"2026-08-19T06:47:11Z","url":"https://github.com/AntaresAndBharani/dotfiles"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":".github","nameWithOwner":"AntaresAndBharani/.github","pushedAt":"2026-08-19T06:30:22Z","url":"https://github.com/AntaresAndBharani/.github"},{"defaultBranchRef":{"name":"main"},"description":"Python template to","isFork":false,"isPrivate":false,"name":"python-cli-template","nameWithOwner":"AntaresAndBharani/python-cli-template","pushedAt":"2026-04-16T06:27:18Z","url":"https://github.com/AntaresAndBharani/python-cli-template"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"bl-stock-data-service","nameWithOwner":"AntaresAndBharani/bl-stock-data-service","pushedAt":"2026-01-02T13:55:38Z","url":"https://github.com/AntaresAndBharani/bl-stock-data-service"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"bl-back-manager","nameWithOwner":"AntaresAndBharani/bl-back-manager","pushedAt":"2026-01-02T13:34:51Z","url":"https://github.com/AntaresAndBharani/bl-back-manager"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"qgenerationweb","nameWithOwner":"AntaresAndBharani/qgenerationweb","pushedAt":"2025-12-25T08:31:47Z","url":"https://github.com/AntaresAndBharani/qgenerationweb"},{"defaultBranchRef":{"name":"main"},"description":"cave-fitness-site-wix","isFork":false,"isPrivate":true,"name":"cave-fitness-site-wix","nameWithOwner":"AntaresAndBharani/cave-fitness-site-wix","pushedAt":"2025-12-04T18:55:39Z","url":"https://github.com/AntaresAndBharani/cave-fitness-site-wix"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"cave-fitness-wix","nameWithOwner":"AntaresAndBharani/cave-fitness-wix","pushedAt":"2025-12-04T12:24:19Z","url":"https://github.com/AntaresAndBharani/cave-fitness-wix"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"crypto-manager","nameWithOwner":"AntaresAndBharani/crypto-manager","pushedAt":"2025-06-09T18:23:55Z","url":"https://github.com/AntaresAndBharani/crypto-manager"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"hello-bdd","nameWithOwner":"AntaresAndBharani/hello-bdd","pushedAt":"2025-05-02T17:27:33Z","url":"https://github.com/AntaresAndBharani/hello-bdd"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"broker-retriever","nameWithOwner":"AntaresAndBharani/broker-retriever","pushedAt":"2025-04-07T16:47:34Z","url":"https://github.com/AntaresAndBharani/broker-retriever"},{"defaultBranchRef":{"name":"main"},"description":"trading-manager","isFork":false,"isPrivate":false,"name":"trading-manager","nameWithOwner":"Antares1980/trading-manager","pushedAt":"2026-02-20T22:42:40Z","url":"https://github.com/Antares1980/trading-manager"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"cave-gym","nameWithOwner":"Antares1980/cave-gym","pushedAt":"2025-12-04T18:47:16Z","url":"https://github.com/Antares1980/cave-gym"},{"defaultBranchRef":{"name":"main"},"description":"buylimit-stock-data-service","isFork":false,"isPrivate":false,"name":"bl-stock-data-service","nameWithOwner":"Antares1980/bl-stock-data-service","pushedAt":"2025-11-30T18:35:33Z","url":"https://github.com/Antares1980/bl-stock-data-service"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"broker-parser","nameWithOwner":"Antares1980/broker-parser","pushedAt":"2025-05-02T17:29:07Z","url":"https://github.com/Antares1980/broker-parser"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"backtrader-hello","nameWithOwner":"Antares1980/backtrader-hello","pushedAt":"2025-03-21T20:46:29Z","url":"https://github.com/Antares1980/backtrader-hello"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"node_example","nameWithOwner":"Antares1980/node_example","pushedAt":"2025-02-25T17:33:40Z","url":"https://github.com/Antares1980/node_example"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"hello-api-rest","nameWithOwner":"Antares1980/hello-api-rest","pushedAt":"2023-03-06T09:28:44Z","url":"https://github.com/Antares1980/hello-api-rest"},{"defaultBranchRef":{"name":""},"description":"","isFork":false,"isPrivate":true,"name":"pkhand","nameWithOwner":"Antares1980/pkhand","pushedAt":"2021-10-06T05:41:47Z","url":"https://github.com/Antares1980/pkhand"},{"defaultBranchRef":{"name":"master"},"description":"","isFork":false,"isPrivate":false,"name":"hello-git","nameWithOwner":"Antares1980/hello-git","pushedAt":"2021-04-30T20:50:04Z","url":"https://github.com/Antares1980/hello-git"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"checks","nameWithOwner":"Antares1980/checks","pushedAt":"2020-12-16T09:42:39Z","url":"https://github.com/Antares1980/checks"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"check_pages","nameWithOwner":"Antares1980/check_pages","pushedAt":"2020-12-16T09:41:06Z","url":"https://github.com/Antares1980/check_pages"},{"defaultBranchRef":{"name":"master"},"description":"","isFork":false,"isPrivate":false,"name":"private-example","nameWithOwner":"Antares1980/private-example","pushedAt":"2020-08-18T15:19:01Z","url":"https://github.com/Antares1980/private-example"},{"defaultBranchRef":{"name":"canary"},"description":"A terminal built on web technologies","isFork":true,"isPrivate":false,"name":"hyper","nameWithOwner":"Antares1980/hyper","pushedAt":"2020-08-10T11:21:59Z","url":"https://github.com/Antares1980/hyper"},{"defaultBranchRef":{"name":"master"},"description":"Markdown lint tool","isFork":true,"isPrivate":false,"name":"markdownlint","nameWithOwner":"Antares1980/markdownlint","pushedAt":"2020-07-30T19:49:39Z","url":"https://github.com/Antares1980/markdownlint"},{"defaultBranchRef":{"name":"master"},"description":"","isFork":false,"isPrivate":false,"name":"ReactNativeHelloWorldFastlane","nameWithOwner":"Antares1980/ReactNativeHelloWorldFastlane","pushedAt":"2019-03-26T05:48:17Z","url":"https://github.com/Antares1980/ReactNativeHelloWorldFastlane"},{"defaultBranchRef":{"name":"master"},"description":"basic_integration","isFork":false,"isPrivate":false,"name":"basic_integration","nameWithOwner":"Antares1980/basic_integration","pushedAt":"2016-08-30T21:47:58Z","url":"https://github.com/Antares1980/basic_integration"},{"defaultBranchRef":{"name":"master"},"description":"Hello World tutorial","isFork":false,"isPrivate":false,"name":"hello-world","nameWithOwner":"Antares1980/hello-world","pushedAt":"2016-08-30T21:39:06Z","url":"https://github.com/Antares1980/hello-world"}];
+    const repositoriesData = [{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"graph-engineering","nameWithOwner":"AntaresAndBharani/graph-engineering","pushedAt":"2026-08-27T14:27:19Z","url":"https://github.com/AntaresAndBharani/graph-engineering"},{"defaultBranchRef":{"name":"main"},"description":"gh-development-dashboard","isFork":false,"isPrivate":false,"name":"gh-development-dashboard","nameWithOwner":"AntaresAndBharani/gh-development-dashboard","pushedAt":"2026-08-27T14:08:36Z","url":"https://github.com/AntaresAndBharani/gh-development-dashboard"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"crosstrainingapp","nameWithOwner":"AntaresAndBharani/crosstrainingapp","pushedAt":"2026-08-27T09:14:50Z","url":"https://github.com/AntaresAndBharani/crosstrainingapp"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"darwin-trader","nameWithOwner":"AntaresAndBharani/darwin-trader","pushedAt":"2026-08-27T08:22:55Z","url":"https://github.com/AntaresAndBharani/darwin-trader"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"stock-manager-cli","nameWithOwner":"AntaresAndBharani/stock-manager-cli","pushedAt":"2026-08-25T15:19:42Z","url":"https://github.com/AntaresAndBharani/stock-manager-cli"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"virgymia-qa","nameWithOwner":"AntaresAndBharani/virgymia-qa","pushedAt":"2026-08-22T19:05:46Z","url":"https://github.com/AntaresAndBharani/virgymia-qa"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"dotfiles","nameWithOwner":"AntaresAndBharani/dotfiles","pushedAt":"2026-08-19T06:47:11Z","url":"https://github.com/AntaresAndBharani/dotfiles"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":".github","nameWithOwner":"AntaresAndBharani/.github","pushedAt":"2026-08-19T06:30:22Z","url":"https://github.com/AntaresAndBharani/.github"},{"defaultBranchRef":{"name":"main"},"description":"Python template to","isFork":false,"isPrivate":false,"name":"python-cli-template","nameWithOwner":"AntaresAndBharani/python-cli-template","pushedAt":"2026-04-16T06:27:18Z","url":"https://github.com/AntaresAndBharani/python-cli-template"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"bl-stock-data-service","nameWithOwner":"AntaresAndBharani/bl-stock-data-service","pushedAt":"2026-01-02T13:55:38Z","url":"https://github.com/AntaresAndBharani/bl-stock-data-service"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"bl-back-manager","nameWithOwner":"AntaresAndBharani/bl-back-manager","pushedAt":"2026-01-02T13:34:51Z","url":"https://github.com/AntaresAndBharani/bl-back-manager"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"qgenerationweb","nameWithOwner":"AntaresAndBharani/qgenerationweb","pushedAt":"2025-12-25T08:31:47Z","url":"https://github.com/AntaresAndBharani/qgenerationweb"},{"defaultBranchRef":{"name":"main"},"description":"cave-fitness-site-wix","isFork":false,"isPrivate":true,"name":"cave-fitness-site-wix","nameWithOwner":"AntaresAndBharani/cave-fitness-site-wix","pushedAt":"2025-12-04T18:55:39Z","url":"https://github.com/AntaresAndBharani/cave-fitness-site-wix"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"cave-fitness-wix","nameWithOwner":"AntaresAndBharani/cave-fitness-wix","pushedAt":"2025-12-04T12:24:19Z","url":"https://github.com/AntaresAndBharani/cave-fitness-wix"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"crypto-manager","nameWithOwner":"AntaresAndBharani/crypto-manager","pushedAt":"2025-06-09T18:23:55Z","url":"https://github.com/AntaresAndBharani/crypto-manager"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"hello-bdd","nameWithOwner":"AntaresAndBharani/hello-bdd","pushedAt":"2025-05-02T17:27:33Z","url":"https://github.com/AntaresAndBharani/hello-bdd"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"broker-retriever","nameWithOwner":"AntaresAndBharani/broker-retriever","pushedAt":"2025-04-07T16:47:34Z","url":"https://github.com/AntaresAndBharani/broker-retriever"},{"defaultBranchRef":{"name":"main"},"description":"trading-manager","isFork":false,"isPrivate":false,"name":"trading-manager","nameWithOwner":"Antares1980/trading-manager","pushedAt":"2026-02-20T22:42:40Z","url":"https://github.com/Antares1980/trading-manager"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"cave-gym","nameWithOwner":"Antares1980/cave-gym","pushedAt":"2025-12-04T18:47:16Z","url":"https://github.com/Antares1980/cave-gym"},{"defaultBranchRef":{"name":"main"},"description":"buylimit-stock-data-service","isFork":false,"isPrivate":false,"name":"bl-stock-data-service","nameWithOwner":"Antares1980/bl-stock-data-service","pushedAt":"2025-11-30T18:35:33Z","url":"https://github.com/Antares1980/bl-stock-data-service"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"broker-parser","nameWithOwner":"Antares1980/broker-parser","pushedAt":"2025-05-02T17:29:07Z","url":"https://github.com/Antares1980/broker-parser"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"backtrader-hello","nameWithOwner":"Antares1980/backtrader-hello","pushedAt":"2025-03-21T20:46:29Z","url":"https://github.com/Antares1980/backtrader-hello"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"node_example","nameWithOwner":"Antares1980/node_example","pushedAt":"2025-02-25T17:33:40Z","url":"https://github.com/Antares1980/node_example"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"hello-api-rest","nameWithOwner":"Antares1980/hello-api-rest","pushedAt":"2023-03-06T09:28:44Z","url":"https://github.com/Antares1980/hello-api-rest"},{"defaultBranchRef":{"name":""},"description":"","isFork":false,"isPrivate":true,"name":"pkhand","nameWithOwner":"Antares1980/pkhand","pushedAt":"2021-10-06T05:41:47Z","url":"https://github.com/Antares1980/pkhand"},{"defaultBranchRef":{"name":"master"},"description":"","isFork":false,"isPrivate":false,"name":"hello-git","nameWithOwner":"Antares1980/hello-git","pushedAt":"2021-04-30T20:50:04Z","url":"https://github.com/Antares1980/hello-git"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":false,"name":"checks","nameWithOwner":"Antares1980/checks","pushedAt":"2020-12-16T09:42:39Z","url":"https://github.com/Antares1980/checks"},{"defaultBranchRef":{"name":"main"},"description":"","isFork":false,"isPrivate":true,"name":"check_pages","nameWithOwner":"Antares1980/check_pages","pushedAt":"2020-12-16T09:41:06Z","url":"https://github.com/Antares1980/check_pages"},{"defaultBranchRef":{"name":"master"},"description":"","isFork":false,"isPrivate":false,"name":"private-example","nameWithOwner":"Antares1980/private-example","pushedAt":"2020-08-18T15:19:01Z","url":"https://github.com/Antares1980/private-example"},{"defaultBranchRef":{"name":"canary"},"description":"A terminal built on web technologies","isFork":true,"isPrivate":false,"name":"hyper","nameWithOwner":"Antares1980/hyper","pushedAt":"2020-08-10T11:21:59Z","url":"https://github.com/Antares1980/hyper"},{"defaultBranchRef":{"name":"master"},"description":"Markdown lint tool","isFork":true,"isPrivate":false,"name":"markdownlint","nameWithOwner":"Antares1980/markdownlint","pushedAt":"2020-07-30T19:49:39Z","url":"https://github.com/Antares1980/markdownlint"},{"defaultBranchRef":{"name":"master"},"description":"","isFork":false,"isPrivate":false,"name":"ReactNativeHelloWorldFastlane","nameWithOwner":"Antares1980/ReactNativeHelloWorldFastlane","pushedAt":"2019-03-26T05:48:17Z","url":"https://github.com/Antares1980/ReactNativeHelloWorldFastlane"},{"defaultBranchRef":{"name":"master"},"description":"basic_integration","isFork":false,"isPrivate":false,"name":"basic_integration","nameWithOwner":"Antares1980/basic_integration","pushedAt":"2016-08-30T21:47:58Z","url":"https://github.com/Antares1980/basic_integration"},{"defaultBranchRef":{"name":"master"},"description":"Hello World tutorial","isFork":false,"isPrivate":false,"name":"hello-world","nameWithOwner":"Antares1980/hello-world","pushedAt":"2016-08-30T21:39:06Z","url":"https://github.com/Antares1980/hello-world"}];
 
-    // Load saved GitHub token
     document.addEventListener('DOMContentLoaded', () => {
         const savedToken = localStorage.getItem('gh_pat_token');
         if (savedToken) {
@@ -543,9 +542,9 @@
         }
     }
 
-    function showStatus(message, type = 'info') {
+    function showStatus(message, type) {
         const bar = document.getElementById('statusBar');
-        bar.className = type;
+        bar.className = type || 'info';
         bar.textContent = message;
         bar.style.display = 'block';
     }
@@ -564,7 +563,7 @@
         if (name.includes('gym') || name.includes('fitness') || name.includes('crosstraining') || name.includes('virgymia') || name.includes('qgeneration')) {
             categories.push('fitness');
         }
-        if (name.includes('template') || name.includes('dotfiles') || name.includes('github') || name.includes('bdd') || name.includes('api-rest') || name.includes('tools')) {
+        if (name.includes('template') || name.includes('dotfiles') || name.includes('github') || name.includes('bdd') || name.includes('api-rest') || name.includes('tools') || name.includes('check') || name.includes('node') || name.includes('lint') || name.includes('hello')) {
             categories.push('tools');
         }
         if (categories.length === 0) categories.push('tools');
@@ -575,32 +574,31 @@
         const container = document.getElementById('repositoriesContainer');
         container.innerHTML = '';
 
-        // Group into sections
         const sections = [
-            { id: 'sdlc', title: 'ðŸš€ Core Graph Engineering & SDLC Pipelines', badge: 'Active SDLC Graphs' },
-            { id: 'trading', title: 'ðŸ“ˆ Trading, Quant & Financial Microservices', badge: 'FinTech & Trading' },
-            { id: 'fitness', title: 'ðŸ‹ï¸ Gym, Fitness & Web Platforms', badge: 'Web & Mobile' },
-            { id: 'tools', title: 'ðŸ› ï¸ Shared Templates, Tooling & Infrastructure', badge: 'Infrastructure' }
+            { id: 'sdlc', title: '🚀 Core Graph Engineering & SDLC Pipelines', badge: 'Active SDLC Graphs' },
+            { id: 'trading', title: '📈 Trading, Quant & Financial Microservices', badge: 'FinTech & Trading' },
+            { id: 'fitness', title: '🏋️ Gym, Fitness & Web Platforms', badge: 'Web & Mobile' },
+            { id: 'tools', title: '🛠️ Shared Templates, Tooling & Infrastructure', badge: 'Infrastructure' }
         ];
 
         sections.forEach(sec => {
-            const sectionHeading = document.createElement('div');
-            sectionHeading.className = 'section-heading';
-            sectionHeading.setAttribute('data-section', sec.id);
-            sectionHeading.innerHTML = \ <span class="section-badge">\</span>;
-            
-            const grid = document.createElement('div');
-            grid.className = 'repo-grid';
-            grid.setAttribute('data-section-grid', sec.id);
-
             const filteredInSec = repos.filter(r => categorizeRepo(r).includes(sec.id));
 
-            filteredInSec.forEach(repo => {
-                const card = createRepoCard(repo);
-                grid.appendChild(card);
-            });
-
             if (filteredInSec.length > 0) {
+                const sectionHeading = document.createElement('div');
+                sectionHeading.className = 'section-heading';
+                sectionHeading.setAttribute('data-section', sec.id);
+                sectionHeading.innerHTML = sec.title + ' <span class="section-badge">' + sec.badge + ' (' + filteredInSec.length + ')</span>';
+                
+                const grid = document.createElement('div');
+                grid.className = 'repo-grid';
+                grid.setAttribute('data-section-grid', sec.id);
+
+                filteredInSec.forEach(repo => {
+                    const card = createRepoCard(repo);
+                    grid.appendChild(card);
+                });
+
                 container.appendChild(sectionHeading);
                 container.appendChild(grid);
             }
@@ -613,42 +611,44 @@
         card.setAttribute('data-name', repo.name.toLowerCase());
         card.setAttribute('data-fullname', repo.nameWithOwner.toLowerCase());
         card.setAttribute('data-category', categorizeRepo(repo));
-        card.setAttribute('id', card-\);
+        
+        const safeKey = repo.nameWithOwner.replace(/[^a-zA-Z0-9_-]/g, '-');
+        card.setAttribute('id', 'card-' + safeKey);
 
-        const openStoriesUrl = https://github.com/\/issues?q=is%3Aissue+is%3Aopen+label%3Atype%3Auser-story;
-        const prsUrl = https://github.com/\/pulls;
-        const actionsUrl = https://github.com/\/actions;
+        const openStoriesUrl = 'https://github.com/' + repo.nameWithOwner + '/issues?q=is%3Aissue+is%3Aopen+label%3Atype%3Auser-story';
+        const prsUrl = 'https://github.com/' + repo.nameWithOwner + '/pulls';
+        const actionsUrl = 'https://github.com/' + repo.nameWithOwner + '/actions';
 
         card.innerHTML = 
-            <div>
-                <div class="repo-header">
-                    <div class="repo-title-area">
-                        <a href="\" target="_blank" class="repo-name-link">\</a>
-                        <span class="repo-full-name">\</span>
-                    </div>
-                    <span class="visibility-tag">\</span>
-                </div>
-                <div class="repo-desc">\</div>
+            '<div>' +
+                '<div class="repo-header">' +
+                    '<div class="repo-title-area">' +
+                        '<a href="' + repo.url + '" target="_blank" class="repo-name-link">' + repo.name + '</a>' +
+                        '<span class="repo-full-name">' + repo.nameWithOwner + '</span>' +
+                    </div>' +
+                    '<span class="visibility-tag">' + (repo.isPrivate ? 'Private' : 'Public') + '</span>' +
+                </div>' +
+                '<div class="repo-desc">' + (repo.description || 'No description provided.') + '</div>' +
                 
-                <div class="live-status-row" id="status-row-\">
-                    <span class="status-chip" id="chip-stories-\">ðŸ“Œ Stories: <em>--</em></span>
-                    <span class="status-chip" id="chip-prs-\">ðŸ”€ PRs: <em>--</em></span>
-                    <span class="status-chip" id="chip-ci-\">âš¡ CI: <em>--</em></span>
-                </div>
-            </div>
+                '<div class="live-status-row" id="status-row-' + safeKey + '">' +
+                    '<span class="status-chip" id="chip-stories-' + safeKey + '">📌 Stories: <em>--</em></span>' +
+                    '<span class="status-chip" id="chip-prs-' + safeKey + '">🔀 PRs: <em>--</em></span>' +
+                    '<span class="status-chip" id="chip-ci-' + safeKey + '">⚡ CI: <em>--</em></span>' +
+                </div>' +
+            '</div>' +
 
-            <div class="link-group">
-                <a href="\" target="_blank" class="btn-link btn-story">
-                    ðŸ“Œ Open User Stories (is:open type:user-story)
-                </a>
-                <a href="\" target="_blank" class="btn-link btn-pr">
-                    ðŸ”€ Pull Requests
-                </a>
-                <a href="\" target="_blank" class="btn-link btn-actions">
-                    âš¡ GitHub Actions
-                </a>
-            </div>
-        ;
+            '<div class="link-group">' +
+                '<a href="' + openStoriesUrl + '" target="_blank" class="btn-link btn-story">' +
+                    '📌 Open Stories (is:open type:user-story)' +
+                '</a>' +
+                '<a href="' + prsUrl + '" target="_blank" class="btn-link btn-pr">' +
+                    '🔀 Pull Requests' +
+                '</a>' +
+                '<a href="' + actionsUrl + '" target="_blank" class="btn-link btn-actions">' +
+                    '⚡ GitHub Actions' +
+                '</a>' +
+            '</div>';
+
         return card;
     }
 
@@ -691,7 +691,7 @@
     function updateSectionVisibility() {
         document.querySelectorAll('.section-heading').forEach(heading => {
             const sec = heading.getAttribute('data-section');
-            const grid = document.querySelector([data-section-grid="\"]);
+            const grid = document.querySelector('[data-section-grid="' + sec + '"]');
             if (grid) {
                 const visibleCards = Array.from(grid.querySelectorAll('.repo-card')).some(c => c.style.display !== 'none');
                 heading.style.display = visibleCards ? 'flex' : 'none';
@@ -704,56 +704,55 @@
         document.getElementById('searchInput').value = '';
         document.querySelectorAll('.filter-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
         renderRepositories(repositoriesData);
-        showStatus('Directory view refreshed from snapshot data.', 'info');
+        showStatus('Directory view refreshed. All 34 repositories loaded.', 'info');
     }
 
     async function refreshStatusFromGitHub() {
         const btn = document.getElementById('btnLiveStatus');
         btn.disabled = true;
-        btn.innerHTML = 'â³ Querying GitHub API...';
+        btn.innerHTML = '⏳ Querying GitHub API...';
         showStatus('Querying live open stories, PR counts, and CI status from GitHub.com...', 'info');
 
         const token = localStorage.getItem('gh_pat_token') || '';
         const headers = { 'Accept': 'application/vnd.github.v3+json' };
         if (token) {
-            headers['Authorization'] = 	oken \;
+            headers['Authorization'] = 'token ' + token;
         }
 
         let completed = 0;
         const total = repositoriesData.length;
 
         for (const repo of repositoriesData) {
-            const safeKey = repo.nameWithOwner.replace('/', '-');
-            const chipStories = document.getElementById(chip-stories-\);
-            const chipPrs = document.getElementById(chip-prs-\);
-            const chipCi = document.getElementById(chip-ci-\);
+            const safeKey = repo.nameWithOwner.replace(/[^a-zA-Z0-9_-]/g, '-');
+            const chipStories = document.getElementById('chip-stories-' + safeKey);
+            const chipPrs = document.getElementById('chip-prs-' + safeKey);
+            const chipCi = document.getElementById('chip-ci-' + safeKey);
 
             try {
                 // 1. Fetch Open User Stories count
-                const storiesRes = await fetch(https://api.github.com/search/issues?q=repo:\+type:issue+state:open+label:type:user-story, { headers });
+                const storiesRes = await fetch('https://api.github.com/search/issues?q=repo:' + repo.nameWithOwner + '+type:issue+state:open+label:type:user-story', { headers });
                 if (storiesRes.ok) {
                     const storiesData = await storiesRes.json();
                     const count = storiesData.total_count || 0;
                     if (chipStories) {
-                        chipStories.innerHTML = ðŸ“Œ Stories: <strong>\</strong>;
+                        chipStories.innerHTML = '📌 Stories: <strong>' + count + '</strong>';
                         chipStories.className = count > 0 ? 'status-chip purple' : 'status-chip';
                     }
                 }
 
                 // 2. Fetch Open PRs count
-                const prsRes = await fetch(https://api.github.com/repos/\/pulls?state=open&per_page=1, { headers });
+                const prsRes = await fetch('https://api.github.com/repos/' + repo.nameWithOwner + '/pulls?state=open&per_page=10', { headers });
                 if (prsRes.ok) {
-                    // Use link header or count
                     const prsData = await prsRes.json();
                     const prCount = prsData.length;
                     if (chipPrs) {
-                        chipPrs.innerHTML = ðŸ”€ PRs: <strong>\</strong>;
+                        chipPrs.innerHTML = '🔀 PRs: <strong>' + prCount + '</strong>';
                         chipPrs.className = prCount > 0 ? 'status-chip green' : 'status-chip';
                     }
                 }
 
                 // 3. Fetch latest Action Workflow status
-                const runsRes = await fetch(https://api.github.com/repos/\/actions/runs?per_page=1, { headers });
+                const runsRes = await fetch('https://api.github.com/repos/' + repo.nameWithOwner + '/actions/runs?per_page=1', { headers });
                 if (runsRes.ok) {
                     const runsData = await runsRes.json();
                     if (runsData.workflow_runs && runsData.workflow_runs.length > 0) {
@@ -761,34 +760,34 @@
                         const conclusion = lastRun.conclusion || lastRun.status;
                         if (chipCi) {
                             if (conclusion === 'success') {
-                                chipCi.innerHTML = âš¡ CI: ðŸŸ¢ Pass;
+                                chipCi.innerHTML = '⚡ CI: 🟢 Pass';
                                 chipCi.className = 'status-chip green';
                             } else if (conclusion === 'failure') {
-                                chipCi.innerHTML = âš¡ CI: ðŸ”´ Fail;
+                                chipCi.innerHTML = '⚡ CI: 🔴 Fail';
                                 chipCi.className = 'status-chip red';
                             } else if (conclusion === 'in_progress') {
-                                chipCi.innerHTML = âš¡ CI: ðŸ”µ Running;
+                                chipCi.innerHTML = '⚡ CI: 🔵 Running';
                                 chipCi.className = 'status-chip orange';
                             } else {
-                                chipCi.innerHTML = âš¡ CI: \;
+                                chipCi.innerHTML = '⚡ CI: ' + conclusion;
                                 chipCi.className = 'status-chip';
                             }
                         }
                     } else {
-                        if (chipCi) chipCi.innerHTML = âš¡ CI: None;
+                        if (chipCi) chipCi.innerHTML = '⚡ CI: None';
                     }
                 }
             } catch (err) {
-                console.warn(Error querying \:, err);
+                console.warn('Error querying ' + repo.nameWithOwner + ':', err);
             }
 
             completed++;
-            showStatus(Live GitHub Query in progress: \/\ repositories audited..., 'info');
+            showStatus('Live GitHub Query in progress: ' + completed + '/' + total + ' repositories audited...', 'info');
         }
 
         btn.disabled = false;
-        btn.innerHTML = 'âš¡ Refresh Status in GitHub.com';
-        showStatus('Live GitHub status update complete for all repositories!', 'success');
+        btn.innerHTML = '⚡ Refresh Status in GitHub.com';
+        showStatus('Live GitHub status update complete for all 34 repositories!', 'success');
     }
 </script>
 
