@@ -173,16 +173,6 @@ apply just as broadly:
    first fenced block wherever it appears in the response. Applied to all
    three wrappers built so far, not just Architect, since they share the
    identical pattern.
-5. **Console window popups and focus stealing under Windows Task Scheduler.**
-   When Windows Task Scheduler invokes `powershell.exe` directly in an
-   interactive user session, Windows allocates a Console Host (`conhost.exe` /
-   OpenConsole), creating a window on screen and stealing keyboard/mouse pointer
-   focus. Even `-WindowStyle Hidden` causes a visible flash and focus theft
-   because console allocation occurs prior to argument parsing. **Fix:**
-   launch tasks via the built-in Windows GUI subsystem host `wscript.exe`
-   running `run-hidden.vbs` (`WScript.Shell.Run(cmd, 0, True)`), which creates
-   the PowerShell process with `SW_HIDE` (`intWindowStyle = 0`) from the very
-   first CPU cycle without any console allocation or focus interruption.
 
 ## Critical: `--allowedTools`/`--disallowedTools` don't reliably restrict `claude.exe` in `--print` mode (2026-08-26)
 
