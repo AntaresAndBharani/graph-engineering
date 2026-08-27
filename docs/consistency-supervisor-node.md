@@ -117,9 +117,9 @@ graph LR
 
 ### Channel 1: Unified Health Dashboard (`pipeline-health-dashboard.md`)
 The supervisor generates a self-contained Markdown dashboard containing:
-1. **System Health Status Banner** (🟢 All Nominal, 🟡 Warnings, 🔴 Critical Issues).
-2. **Cross-Project Matrix**: Summary of all scheduled tasks, their latest exit codes, last run timestamps, and log error tallies.
-3. **Detailed Anomaly Log**: Direct code-block snippets of exact errors, file paths, and timestamps.
+1. **System Health Status Banner** (🟢 All Nominal, 🟡 Warnings, 🔴 Critical Issues within the active 4-hour evaluation window).
+2. **Cross-Project Matrix**: Summary of all scheduled tasks, their latest exit codes, last run timestamps, and log error tallies comparing the last **4 hours** vs **24 hours**.
+3. **Active Anomaly Log**: Direct code-block snippets of exact errors, file paths, and timestamps **strictly from the last 4 hours** to eliminate noise from resolved or historical runs.
 4. **Actionable Remediation Checklist**: Prescriptive commands to fix detected issues (e.g. `Remove-Item .git/index.lock`).
 
 ### Channel 2: Telegram Bot Instant Push Alerts
