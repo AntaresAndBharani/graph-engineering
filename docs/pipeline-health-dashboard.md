@@ -1,69 +1,37 @@
 ﻿# Graph Engineering - Pipeline Health Dashboard
 
-**Last Audit Run:** `2026-08-27 08:07:09`  
-**Overall System Health:** **CRITICAL / ACTION REQUIRED**
+**Last Audit Run:** `2026-08-27 08:16:30`  
+**Overall System Health (Active 4h Window):** **CRITICAL / ACTION REQUIRED**
 
 ---
 
 ## Executive Overview
 
-| Project | Target Repository | Health Status | Active Tasks | Log Errors (24h) | Recent CI Failures |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **crosstrainingapp** | [AntaresAndBharani/crosstrainingapp](https://github.com/AntaresAndBharani/crosstrainingapp) | CRITICAL | 4 | 46 |  |
-| **darwin-trader** | [AntaresAndBharani/darwin-trader](https://github.com/AntaresAndBharani/darwin-trader) | CRITICAL | 4 | 86 |  |
+| Project | Target Repository | Health (4h) | Active Tasks | Log Errors (4h) | Log Errors (24h) | Recent CI Failures |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **crosstrainingapp** | [AntaresAndBharani/crosstrainingapp](https://github.com/AntaresAndBharani/crosstrainingapp) | CRITICAL | 4 | **2** | 46 |  |
+| **darwin-trader** | [AntaresAndBharani/darwin-trader](https://github.com/AntaresAndBharani/darwin-trader) | CRITICAL | 4 | **14** | 90 |  |
 
 ---
 
-## Detected Issues & Remediation Action Items
+## Active Issues & Remediation Action Items (Last 4 Hours)
 
-The supervisor detected the following issues requiring attention:
+The supervisor detected the following active issues requiring attention within the last 4 hours:
 
-| Severity | Project / Component | Issue Description | Recommended Action |
+| Severity | Project / Component | Issue Description (Last 4h) | Recommended Action |
 | :---: | :--- | :--- | :--- |
 | CRITICAL | `CTA-BacklogTriage` | Scheduled task CTA-BacklogTriage exited with error code 1 on 08/27/2026 07:52:14 | `Inspect C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\ logs for exact unhandled exception` |
 | CRITICAL | `crosstrainingapp/backlog-triage-2026-08-27.log` | Log error in backlog-triage-2026-08-27.log: [2026-08-27 07:52:17] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-gym/crosstrainingapp/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-27.log` |
 | CRITICAL | `crosstrainingapp/backlog-triage-2026-08-27.log` | Log error in backlog-triage-2026-08-27.log: [2026-08-27 07:52:17] [ERROR] Unhandled error in backlog triage run: git checkout main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-26.log` | Log error in three-amigos-and-dev-test-2026-08-26.log: [2026-08-26 22:28:30] [ERROR] Unhandled error in three-amigos-and-dev-test run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-26.log` | Log error in three-amigos-and-dev-test-2026-08-26.log: [2026-08-26 23:28:30] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-gym/crosstrainingapp/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-26.log` | Log error in three-amigos-and-dev-test-2026-08-26.log: [2026-08-26 23:28:30] [ERROR] Unhandled error in three-amigos-and-dev-test run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/pr-review-2026-08-26.log` | Log error in pr-review-2026-08-26.log: [2026-08-26 19:03:29] [ERROR] Unhandled error in PR review run: git checkout main failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\pr-review-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/pr-review-2026-08-26.log` | Log error in pr-review-2026-08-26.log: [2026-08-26 21:48:52] [ERROR] Failed to parse verdict JSON from judge response for PR #358: Se ha pasado una cadena no terminada. (824): { | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\pr-review-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/pr-review-2026-08-26.log` | Log error in pr-review-2026-08-26.log: [2026-08-26 22:08:56] [ERROR] Failed to parse verdict JSON from judge response for PR #370: Se ha pasado una cadena no terminada. (1302): { | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\pr-review-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/architect-2026-08-26.log` | Log error in architect-2026-08-26.log: [2026-08-26 17:46:40] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-gym/crosstrainingapp/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\architect-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/architect-2026-08-26.log` | Log error in architect-2026-08-26.log: [2026-08-26 17:46:40] [ERROR] Unhandled error in architect run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\architect-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/architect-2026-08-26.log` | Log error in architect-2026-08-26.log: [2026-08-26 19:15:21] [ERROR] Unhandled error in architect run: git checkout main failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\architect-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/backlog-triage-2026-08-26.log` | Log error in backlog-triage-2026-08-26.log: [2026-08-26 09:37:56] [ERROR] Error absorbing issue #316 into #321: ✓ Closed issue AntaresAndBharani/crosstrainingapp#316 (Invoke-SummarizerScript env var restoration leaks originally-unset vars across test runs) | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/backlog-triage-2026-08-26.log` | Log error in backlog-triage-2026-08-26.log: [2026-08-26 09:38:00] [ERROR] Error absorbing issue #306 into #322: ✓ Closed issue AntaresAndBharani/crosstrainingapp#306 (Update InvokeScriptTests.Selftest.Tests.ps1 header docstring to reflect consolidated scenario structure) | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/backlog-triage-2026-08-26.log` | Log error in backlog-triage-2026-08-26.log: [2026-08-26 09:38:05] [ERROR] Error absorbing issue #307 into #323: ✓ Closed issue AntaresAndBharani/crosstrainingapp#307 (Verify #252 relevance in new CHANGELOG entry) | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-26.log` |
-| CRITICAL | `crosstrainingapp/Merge & Backlog` | GitHub Workflow 'Merge & Backlog' (feat/issue-327) failed on run #33019857132 (https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33019857132) | `Review workflow run logs at https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33019857132` |
 | CRITICAL | `DT-BacklogTriage` | Scheduled task DT-BacklogTriage exited with error code 1 on 08/27/2026 07:52:14 | `Inspect C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\ logs for exact unhandled exception` |
-| CRITICAL | `DT-ThreeAmigosDevTest` | Scheduled task DT-ThreeAmigosDevTest exited with error code 1 on 08/27/2026 07:57:17 | `Inspect C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\ logs for exact unhandled exception` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 07:57:27] [ERROR] claude.exe invocation threw for PR #14: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 08:02:27] [ERROR] claude.exe invocation threw for PR #15: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 08:02:30] [ERROR] claude.exe invocation threw for PR #14: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 08:07:29] [ERROR] claude.exe invocation threw for PR #14: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 08:12:25] [ERROR] claude.exe invocation threw for PR #15: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 08:12:28] [ERROR] claude.exe invocation threw for PR #14: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
 | CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 07:57:19] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-trading/darwin-trader/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
 | CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 07:57:19] [ERROR] Unhandled error in three-amigos-and-dev-test run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-26.log` | Log error in pr-review-2026-08-26.log: [2026-08-26 23:52:26] [ERROR] claude.exe invocation threw for PR #14: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-26.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-26.log` | Log error in pr-review-2026-08-26.log: [2026-08-26 23:57:25] [ERROR] claude.exe invocation threw for PR #15: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-26.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-26.log` | Log error in pr-review-2026-08-26.log: [2026-08-26 23:57:27] [ERROR] claude.exe invocation threw for PR #14: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-26.log` |
-| CRITICAL | `darwin-trader/architect-2026-08-26.log` | Log error in architect-2026-08-26.log: [2026-08-26 22:02:19] [ERROR] Unhandled error in Architect run: git checkout main failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\architect-2026-08-26.log` |
-| CRITICAL | `darwin-trader/architect-2026-08-26.log` | Log error in architect-2026-08-26.log: [2026-08-26 22:07:19] [ERROR] Unhandled error in Architect run: git checkout main failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\architect-2026-08-26.log` |
-| CRITICAL | `darwin-trader/architect-2026-08-26.log` | Log error in architect-2026-08-26.log: [2026-08-26 22:12:19] [ERROR] Unhandled error in Architect run: git checkout main failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\architect-2026-08-26.log` |
-| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-26.log` | Log error in three-amigos-and-dev-test-2026-08-26.log: [2026-08-26 21:28:25] [ERROR] Unhandled error in three-amigos-and-dev-test run: No se puede llamar a un método en una expresión con valor NULL. | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-26.log` |
-| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-26.log` | Log error in three-amigos-and-dev-test-2026-08-26.log: [2026-08-26 23:57:19] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-trading/darwin-trader/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-26.log` |
-| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-26.log` | Log error in three-amigos-and-dev-test-2026-08-26.log: [2026-08-26 23:57:19] [ERROR] Unhandled error in three-amigos-and-dev-test run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-26.log` |
-| CRITICAL | `darwin-trader/Merge & Backlog` | GitHub Workflow 'Merge & Backlog' (feat/issue-5) failed on run #33007109029 (https://github.com/AntaresAndBharani/darwin-trader/actions/runs/33007109029) | `Review workflow run logs at https://github.com/AntaresAndBharani/darwin-trader/actions/runs/33007109029` |
-| WARNING | `crosstrainingapp/pr-review-2026-08-26.log` | Warning in pr-review-2026-08-26.log: [2026-08-26 21:48:52] [WARN] Judge failed to produce a usable verdict for PR #358; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `crosstrainingapp/pr-review-2026-08-26.log` | Warning in pr-review-2026-08-26.log: [2026-08-26 22:08:56] [WARN] Judge failed to produce a usable verdict for PR #370; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `crosstrainingapp/architect-2026-08-26.log` | Warning in architect-2026-08-26.log: [2026-08-26 13:41:54] [WARN] Judge failed to produce a usable decision for issue #318; leaving it unprocessed for manual triage. | Review logs for degradation |
-| WARNING | `crosstrainingapp/backlog-triage-2026-08-26.log` | Warning in backlog-triage-2026-08-26.log: [2026-08-26 09:33:04] [WARN] Judge returned no clusters for label 'tech-debt' despite 7 open issue(s) -- expected every issue to land in a cluster. Check the judge response logged above. | Review logs for degradation |
-| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 08:02:27] [WARN] Judge failed to produce a usable verdict for PR #15; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 08:02:30] [WARN] Judge failed to produce a usable verdict for PR #14; leaving it unreviewed for manual triage. | Review logs for degradation |
+| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 08:12:25] [WARN] Judge failed to produce a usable verdict for PR #15; leaving it unreviewed for manual triage. | Review logs for degradation |
+| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 08:12:28] [WARN] Judge failed to produce a usable verdict for PR #14; leaving it unreviewed for manual triage. | Review logs for degradation |
 | WARNING | `darwin-trader/architect-2026-08-27.log` | Warning in architect-2026-08-27.log: [2026-08-27 07:57:22] [WARN] gh api sub_issues threw for story #16: function not defined: open/0 | Review logs for degradation |
-| WARNING | `darwin-trader/pr-review-2026-08-26.log` | Warning in pr-review-2026-08-26.log: [2026-08-26 23:57:25] [WARN] Judge failed to produce a usable verdict for PR #15; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `darwin-trader/pr-review-2026-08-26.log` | Warning in pr-review-2026-08-26.log: [2026-08-26 23:57:27] [WARN] Judge failed to produce a usable verdict for PR #14; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `darwin-trader/architect-2026-08-26.log` | Warning in architect-2026-08-26.log: [2026-08-26 21:25:42] [WARN] Failed to link subtask #6 to story #4: gh: Invalid request. | Review logs for degradation |
-| WARNING | `darwin-trader/architect-2026-08-26.log` | Warning in architect-2026-08-26.log: [2026-08-26 21:25:44] [WARN] Failed to link subtask #7 to story #4: gh: Invalid request. | Review logs for degradation |
 
 ---
 
@@ -72,22 +40,22 @@ The supervisor detected the following issues requiring attention:
 ### Windows Task Scheduler Execution Matrix
 | Task Name | State | Last Run Time | Next Run Time | Last Exit Result | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `CTA-Architect` | Ready | 2026-08-27 08:05:20 | 2026-08-27 08:10:19 | `0` | HEALTHY (0) |
+| `CTA-Architect` | Ready | 2026-08-27 08:15:20 | 2026-08-27 08:20:19 | `0` | HEALTHY (0) |
 | `CTA-BacklogTriage` | Ready | 2026-08-27 07:52:14 | 2026-08-27 09:47:16 | `1` | FAILED (1) |
-| `CTA-PRReview` | Ready | 2026-08-27 08:03:28 | 2026-08-27 08:08:27 | `0` | HEALTHY (0) |
-| `CTA-ThreeAmigosDevTest` | Ready | 2026-08-27 07:58:28 | 2026-08-27 08:13:27 | `0` | HEALTHY (0) |
+| `CTA-PRReview` | Ready | 2026-08-27 08:13:28 | 2026-08-27 08:18:27 | `0` | HEALTHY (0) |
+| `CTA-ThreeAmigosDevTest` | Ready | 2026-08-27 08:13:28 | 2026-08-27 08:28:27 | `0` | HEALTHY (0) |
 
-### Local Pipeline Daily Logs (Last 24h)
-| Log File | Last Modified | Size | Errors | Warnings | Latest Error Snippet |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| `architect-2026-08-27.log` | 2026-08-27 08:05:24 | 20.2 KB | 0 | 0 | None |
-| `pr-review-2026-08-27.log` | 2026-08-27 08:03:31 | 23.8 KB | 0 | 0 | None |
-| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 07:58:35 | 6.5 KB | 0 | 0 | None |
-| `backlog-triage-2026-08-27.log` | 2026-08-27 07:52:17 | 0.9 KB | 2 | 0 | `[2026-08-27 07:52:17] [ERROR] Unhandled error in backlog triage run: git checkou`... |
-| `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:58:49 | 51.1 KB | 26 | 0 | `[2026-08-26 23:28:30] [ERROR] Unhandled error in three-amigos-and-dev-test run: `... |
-| `pr-review-2026-08-26.log` | 2026-08-26 23:58:31 | 145.7 KB | 5 | 2 | `[2026-08-26 22:08:56] [ERROR] Failed to parse verdict JSON from judge response f`... |
-| `architect-2026-08-26.log` | 2026-08-26 23:55:23 | 191.1 KB | 4 | 1 | `[2026-08-26 19:15:21] [ERROR] Unhandled error in architect run: git checkout mai`... |
-| `backlog-triage-2026-08-26.log` | 2026-08-26 21:47:59 | 32.3 KB | 9 | 1 | `[2026-08-26 09:38:05] [ERROR] Error absorbing issue #307 into #323: ✓ Closed iss`... |
+### Local Pipeline Daily Logs (Errors: 4h vs 24h)
+| Log File | Last Modified | Size | Errors (4h) | Errors (24h) | Warnings (4h) | Latest 4h Error Snippet |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| `architect-2026-08-27.log` | 2026-08-27 08:15:24 | 22.7 KB | **0** | 0 | 0 | None |
+| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 08:13:35 | 7.7 KB | **0** | 0 | 0 | None |
+| `pr-review-2026-08-27.log` | 2026-08-27 08:13:31 | 25.5 KB | **0** | 0 | 0 | None |
+| `backlog-triage-2026-08-27.log` | 2026-08-27 07:52:17 | 0.9 KB | **2** | 2 | 0 | `[2026-08-27 07:52:17] [ERROR] Unhandled error in backlog triage run: git checkou`... |
+| `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:58:49 | 51.1 KB | **0** | 26 | 0 | None |
+| `pr-review-2026-08-26.log` | 2026-08-26 23:58:31 | 145.7 KB | **0** | 5 | 0 | None |
+| `architect-2026-08-26.log` | 2026-08-26 23:55:23 | 191.1 KB | **0** | 4 | 0 | None |
+| `backlog-triage-2026-08-26.log` | 2026-08-26 21:47:59 | 32.3 KB | **0** | 9 | 0 | None |
 
 ### Recent GitHub Actions CI Runs
 | Run ID | Workflow Name | Head Branch | Status | Updated At |
@@ -108,22 +76,22 @@ The supervisor detected the following issues requiring attention:
 ### Windows Task Scheduler Execution Matrix
 | Task Name | State | Last Run Time | Next Run Time | Last Exit Result | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `DT-Architect` | Ready | 2026-08-27 08:02:17 | 2026-08-27 08:07:16 | `0` | HEALTHY (0) |
+| `DT-Architect` | Ready | 2026-08-27 08:12:17 | 2026-08-27 08:17:16 | `0` | HEALTHY (0) |
 | `DT-BacklogTriage` | Ready | 2026-08-27 07:52:14 | 2026-08-27 08:42:16 | `1` | FAILED (1) |
-| `DT-PRReview` | Ready | 2026-08-27 08:02:17 | 2026-08-27 08:07:16 | `0` | HEALTHY (0) |
-| `DT-ThreeAmigosDevTest` | Ready | 2026-08-27 07:57:17 | 2026-08-27 08:12:16 | `1` | FAILED (1) |
+| `DT-PRReview` | Ready | 2026-08-27 08:12:17 | 2026-08-27 08:17:16 | `0` | HEALTHY (0) |
+| `DT-ThreeAmigosDevTest` | Ready | 2026-08-27 08:12:17 | 2026-08-27 08:27:16 | `0` | HEALTHY (0) |
 
-### Local Pipeline Daily Logs (Last 24h)
-| Log File | Last Modified | Size | Errors | Warnings | Latest Error Snippet |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| `pr-review-2026-08-27.log` | 2026-08-27 08:02:30 | 24.5 KB | 28 | 26 | `[2026-08-27 08:02:30] [ERROR] claude.exe invocation threw for PR #14: Excepción `... |
-| `architect-2026-08-27.log` | 2026-08-27 08:02:21 | 11.8 KB | 0 | 1 | None |
-| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 07:57:19 | 6.9 KB | 2 | 0 | `[2026-08-27 07:57:19] [ERROR] Unhandled error in three-amigos-and-dev-test run: `... |
-| `backlog-triage-2026-08-27.log` | 2026-08-27 07:52:43 | 1.1 KB | 0 | 0 | None |
-| `pr-review-2026-08-26.log` | 2026-08-26 23:57:27 | 59.2 KB | 48 | 43 | `[2026-08-26 23:57:27] [ERROR] claude.exe invocation threw for PR #14: Excepción `... |
-| `architect-2026-08-26.log` | 2026-08-26 23:57:21 | 30 KB | 4 | 4 | `[2026-08-26 22:12:19] [ERROR] Unhandled error in Architect run: git checkout mai`... |
-| `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:57:19 | 16.5 KB | 4 | 0 | `[2026-08-26 23:57:19] [ERROR] Unhandled error in three-amigos-and-dev-test run: `... |
-| `backlog-triage-2026-08-26.log` | 2026-08-26 20:42:19 | 1.7 KB | 0 | 0 | None |
+### Local Pipeline Daily Logs (Errors: 4h vs 24h)
+| Log File | Last Modified | Size | Errors (4h) | Errors (24h) | Warnings (4h) | Latest 4h Error Snippet |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| `pr-review-2026-08-27.log` | 2026-08-27 08:12:28 | 28.1 KB | **12** | 32 | 10 | `[2026-08-27 08:12:28] [ERROR] claude.exe invocation threw for PR #14: Excepción `... |
+| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 08:12:22 | 8.1 KB | **2** | 2 | 0 | `[2026-08-27 07:57:19] [ERROR] Unhandled error in three-amigos-and-dev-test run: `... |
+| `architect-2026-08-27.log` | 2026-08-27 08:12:21 | 13.1 KB | **0** | 0 | 1 | None |
+| `backlog-triage-2026-08-27.log` | 2026-08-27 07:52:43 | 1.1 KB | **0** | 0 | 0 | None |
+| `pr-review-2026-08-26.log` | 2026-08-26 23:57:27 | 59.2 KB | **0** | 48 | 0 | None |
+| `architect-2026-08-26.log` | 2026-08-26 23:57:21 | 30 KB | **0** | 4 | 0 | None |
+| `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:57:19 | 16.5 KB | **0** | 4 | 0 | None |
+| `backlog-triage-2026-08-26.log` | 2026-08-26 20:42:19 | 1.7 KB | **0** | 0 | 0 | None |
 
 ### Recent GitHub Actions CI Runs
 | Run ID | Workflow Name | Head Branch | Status | Updated At |

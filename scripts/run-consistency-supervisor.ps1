@@ -178,7 +178,10 @@ foreach ($proj in $Projects) {
         $nextRun    = if ($null -ne $taskInfo) { $taskInfo.NextRunTime } else { $null }
         $statusStr  = if ($lastResult -eq 0) { "HEALTHY (0)" } elseif ($lastResult -eq 267009) { "RUNNING" } else { "FAILED ($lastResult)" }
 
-        if ($lastResult -ne 0 -and $lastResult -ne 267009 -and $lastResult -ne -1) {
+        # Check if task failure occurred in the last 4 hours
+        $isFailureInLast4h = ($lastResult -ne 0 -and $lastResult -ne 267009 -and $lastResult -ne -1) -and ($lastRun -and ($now - $lastRun).TotalHours -le 4)
+
+        if ($isFailureInLast4h) {
             $issueMsg = "Scheduled task $($taskName) exited with error code $($lastResult) on $($lastRun)"
             Write-SupervisorLog $issueMsg "ERROR"
             $projIssues += @{
@@ -187,6 +190,7 @@ foreach ($proj in $Projects) {
                 Message     = $issueMsg
                 Remediation = "Inspect $($pPath)\logs\local-pipeline\ logs for exact unhandled exception"
                 Severity    = "CRITICAL"
+                Timestamp   = $lastRun
             }
         }
 
@@ -201,13 +205,13 @@ foreach ($proj in $Projects) {
     }
 
     # -------------------------------------------------------------
-    # 3. Local Pipeline Log Files Audit
+    # 3. Local Pipeline Log Files Audit (4h vs 24h)
     # -------------------------------------------------------------
     $pLogDir = Join-Path $pPath "logs\local-pipeline"
     if (Test-Path -LiteralPath $pLogDir) {
         $logFiles = Get-ChildItem -LiteralPath $pLogDir -Filter "*.log" | Sort-Object LastWriteTime -Descending | Select-Object -First 10
         foreach ($lf in $logFiles) {
-            # Only scan logs modified in the last 24 hours
+            # Scan logs modified in the last 24 hours
             if (($now - $lf.LastWriteTime).TotalHours -le 24) {
                 $lines = @()
                 try {
@@ -216,28 +220,49 @@ foreach ($proj in $Projects) {
                     Write-SupervisorLog "Could not read log file $($lf.FullName): $($_.ToString())" "WARN"
                 }
 
-                $errorLines = @()
-                $warnLines  = @()
+                $errorLines4h  = @()
+                $errorLines24h = @()
+                $warnLines4h   = @()
+                $warnLines24h  = @()
+
+                $lastLineTs = $lf.LastWriteTime
+
                 foreach ($line in $lines) {
+                    $lineTs = $lastLineTs
+                    if ($line -match "^\[(?<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]") {
+                        try {
+                            $lineTs = [DateTime]::ParseExact($matches["ts"], "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+                            $lastLineTs = $lineTs
+                        } catch {}
+                    }
+
+                    $ageHours = ($now - $lineTs).TotalHours
+                    $is4h  = $ageHours -le 4
+                    $is24h = $ageHours -le 24
+
                     if ($line -match "\[ERROR\]" -or $line -match "Unhandled error" -or $line -match "fatal:" -or $line -match "failed with exit code") {
-                        $errorLines += $line
+                        if ($is24h) { $errorLines24h += $line }
+                        if ($is4h)  { $errorLines4h  += $line }
                     } elseif ($line -match "\[WARN\]" -or $line -match "\[WARNING\]") {
-                        $warnLines += $line
+                        if ($is24h) { $warnLines24h += $line }
+                        if ($is4h)  { $warnLines4h  += $line }
                     }
                 }
 
                 $logsSummary += [PSCustomObject]@{
-                    FileName     = $lf.Name
-                    LastModified = $lf.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
-                    SizeKB       = [math]::Round($lf.Length / 1KB, 1)
-                    ErrorCount   = $errorLines.Count
-                    WarnCount    = $warnLines.Count
-                    LatestError  = if ($errorLines.Count -gt 0) { $errorLines[-1] } else { $null }
+                    FileName      = $lf.Name
+                    LastModified  = $lf.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+                    SizeKB        = [math]::Round($lf.Length / 1KB, 1)
+                    ErrorCount4h  = $errorLines4h.Count
+                    ErrorCount24h = $errorLines24h.Count
+                    WarnCount4h   = $warnLines4h.Count
+                    WarnCount24h  = $warnLines24h.Count
+                    LatestError4h = if ($errorLines4h.Count -gt 0) { $errorLines4h[-1] } else { $null }
                 }
 
-                if ($errorLines.Count -gt 0) {
-                    # Capture unique error lines
-                    $recentErrors = $errorLines | Select-Object -Unique -Last 3
+                # Only collect issue descriptions from errors that occurred in the last 4 hours
+                if ($errorLines4h.Count -gt 0) {
+                    $recentErrors = $errorLines4h | Select-Object -Unique -Last 3
                     foreach ($err in $recentErrors) {
                         $issueMsg = "Log error in $($lf.Name): $err"
                         $projIssues += @{
@@ -250,8 +275,8 @@ foreach ($proj in $Projects) {
                     }
                 }
 
-                if ($warnLines.Count -gt 0) {
-                    $recentWarns = $warnLines | Select-Object -Unique -Last 2
+                if ($warnLines4h.Count -gt 0) {
+                    $recentWarns = $warnLines4h | Select-Object -Unique -Last 2
                     foreach ($wrn in $recentWarns) {
                         $projWarnings += @{
                             Category    = "Pipeline Log Warning"
@@ -297,7 +322,15 @@ foreach ($proj in $Projects) {
                     Url        = $gr.url
                 }
 
-                if ($c -eq "failure" -or $c -eq "timed_out") {
+                # Check if GitHub Action failure occurred in the last 4 hours
+                $runUpdatedAt = $null
+                try {
+                    $runUpdatedAt = [DateTime]::Parse($gr.updatedAt)
+                } catch {}
+
+                $isRunIn4h = ($null -ne $runUpdatedAt) -and (($now.ToUniversalTime() - $runUpdatedAt.ToUniversalTime()).TotalHours -le 4)
+
+                if (($c -eq "failure" -or $c -eq "timed_out") -and $isRunIn4h) {
                     $issueMsg = "GitHub Workflow '$($gr.name)' ($($gr.headBranch)) failed on run #$($gr.databaseId)"
                     $projIssues += @{
                         Category    = "GitHub CI Failure"
@@ -315,7 +348,7 @@ foreach ($proj in $Projects) {
         Write-SupervisorLog "Failed to execute gh run list for $($pRepo): $($_.ToString())" "WARN"
     }
 
-    # Overall project health status
+    # Overall project health status based on active 4h issues
     $projHealth = if ($projIssues.Count -gt 0) { "CRITICAL" } elseif ($projWarnings.Count -gt 0) { "WARNING" } else { "HEALTHY" }
 
     $projectHealthSummaries += [PSCustomObject]@{
@@ -345,35 +378,37 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine("# Graph Engineering - Pipeline Health Dashboard")
 [void]$sb.AppendLine()
 [void]$sb.AppendLine("**Last Audit Run:** ``$generatedTime``  ")
-[void]$sb.AppendLine("**Overall System Health:** **$overallHealth**")
+[void]$sb.AppendLine("**Overall System Health (Active 4h Window):** **$overallHealth**")
 [void]$sb.AppendLine()
 [void]$sb.AppendLine("---")
 [void]$sb.AppendLine()
 [void]$sb.AppendLine("## Executive Overview")
 [void]$sb.AppendLine()
-[void]$sb.AppendLine("| Project | Target Repository | Health Status | Active Tasks | Log Errors (24h) | Recent CI Failures |")
-[void]$sb.AppendLine("| :--- | :--- | :---: | :---: | :---: | :---: |")
+[void]$sb.AppendLine("| Project | Target Repository | Health (4h) | Active Tasks | Log Errors (4h) | Log Errors (24h) | Recent CI Failures |")
+[void]$sb.AppendLine("| :--- | :--- | :---: | :---: | :---: | :---: | :---: |")
 
 foreach ($ph in $projectHealthSummaries) {
     $activeTasksCount = ($ph.Tasks | Where-Object { $_.State -eq "Ready" -or $_.State -eq "Running" }).Count
-    $totalLogErrors = ($ph.Logs | Measure-Object -Property ErrorCount -Sum).Sum
-    if ($null -eq $totalLogErrors) { $totalLogErrors = 0 }
+    $totalLogErrors4h  = ($ph.Logs | Measure-Object -Property ErrorCount4h -Sum).Sum
+    $totalLogErrors24h = ($ph.Logs | Measure-Object -Property ErrorCount24h -Sum).Sum
+    if ($null -eq $totalLogErrors4h)  { $totalLogErrors4h = 0 }
+    if ($null -eq $totalLogErrors24h) { $totalLogErrors24h = 0 }
     $ciFailures = ($ph.GitHubRuns | Where-Object { $_.Conclusion -eq "failure" -or $_.Conclusion -eq "timed_out" }).Count
 
-    [void]$sb.AppendLine("| **$($ph.Project)** | [$($ph.Repo)](https://github.com/$($ph.Repo)) | $($ph.Health) | $activeTasksCount | $totalLogErrors | $ciFailures |")
+    [void]$sb.AppendLine("| **$($ph.Project)** | [$($ph.Repo)](https://github.com/$($ph.Repo)) | $($ph.Health) | $activeTasksCount | **$totalLogErrors4h** | $totalLogErrors24h | $ciFailures |")
 }
 
 [void]$sb.AppendLine()
 [void]$sb.AppendLine("---")
 [void]$sb.AppendLine()
 
-# Active Anomalies & Remediation Section
+# Active Anomalies & Remediation Section (Last 4 Hours Only)
 if ($currentRunErrors.Count -gt 0 -or $currentRunWarnings.Count -gt 0) {
-    [void]$sb.AppendLine("## Detected Issues & Remediation Action Items")
+    [void]$sb.AppendLine("## Active Issues & Remediation Action Items (Last 4 Hours)")
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine("The supervisor detected the following issues requiring attention:")
+    [void]$sb.AppendLine("The supervisor detected the following active issues requiring attention within the last 4 hours:")
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine("| Severity | Project / Component | Issue Description | Recommended Action |")
+    [void]$sb.AppendLine("| Severity | Project / Component | Issue Description (Last 4h) | Recommended Action |")
     [void]$sb.AppendLine("| :---: | :--- | :--- | :--- |")
 
     foreach ($err in $currentRunErrors) {
@@ -391,9 +426,9 @@ if ($currentRunErrors.Count -gt 0 -or $currentRunWarnings.Count -gt 0) {
     [void]$sb.AppendLine("---")
     [void]$sb.AppendLine()
 } else {
-    [void]$sb.AppendLine("## System Status: All Nodes Healthy")
+    [void]$sb.AppendLine("## Active Issues: All Nodes Healthy (Last 4 Hours)")
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine("No unhandled errors, stale ``.git`` lock files, or broken CI runners detected across all monitored projects.")
+    [void]$sb.AppendLine("No unhandled errors, stale ``.git`` lock files, or broken CI runners detected in the last 4 hours across all monitored projects.")
     [void]$sb.AppendLine()
     [void]$sb.AppendLine("---")
     [void]$sb.AppendLine()
@@ -412,16 +447,16 @@ foreach ($ph in $projectHealthSummaries) {
     }
 
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine("### Local Pipeline Daily Logs (Last 24h)")
-    [void]$sb.AppendLine("| Log File | Last Modified | Size | Errors | Warnings | Latest Error Snippet |")
-    [void]$sb.AppendLine("| :--- | :---: | :---: | :---: | :---: | :--- |")
+    [void]$sb.AppendLine("### Local Pipeline Daily Logs (Errors: 4h vs 24h)")
+    [void]$sb.AppendLine("| Log File | Last Modified | Size | Errors (4h) | Errors (24h) | Warnings (4h) | Latest 4h Error Snippet |")
+    [void]$sb.AppendLine("| :--- | :---: | :---: | :---: | :---: | :---: | :--- |")
 
     foreach ($l in $ph.Logs) {
-        $snippet = if ($l.LatestError) {
-            $rawSnippet = $l.LatestError -replace "\|", "-"
+        $snippet = if ($l.LatestError4h) {
+            $rawSnippet = $l.LatestError4h -replace "\|", "-"
             "``" + $rawSnippet.Substring(0, [Math]::Min(80, $rawSnippet.Length)) + "``..."
         } else { "None" }
-        [void]$sb.AppendLine("| ``$($l.FileName)`` | $($l.LastModified) | $($l.SizeKB) KB | $($l.ErrorCount) | $($l.WarnCount) | $snippet |")
+        [void]$sb.AppendLine("| ``$($l.FileName)`` | $($l.LastModified) | $($l.SizeKB) KB | **$($l.ErrorCount4h)** | $($l.ErrorCount24h) | $($l.WarnCount4h) | $snippet |")
     }
 
     [void]$sb.AppendLine()
