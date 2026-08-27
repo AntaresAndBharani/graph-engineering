@@ -43,6 +43,13 @@ param(
             Path        = "C:\Users\rogal\workspaces\ws-trading\darwin-trader"
             TaskPrefix  = "DT-"
             Description = "Algorithmic Trading & MetaTrader Platform"
+        },
+        @{
+            Name        = "gh-development-dashboard"
+            Repo        = "AntaresAndBharani/gh-development-dashboard"
+            Path        = "C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard"
+            TaskPrefix  = "GDD-"
+            Description = "Android / Jetpack Compose GitHub Dashboard"
         }
     ),
     [string]$DashboardPath = (Join-Path $PSScriptRoot "..\docs\pipeline-health-dashboard.md"),
