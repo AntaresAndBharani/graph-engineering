@@ -26,9 +26,14 @@ if (-not (Test-Path -LiteralPath $ScriptPath)) {
     throw "Supervisor script not found at $ScriptPath"
 }
 
+$LauncherPath = Join-Path $RepoRoot "scripts\run-hidden.vbs"
+if (-not (Test-Path -LiteralPath $LauncherPath)) {
+    throw "Hidden launcher script not found at $LauncherPath"
+}
+
 $Action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+    -Execute "wscript.exe" `
+    -Argument "`"$LauncherPath`" powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
 
 $Trigger = New-ScheduledTaskTrigger `
     -Once `
