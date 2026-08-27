@@ -173,6 +173,27 @@ apply just as broadly:
    first fenced block wherever it appears in the response. Applied to all
    three wrappers built so far, not just Architect, since they share the
    identical pattern.
+5. **Windows 32KB command-line length limit on large prompts (`claude.exe --print`).**
+   On Windows, `Process.Start()` enforces a strict 32,767-character command-line length
+   limit. When a node evaluates large inputs (such as PR Review evaluating full diffs or
+   Jetpack Compose UI changes), passing `--print $prompt` on the command line throws a
+   terminating win32 exception: `The filename or extension is too long` (`El nombre del
+   archivo o la extensión es demasiado largo`). **Fix:** pass `-p` on the command line
+   and stream the prompt via `RedirectStandardInput = $true` using a UTF-8 `StreamWriter`
+   over `proc.StandardInput.BaseStream`.
+6. **PowerShell 5.1 `ConvertFrom-Json` fragility on unescaped sequences & trailing prose.**
+   When parsing model responses or PR descriptions containing unescaped control/escape
+   characters (e.g. `\a`, `\g`, `^G`) or unexpected trailing text, PowerShell 5.1's
+   built-in `ConvertFrom-Json` throws `Invalid JSON primitive` or `Invalid string`.
+   **Fix:** Extract the outermost JSON object `(?s)(\{.*\})` and provide a fallback to
+   a Python one-liner (`python -c "import json, sys; print(json.dumps(json.loads(sys.stdin.read())))"`)
+   for deterministic, standard-compliant JSON parsing.
+7. **PowerShell 5.1 array unrolling and empty collection gotcha (`ConvertFrom-JsonSafeArray`).**
+   `ConvertFrom-Json` on `"[]"` returns `$null`. Wrapping it naively in `@(...)` results in
+   a 1-element array containing `$null` or `@()`, causing loops to execute against invalid
+   empty items. **Fix:** use `System.Collections.Generic.List[psobject]` to collect parsed
+   items and return `, $list.ToArray()` (unary comma operator) to guarantee strict array
+   semantics without nested wrapping.
 
 ## Critical: `--allowedTools`/`--disallowedTools` don't reliably restrict `claude.exe` in `--print` mode (2026-08-26)
 

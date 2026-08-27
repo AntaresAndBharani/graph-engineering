@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added cross-stack E2E implementation blueprints for Android/Compose (Maestro), Web applications (Playwright), and Python CLI suites (Pester/pytest).
 - Added cross-node contracts integrating E2E testing into Three Amigos (BDD scenarios & tag mapping), Dev & Test (delta test execution, visual artifact capture), and PR Review (evidence verification).
 - Added E2E implementation lessons and resilience hardening derived from live testing in `crosstrainingapp` (temp-safe body writing, non-fatal comment publishing, QA release pre-validation).
-
+- Added local CLI pipeline resilience hardening to `docs/local-cli-pipeline.md`: Windows 32KB command-line length limits (`Process.Start`) mitigated via standard input streaming (`claude.exe -p`), robust JSON boundary extraction (`(?s)(\{.*\})`) with Python fallback parser, and strict PowerShell 5.1 array semantics in `ConvertFrom-JsonSafeArray` via `List[psobject]`.
 ### Changed
 - Updated `README.md` to reference `docs/e2e-testing-recommendations.md` in the architectural specifications and record E2E testing lessons learned.
 - Updated `docs/dev-test-node.md` to include delta E2E verification, visual artifact synchronization, and sticky PR evidence posting in Dev & Test node responsibilities.
