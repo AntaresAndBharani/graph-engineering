@@ -1,6 +1,6 @@
 ﻿# Graph Engineering - Pipeline Health Dashboard
 
-**Last Audit Run:** `2026-08-27 10:45:21`  
+**Last Audit Run:** `2026-08-27 16:12:56`  
 **Overall System Health (Active 4h Window):** **CRITICAL / ACTION REQUIRED**
 
 ---
@@ -9,9 +9,9 @@
 
 | Project | Target Repository | Health (4h) | Active Tasks | Log Errors (4h) | Log Errors (24h) | Recent CI Failures |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **crosstrainingapp** | [AntaresAndBharani/crosstrainingapp](https://github.com/AntaresAndBharani/crosstrainingapp) | CRITICAL | 4 | **6** | 41 | 2 |
-| **darwin-trader** | [AntaresAndBharani/darwin-trader](https://github.com/AntaresAndBharani/darwin-trader) | CRITICAL | 4 | **58** | 134 | 0 |
-| **gh-development-dashboard** | [AntaresAndBharani/gh-development-dashboard](https://github.com/AntaresAndBharani/gh-development-dashboard) | CRITICAL | 0 | **0** | 0 |  |
+| **crosstrainingapp** | [AntaresAndBharani/crosstrainingapp](https://github.com/AntaresAndBharani/crosstrainingapp) | CRITICAL | 4 | **3** | 41 | 3 |
+| **darwin-trader** | [AntaresAndBharani/darwin-trader](https://github.com/AntaresAndBharani/darwin-trader) | CRITICAL | 4 | **54** | 206 | 0 |
+| **gh-development-dashboard** | [AntaresAndBharani/gh-development-dashboard](https://github.com/AntaresAndBharani/gh-development-dashboard) | CRITICAL | 4 | **40** | 42 |  |
 
 ---
 
@@ -21,29 +21,33 @@ The supervisor detected the following active issues requiring attention within t
 
 | Severity | Project / Component | Issue Description (Last 4h) | Recommended Action |
 | :---: | :--- | :--- | :--- |
-| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 10:33:15] [ERROR] agy.exe exited 1 for subtask #393. StdErr:  - StdOut: {"conversation_id":"44cf1677-2185-4c91-9957-c03f998f3500","status":"ERROR","response":"","error":"timeout waiting for response","duration_seconds":1198.553593,"num_turns":1,"usage":{"input_tokens":1054419,"output_tokens":52575,"thinking_tokens":26587,"cache_read_tokens":30536005,"total_tokens":1106994}} | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 08:28:31] [ERROR] Unhandled error in PR review run: git fetch origin failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 09:13:33] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-gym/crosstrainingapp/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 09:13:33] [ERROR] Unhandled error in PR review run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/backlog-triage-2026-08-27.log` | Log error in backlog-triage-2026-08-27.log: [2026-08-27 07:52:17] [INFO] git: fatal: Unable to create 'C:/Users/rogal/workspaces/ws-gym/crosstrainingapp/.git/index.lock': File exists. | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/backlog-triage-2026-08-27.log` | Log error in backlog-triage-2026-08-27.log: [2026-08-27 07:52:17] [ERROR] Unhandled error in backlog triage run: git checkout main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\backlog-triage-2026-08-27.log` |
-| CRITICAL | `crosstrainingapp/PR CI & Test Verification` | GitHub Workflow 'PR CI & Test Verification' (feat/issue-394) failed on run #33054907452 (https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054907452) | `Review workflow run logs at https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054907452` |
-| CRITICAL | `crosstrainingapp/PR Snapshot Build & Pre-Release` | GitHub Workflow 'PR Snapshot Build & Pre-Release' (feat/issue-393) failed on run #33054165311 (https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054165311) | `Review workflow run logs at https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054165311` |
-| CRITICAL | `DT-BacklogTriage` | Scheduled task DT-BacklogTriage exited with error code 1 on 08/27/2026 08:42:17 | `Inspect C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\ logs for exact unhandled exception` |
-| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 07:57:19] [ERROR] Unhandled error in three-amigos-and-dev-test run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
-| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 09:30:30] [ERROR] agy.exe exited 1 for fix-up on PR #15. StdErr:  - StdOut: {"conversation_id":"6c9ec90f-5f9e-4960-a34a-9081492a132f","status":"ERROR","response":"","error":"timeout waiting for response","duration_seconds":1150.7705321,"num_turns":1,"usage":{"input_tokens":669090,"output_tokens":23551,"thinking_tokens":8924,"cache_read_tokens":10175400,"total_tokens":692641}} | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
-| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 09:32:35] [ERROR] agy.exe exited 1 for fix-up on PR #15. StdErr:  - StdOut: {"conversation_id":"55bf230f-11a7-4da3-8098-c02855a02c70","status":"ERROR","response":"","error":"The stream was interrupted. Please continue the task you were working on.","duration_seconds":1198.2503427,"num_turns":1,"usage":{"input_tokens":431885,"output_tokens":13899,"thinking_tokens":5988,"cache_read_tokens":4842790,"total_tokens":445784}} | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 10:32:22] [ERROR] claude.exe invocation threw for PR #30: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 10:37:22] [ERROR] claude.exe invocation threw for PR #30: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 10:42:23] [ERROR] claude.exe invocation threw for PR #30: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
-| CRITICAL | `darwin-trader/architect-2026-08-27.log` | Log error in architect-2026-08-27.log: [2026-08-27 09:47:20] [ERROR] Unhandled error in Architect run: git reset --hard origin/main failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\architect-2026-08-27.log` |
-| CRITICAL | `darwin-trader/architect-2026-08-27.log` | Log error in architect-2026-08-27.log: [2026-08-27 10:02:19] [ERROR] Unhandled error in Architect run: git fetch origin failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\architect-2026-08-27.log` |
-| CRITICAL | `darwin-trader/architect-2026-08-27.log` | Log error in architect-2026-08-27.log: [2026-08-27 10:27:20] [ERROR] Unhandled error in Architect run: git fetch origin failed with exit code 1 | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\architect-2026-08-27.log` |
-| CRITICAL | `gh-development-dashboard/Release APK` | GitHub Workflow 'Release APK' (main) failed on run #33053863358 (https://github.com/AntaresAndBharani/gh-development-dashboard/actions/runs/33053863358) | `Review workflow run logs at https://github.com/AntaresAndBharani/gh-development-dashboard/actions/runs/33053863358` |
-| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 10:37:22] [WARN] Judge failed to produce a usable verdict for PR #30; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 10:42:23] [WARN] Judge failed to produce a usable verdict for PR #30; leaving it unreviewed for manual triage. | Review logs for degradation |
-| WARNING | `darwin-trader/architect-2026-08-27.log` | Warning in architect-2026-08-27.log: [2026-08-27 08:47:22] [WARN] gh api sub_issues threw for story #17: function not defined: open/0 | Review logs for degradation |
-| WARNING | `darwin-trader/architect-2026-08-27.log` | Warning in architect-2026-08-27.log: [2026-08-27 08:48:16] [WARN] gh api sub_issues threw for story #16: function not defined: open/0 | Review logs for degradation |
+| CRITICAL | `CTA-ThreeAmigosDevTest` | Scheduled task CTA-ThreeAmigosDevTest exited with error code 1 on 08/27/2026 15:58:28 | `Inspect C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\ logs for exact unhandled exception` |
+| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 12:45:28] [INFO] git: fatal: unable to access 'https://github.com/AntaresAndBharani/crosstrainingapp.git/': Recv failure: Connection was reset | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 12:45:28] [ERROR] Unhandled error in three-amigos-and-dev-test run: git fetch origin failed with exit code 128 | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `crosstrainingapp/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 15:58:33] [ERROR] Unhandled error in three-amigos-and-dev-test run: No se puede llamar a un método en una expresión con valor NULL. | `Check full trace in C:\Users\rogal\workspaces\ws-gym\crosstrainingapp\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `DT-BacklogTriage` | Scheduled task DT-BacklogTriage exited with error code 1 on 08/27/2026 14:42:17 | `Inspect C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\ logs for exact unhandled exception` |
+| CRITICAL | `DT-ThreeAmigosDevTest` | Scheduled task DT-ThreeAmigosDevTest exited with error code 1 on 08/27/2026 16:12:17 | `Inspect C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\ logs for exact unhandled exception` |
+| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 15:42:29] [ERROR] Unhandled error in three-amigos-and-dev-test run: No se puede llamar a un método en una expresión con valor NULL. | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 15:57:30] [ERROR] Unhandled error in three-amigos-and-dev-test run: No se puede llamar a un método en una expresión con valor NULL. | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `darwin-trader/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 16:12:29] [ERROR] Unhandled error in three-amigos-and-dev-test run: No se puede llamar a un método en una expresión con valor NULL. | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 16:02:23] [ERROR] claude.exe invocation threw for PR #30: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 16:07:22] [ERROR] claude.exe invocation threw for PR #30: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `darwin-trader/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 16:12:22] [ERROR] claude.exe invocation threw for PR #30: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-trading\darwin-trader\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/architect-2026-08-27.log` | Log error in architect-2026-08-27.log: [2026-08-27 14:17:46] [ERROR] Failed to create subtask 'Compute Dwell-Time Analytics & Expose AnalyticsUiState from DashboardViewModel' for issue #1: gh : could not add label: 'status:pending-review' not found | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\architect-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/architect-2026-08-27.log` | Log error in architect-2026-08-27.log: [2026-08-27 14:17:47] [ERROR] Failed to create subtask 'Redesign Main Screen with Scope Bar, Story Evolution Chart, and Stage Dwell-Time Cards' for issue #1: gh : could not add label: 'status:pending-review' not found | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\architect-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/architect-2026-08-27.log` | Log error in architect-2026-08-27.log: [2026-08-27 14:22:57] [ERROR] Failed to parse decision JSON from judge response for issue #1: Se ha pasado una matriz no válida. Se esperaba ','. (2180): { | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\architect-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 15:56:55] [ERROR] claude.exe invocation threw for PR #11: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 15:56:57] [ERROR] claude.exe invocation threw for PR #10: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/pr-review-2026-08-27.log` | Log error in pr-review-2026-08-27.log: [2026-08-27 15:56:58] [ERROR] claude.exe invocation threw for PR #9: Excepción al llamar a "Start" con los argumentos "1": "El nombre del archivo o la extensión es demasiado largo" | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\pr-review-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 15:46:32] [ERROR] Failed to fetch comments for story #: accepts 1 arg(s), received 0 | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 16:01:33] [ERROR] Failed to fetch comments for story #: accepts 1 arg(s), received 0 | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| CRITICAL | `gh-development-dashboard/three-amigos-and-dev-test-2026-08-27.log` | Log error in three-amigos-and-dev-test-2026-08-27.log: [2026-08-27 16:01:36] [ERROR] Failed to fetch comments for story #: accepts 1 arg(s), received 0 | `Check full trace in C:\Users\rogal\workspaces\ws-setups\gh-development-dashboard\logs\local-pipeline\three-amigos-and-dev-test-2026-08-27.log` |
+| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 16:07:22] [WARN] Judge failed to produce a usable verdict for PR #30; leaving it unreviewed for manual triage. | Review logs for degradation |
+| WARNING | `darwin-trader/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 16:12:22] [WARN] Judge failed to produce a usable verdict for PR #30; leaving it unreviewed for manual triage. | Review logs for degradation |
+| WARNING | `darwin-trader/architect-2026-08-27.log` | Warning in architect-2026-08-27.log: [2026-08-27 14:47:21] [WARN] gh api sub_issues threw for story #37: function not defined: open/0 | Review logs for degradation |
+| WARNING | `gh-development-dashboard/architect-2026-08-27.log` | Warning in architect-2026-08-27.log: [2026-08-27 14:22:57] [WARN] Judge failed to produce a usable decision for issue #1; leaving it unprocessed for manual triage. | Review logs for degradation |
+| WARNING | `gh-development-dashboard/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 15:56:57] [WARN] Judge failed to produce a usable verdict for PR #10; leaving it unreviewed for manual triage. | Review logs for degradation |
+| WARNING | `gh-development-dashboard/pr-review-2026-08-27.log` | Warning in pr-review-2026-08-27.log: [2026-08-27 15:56:58] [WARN] Judge failed to produce a usable verdict for PR #9; leaving it unreviewed for manual triage. | Review logs for degradation |
 
 ---
 
@@ -52,34 +56,34 @@ The supervisor detected the following active issues requiring attention within t
 ### Windows Task Scheduler Execution Matrix
 | Task Name | State | Last Run Time | Next Run Time | Last Exit Result | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `CTA-Architect` | Ready | 2026-08-27 10:40:20 | 2026-08-27 10:45:19 | `0` | HEALTHY (0) |
-| `CTA-BacklogTriage` | Ready | 2026-08-27 09:47:17 | 2026-08-27 15:47:16 | `0` | HEALTHY (0) |
-| `CTA-PRReview` | Ready | 2026-08-27 10:43:28 | 2026-08-27 10:48:27 | `0` | HEALTHY (0) |
-| `CTA-ThreeAmigosDevTest` | Running | 2026-08-27 10:43:28 | 2026-08-27 10:58:27 | `267009` | RUNNING |
+| `CTA-Architect` | Ready | 2026-08-27 16:10:20 | 2026-08-27 16:15:19 | `0` | HEALTHY (0) |
+| `CTA-BacklogTriage` | Ready | 2026-08-27 15:47:17 | 2026-08-27 21:47:16 | `0` | HEALTHY (0) |
+| `CTA-PRReview` | Ready | 2026-08-27 16:08:28 | 2026-08-27 16:13:27 | `0` | HEALTHY (0) |
+| `CTA-ThreeAmigosDevTest` | Ready | 2026-08-27 15:58:28 | 2026-08-27 16:13:27 | `1` | FAILED (1) |
 
 ### Local Pipeline Daily Logs (Errors: 4h vs 24h)
 | Log File | Last Modified | Size | Errors (4h) | Errors (24h) | Warnings (4h) | Latest 4h Error Snippet |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 10:43:34 | 19.3 KB | **1** | 1 | 0 | `[2026-08-27 10:33:15] [ERROR] agy.exe exited 1 for subtask #393. StdErr:  - StdO`... |
-| `pr-review-2026-08-27.log` | 2026-08-27 10:43:31 | 71.9 KB | **3** | 3 | 0 | `[2026-08-27 09:13:33] [ERROR] Unhandled error in PR review run: git reset --hard`... |
-| `architect-2026-08-27.log` | 2026-08-27 10:40:24 | 76.3 KB | **0** | 0 | 0 | None |
-| `backlog-triage-2026-08-27.log` | 2026-08-27 09:47:20 | 11.6 KB | **2** | 2 | 0 | `[2026-08-27 07:52:17] [ERROR] Unhandled error in backlog triage run: git checkou`... |
-| `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:58:49 | 51.1 KB | **0** | 26 | 0 | None |
+| `architect-2026-08-27.log` | 2026-08-27 16:10:23 | 159.3 KB | **0** | 0 | 0 | None |
+| `pr-review-2026-08-27.log` | 2026-08-27 16:08:31 | 127.8 KB | **0** | 9 | 0 | None |
+| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 15:58:33 | 41.9 KB | **3** | 4 | 0 | `[2026-08-27 15:58:33] [ERROR] Unhandled error in three-amigos-and-dev-test run: `... |
+| `backlog-triage-2026-08-27.log` | 2026-08-27 15:47:34 | 15 KB | **0** | 2 | 0 | None |
+| `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:58:49 | 51.1 KB | **0** | 18 | 0 | None |
 | `pr-review-2026-08-26.log` | 2026-08-26 23:58:31 | 145.7 KB | **0** | 5 | 0 | None |
-| `architect-2026-08-26.log` | 2026-08-26 23:55:23 | 191.1 KB | **0** | 4 | 0 | None |
+| `architect-2026-08-26.log` | 2026-08-26 23:55:23 | 191.1 KB | **0** | 3 | 0 | None |
 | `backlog-triage-2026-08-26.log` | 2026-08-26 21:47:59 | 32.3 KB | **0** | 0 | 0 | None |
 
 ### Recent GitHub Actions CI Runs
 | Run ID | Workflow Name | Head Branch | Status | Updated At |
 | :--- | :--- | :--- | :---: | :---: |
-| [33054968350](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054968350) | Release on Merge to Main | `main` | SUCCESS | 2026-08-27T08:40:38Z |
-| [33054953982](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054953982) | Merge & Backlog | `feat/issue-394` | SUCCESS | 2026-08-27T08:39:06Z |
-| [33054907452](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054907452) | PR CI & Test Verification | `feat/issue-394` | FAILURE | 2026-08-27T08:39:36Z |
-| [33054661592](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054661592) | Release on Merge to Main | `main` | SUCCESS | 2026-08-27T08:36:14Z |
-| [33054617220](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054617220) | Merge & Backlog | `feat/issue-393` | completed | 2026-08-27T08:34:23Z |
-| [33054517483](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054517483) | PR Snapshot Build & Pre-Release | `feat/issue-393` | SUCCESS | 2026-08-27T08:35:38Z |
-| [33054234288](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054234288) | Merge & Backlog | `feat/issue-393` | completed | 2026-08-27T08:29:10Z |
-| [33054165311](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33054165311) | PR Snapshot Build & Pre-Release | `feat/issue-393` | FAILURE | 2026-08-27T08:30:58Z |
+| [33057615711](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33057615711) | Release on Merge to Main | `main` | SUCCESS | 2026-08-27T09:15:19Z |
+| [33057603457](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33057603457) | Merge & Backlog | `feat/issue-391` | SUCCESS | 2026-08-27T09:14:10Z |
+| [33057308202](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33057308202) | PR CI & Test Verification | `feat/issue-391` | FAILURE | 2026-08-27T09:11:51Z |
+| [33056847684](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33056847684) | Release on Merge to Main | `main` | SUCCESS | 2026-08-27T09:05:18Z |
+| [33056835567](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33056835567) | Merge & Backlog | `feat/issue-390` | SUCCESS | 2026-08-27T09:04:05Z |
+| [33056773923](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33056773923) | PR CI & Test Verification | `feat/issue-390` | FAILURE | 2026-08-27T09:05:00Z |
+| [33056226976](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33056226976) | PR CI & Test Verification | `feat/issue-393` | SUCCESS | 2026-08-27T08:57:42Z |
+| [33055994858](https://github.com/AntaresAndBharani/crosstrainingapp/actions/runs/33055994858) | PR CI & Test Verification | `feat/issue-393` | FAILURE | 2026-08-27T08:54:34Z |
 
 ---
 
@@ -88,18 +92,18 @@ The supervisor detected the following active issues requiring attention within t
 ### Windows Task Scheduler Execution Matrix
 | Task Name | State | Last Run Time | Next Run Time | Last Exit Result | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `DT-Architect` | Ready | 2026-08-27 10:42:17 | 2026-08-27 10:47:16 | `0` | HEALTHY (0) |
-| `DT-BacklogTriage` | Ready | 2026-08-27 08:42:17 | 2026-08-27 14:42:16 | `1` | FAILED (1) |
-| `DT-PRReview` | Ready | 2026-08-27 10:42:17 | 2026-08-27 10:47:16 | `0` | HEALTHY (0) |
-| `DT-ThreeAmigosDevTest` | Ready | 2026-08-27 10:42:17 | 2026-08-27 10:57:16 | `0` | HEALTHY (0) |
+| `DT-Architect` | Ready | 2026-08-27 16:12:17 | 2026-08-27 16:17:16 | `0` | HEALTHY (0) |
+| `DT-BacklogTriage` | Ready | 2026-08-27 14:42:17 | 2026-08-27 20:42:16 | `1` | FAILED (1) |
+| `DT-PRReview` | Ready | 2026-08-27 16:12:17 | 2026-08-27 16:17:16 | `0` | HEALTHY (0) |
+| `DT-ThreeAmigosDevTest` | Ready | 2026-08-27 16:12:17 | 2026-08-27 16:27:16 | `1` | FAILED (1) |
 
 ### Local Pipeline Daily Logs (Errors: 4h vs 24h)
 | Log File | Last Modified | Size | Errors (4h) | Errors (24h) | Warnings (4h) | Latest 4h Error Snippet |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 10:42:32 | 23.7 KB | **4** | 4 | 0 | `[2026-08-27 09:32:35] [ERROR] agy.exe exited 1 for fix-up on PR #15. StdErr:  - `... |
-| `pr-review-2026-08-27.log` | 2026-08-27 10:42:23 | 102.4 KB | **49** | 69 | 42 | `[2026-08-27 10:42:23] [ERROR] claude.exe invocation threw for PR #30: Excepción `... |
-| `architect-2026-08-27.log` | 2026-08-27 10:42:21 | 45.4 KB | **5** | 5 | 3 | `[2026-08-27 10:27:20] [ERROR] Unhandled error in Architect run: git fetch origin`... |
-| `backlog-triage-2026-08-27.log` | 2026-08-27 08:42:36 | 2.2 KB | **0** | 0 | 0 | None |
+| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 16:12:29 | 47.1 KB | **6** | 10 | 0 | `[2026-08-27 16:12:29] [ERROR] Unhandled error in three-amigos-and-dev-test run: `... |
+| `pr-review-2026-08-27.log` | 2026-08-27 16:12:22 | 179.3 KB | **48** | 135 | 48 | `[2026-08-27 16:12:22] [ERROR] claude.exe invocation threw for PR #30: Excepción `... |
+| `architect-2026-08-27.log` | 2026-08-27 16:12:21 | 97.8 KB | **0** | 5 | 1 | None |
+| `backlog-triage-2026-08-27.log` | 2026-08-27 14:42:52 | 3.4 KB | **0** | 0 | 0 | None |
 | `pr-review-2026-08-26.log` | 2026-08-26 23:57:27 | 59.2 KB | **0** | 48 | 0 | None |
 | `architect-2026-08-26.log` | 2026-08-26 23:57:21 | 30 KB | **0** | 4 | 0 | None |
 | `three-amigos-and-dev-test-2026-08-26.log` | 2026-08-26 23:57:19 | 16.5 KB | **0** | 4 | 0 | None |
@@ -124,14 +128,23 @@ The supervisor detected the following active issues requiring attention within t
 ### Windows Task Scheduler Execution Matrix
 | Task Name | State | Last Run Time | Next Run Time | Last Exit Result | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
+| `GDD-Architect` | Ready | 2026-08-27 16:11:29 | 2026-08-27 16:16:28 | `0` | HEALTHY (0) |
+| `GDD-BacklogTriage` | Ready | 2026-08-27 10:46:27 | 2026-08-27 16:46:27 | `0` | HEALTHY (0) |
+| `GDD-PRReview` | Ready | 2026-08-27 16:11:29 | 2026-08-27 16:16:28 | `0` | HEALTHY (0) |
+| `GDD-ThreeAmigosDevTest` | Ready | 2026-08-27 16:01:29 | 2026-08-27 16:16:28 | `0` | HEALTHY (0) |
 
 ### Local Pipeline Daily Logs (Errors: 4h vs 24h)
 | Log File | Last Modified | Size | Errors (4h) | Errors (24h) | Warnings (4h) | Latest 4h Error Snippet |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| `architect-2026-08-27.log` | 2026-08-27 16:11:33 | 116.2 KB | **6** | 6 | 1 | `[2026-08-27 14:22:57] [ERROR] Failed to parse decision JSON from judge response `... |
+| `pr-review-2026-08-27.log` | 2026-08-27 16:11:32 | 80.8 KB | **24** | 24 | 22 | `[2026-08-27 15:56:58] [ERROR] claude.exe invocation threw for PR #9: Excepción a`... |
+| `three-amigos-and-dev-test-2026-08-27.log` | 2026-08-27 16:01:58 | 29.7 KB | **10** | 12 | 0 | `[2026-08-27 16:01:36] [ERROR] Failed to fetch comments for story #: accepts 1 ar`... |
+| `backlog-triage-2026-08-27.log` | 2026-08-27 10:46:30 | 1.9 KB | **0** | 0 | 0 | None |
 
 ### Recent GitHub Actions CI Runs
 | Run ID | Workflow Name | Head Branch | Status | Updated At |
 | :--- | :--- | :--- | :---: | :---: |
+| [33080390489](https://github.com/AntaresAndBharani/gh-development-dashboard/actions/runs/33080390489) | Release APK | `main` | SUCCESS | 2026-08-27T14:09:10Z |
 | [33054266743](https://github.com/AntaresAndBharani/gh-development-dashboard/actions/runs/33054266743) | Release APK | `main` | SUCCESS | 2026-08-27T08:33:24Z |
 | [33053863358](https://github.com/AntaresAndBharani/gh-development-dashboard/actions/runs/33053863358) | Release APK | `main` | FAILURE | 2026-08-27T08:27:34Z |
 
