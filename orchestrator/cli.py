@@ -587,7 +587,12 @@ def logs_command(
     with open(latest_file, "r", encoding="utf-8", errors="replace") as f:
         all_lines = f.readlines()
         tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-        console.print("".join(tail))
+        content = "".join(tail)
+        try:
+            console.print(content)
+        except Exception:
+            sys.stdout.buffer.write(content.encode("utf-8", errors="replace"))
+            sys.stdout.flush()
 
 
 if __name__ == "__main__":
