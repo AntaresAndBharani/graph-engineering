@@ -95,3 +95,10 @@ projects:
         label_output: "needs-architect-review"
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
+      reviewer:
+        enabled: true
+        harness: "claude"
+        model: "claude-sonnet-5"
+        effort: "medium"
+        label_trigger: "needs-architect-review"
+        auto_merge_approved: true

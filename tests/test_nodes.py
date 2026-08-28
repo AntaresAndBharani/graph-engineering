@@ -38,3 +38,16 @@ async def test_zero_token_gating_idle(tmp_path: Path, monkeypatch):
     ran_sup, msg_sup = await run_supervisor_node(project, config, state_manager)
     assert ran_sup is False
     assert "consistent (0 tokens)" in msg_sup
+
+    from orchestrator.nodes.reviewer import run_reviewer_node, check_pr_ci_status
+    ran_rev, msg_rev = await run_reviewer_node(project, config, state_manager)
+    assert ran_rev is False
+    assert "Idle (0 tokens)" in msg_rev
+
+
+@pytest.mark.asyncio
+async def test_reviewer_node_ci_checks_logic():
+    from orchestrator.nodes.reviewer import check_pr_ci_status
+    # When gh is not available or mock returns no checks
+    status, msg = await check_pr_ci_status("org/repo", 999)
+    assert status in ("PASS", "NO_CHECKS", "PENDING")

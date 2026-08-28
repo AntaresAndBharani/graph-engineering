@@ -19,6 +19,7 @@ from orchestrator.housekeeping import sync_all_projects_labels, sync_repository_
 from orchestrator.logging import setup_logger
 from orchestrator.nodes.architect import run_architect_node
 from orchestrator.nodes.devtest import run_devtest_node
+from orchestrator.nodes.reviewer import run_reviewer_node
 from orchestrator.nodes.supervisor import run_supervisor_node
 
 app = typer.Typer(
@@ -137,6 +138,15 @@ async def _run_single_pass(
             else:
                 console.print(f"  [dim]DevTest: {msg}[/dim]")
 
+        # 4. Reviewer / Gatekeeper Node
+        if node_name is None or node_name in ("reviewer", "review"):
+            with console.status("[bold green]Evaluating Reviewer Gatekeeper Node...[/bold green]"):
+                ran, msg = await run_reviewer_node(project, config, state_manager)
+            if ran:
+                console.print(f"  [bold green]Reviewer:[/bold green] {msg}")
+            else:
+                console.print(f"  [dim]Reviewer: {msg}[/dim]")
+
 
 @app.command("watch")
 def watch_command(
@@ -197,6 +207,7 @@ async def _watch_daemon(
                 await run_supervisor_node(project, config, state_manager)
                 await run_architect_node(project, config, state_manager)
                 await run_devtest_node(project, config, state_manager)
+                await run_reviewer_node(project, config, state_manager)
 
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
