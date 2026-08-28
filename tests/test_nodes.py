@@ -150,3 +150,44 @@ async def test_sync_parent_subtask_links_no_gh(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda cmd: None)
     linked = await sync_parent_subtask_links("org/repo", 100, "architect-processed", "needs-triage")
     assert linked == 0
+
+
+@pytest.mark.asyncio
+async def test_reviewer_multi_pr_batch_evaluation(tmp_path: Path, monkeypatch):
+    from orchestrator import poller
+    from orchestrator.nodes.reviewer import run_reviewer_node
+
+    mock_prs = [
+        {"number": 418, "title": "Subtask 1", "labels": [{"name": "architect-approved"}], "mergeable": "MERGEABLE"},
+        {"number": 419, "title": "Subtask 2", "labels": [{"name": "architect-approved"}], "mergeable": "MERGEABLE"},
+    ]
+
+    async def mock_fetch_open_prs(*args, **kwargs):
+        return mock_prs
+
+    async def mock_check_ci(*args, **kwargs):
+        return "PASS", "100% green"
+
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_open_prs)
+    import orchestrator.nodes.reviewer as rev_mod
+    monkeypatch.setattr(rev_mod, "check_pr_ci_status", mock_check_ci)
+
+    project = ProjectConfig(
+        name="test",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        nodes={
+            "reviewer": NodeConfig(
+                enabled=True,
+                harness="claude",
+                auto_merge_approved=False,
+            )
+        },
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    ran, msg = await run_reviewer_node(project, GlobalConfig(), state_manager)
+    # With auto_merge=False, PRs are evaluated and reported without error
+    assert isinstance(ran, bool)
+

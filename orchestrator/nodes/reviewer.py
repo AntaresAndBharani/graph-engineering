@@ -94,133 +94,140 @@ async def run_reviewer_node(
     auto_merge = node_cfg.auto_merge_approved if node_cfg.auto_merge_approved is not None else True
 
     # 1. Deterministic Gating (0 Tokens)
-    prs = await fetch_open_prs(project.repo, label=trigger, limit=1)
+    prs = await fetch_open_prs(project.repo, label=trigger, limit=50)
     if not prs:
         # Fallback check for backwards compatibility with needs-architect-review if architect review disabled
         if trigger == "architect-approved":
             arch_node = project.nodes.get("architect")
             if not arch_node or not arch_node.enabled:
-                prs = await fetch_open_prs(project.repo, label="needs-architect-review", limit=1)
+                prs = await fetch_open_prs(project.repo, label="needs-architect-review", limit=50)
         if not prs:
             return False, f"No PRs labeled '{trigger}'. Idle (0 tokens)."
 
-    target_pr = prs[0]
-    pr_number = target_pr["number"]
-    pr_title = target_pr.get("title", "")
-    mergeable = target_pr.get("mergeable", "UNKNOWN")
-
-    # 2. Acquire State Lock
     from rich.console import Console
     console = Console()
-    console.print(f"  [{project.name}:reviewer] [bold green]🔍 Evaluating PR #{pr_number}[/bold green] ('{pr_title}')")
 
-    lock_acquired = await state_manager.acquire_lock(
-        issue_id=pr_number,
-        repo=project.repo,
-        node_type="reviewer",
-        ttl_minutes=15,
-    )
-    if not lock_acquired:
-        return False, f"PR #{pr_number} is currently locked by another active run. Skipping."
+    merged_prs: List[int] = []
+    pending_prs: List[int] = []
+    conflict_prs: List[int] = []
 
-    # 3. Check Merge Conflicts
-    if mergeable == "CONFLICTING":
-        if shutil.which("gh"):
-            p1 = await asyncio.create_subprocess_exec(
-                "gh", "pr", "edit", str(pr_number),
-                "--repo", project.repo,
-                "--remove-label", trigger,
-                "--add-label", "needs-po-review",
-            )
-            await p1.wait()
-            p2 = await asyncio.create_subprocess_exec(
+    for target_pr in prs:
+        pr_number = target_pr["number"]
+        pr_title = target_pr.get("title", "")
+        mergeable = target_pr.get("mergeable", "UNKNOWN")
+
+        # 2. Acquire State Lock
+        lock_acquired = await state_manager.acquire_lock(
+            issue_id=pr_number,
+            repo=project.repo,
+            node_type="reviewer",
+            ttl_minutes=15,
+        )
+        if not lock_acquired:
+            continue
+
+        console.print(f"  [{project.name}:reviewer] [bold green]🔍 Evaluating PR #{pr_number}[/bold green] ('{pr_title}')")
+
+        # 3. Check Merge Conflicts
+        if mergeable == "CONFLICTING":
+            if shutil.which("gh"):
+                p1 = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "edit", str(pr_number),
+                    "--repo", project.repo,
+                    "--remove-label", trigger,
+                    "--add-label", "needs-po-review",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p1.wait()
+                p2 = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "comment", str(pr_number),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts against `main`. Flagging for PO review (`needs-po-review`).",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p2.wait()
+            await state_manager.release_lock(pr_number, project.repo, "reviewer")
+            conflict_prs.append(pr_number)
+            continue
+
+        # 4. Check Remote CI Checks Status (0 Tokens)
+        ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
+        if ci_status == "PENDING":
+            await state_manager.release_lock(pr_number, project.repo, "reviewer")
+            pending_prs.append(pr_number)
+            continue
+
+        if ci_status == "FAIL":
+            if shutil.which("gh"):
+                p1 = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "edit", str(pr_number),
+                    "--repo", project.repo,
+                    "--remove-label", trigger,
+                    "--add-label", "needs-po-review",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p1.wait()
+                p2 = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "comment", str(pr_number),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **Reviewer Node**: PR #{pr_number} CI checks failed ({ci_details}). Flagging for review (`needs-po-review`).",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p2.wait()
+            await state_manager.release_lock(pr_number, project.repo, "reviewer")
+            conflict_prs.append(pr_number)
+            continue
+
+        # 5. Deterministic Approval & Auto-Merge
+        if auto_merge and shutil.which("gh"):
+            p_comment = await asyncio.create_subprocess_exec(
                 "gh", "pr", "comment", str(pr_number),
                 "--repo", project.repo,
-                "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts against `main`. Flagging for PO review (`needs-po-review`).",
+                "--body", "🤖 **Reviewer Gatekeeper**: Deterministic Quality Gate passed (CI 100% Green, mergeable). Approving and executing auto-merge into `main`.",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            await p2.wait()
-        await state_manager.release_lock(pr_number, project.repo, "reviewer")
-        return False, f"PR #{pr_number} has merge conflicts. Flagged with 'needs-po-review'."
+            await p_comment.wait()
 
-    # 4. Check Remote CI Checks Status (0 Tokens)
-    ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
-    if ci_status == "PENDING":
-        await state_manager.release_lock(pr_number, project.repo, "reviewer")
-        return False, f"PR #{pr_number} CI checks in progress ({ci_details}). Waiting."
-
-    if ci_status == "FAIL":
-        if shutil.which("gh"):
-            p1 = await asyncio.create_subprocess_exec(
-                "gh", "pr", "edit", str(pr_number),
+            p_approve = await asyncio.create_subprocess_exec(
+                "gh", "pr", "review", str(pr_number),
                 "--repo", project.repo,
-                "--remove-label", trigger,
-                "--add-label", "needs-po-review",
+                "--approve",
+                "--body", "🤖 **Architect Review**: Approved (Quality Gate 100% Green).",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            await p1.wait()
-            p2 = await asyncio.create_subprocess_exec(
-                "gh", "pr", "comment", str(pr_number),
-                "--repo", project.repo,
-                "--body", f"🤖 **Reviewer Node**: PR #{pr_number} CI checks failed ({ci_details}). Flagging for review (`needs-po-review`).",
-            )
-            await p2.wait()
-        await state_manager.release_lock(pr_number, project.repo, "reviewer")
-        return False, f"PR #{pr_number} CI checks failed ({ci_details}). Flagged with 'needs-po-review'."
+            await p_approve.wait()
 
-    # 5. Deterministic Approval & Auto-Merge
-    if auto_merge and shutil.which("gh"):
-        # Post confirmation comment
-        p_comment = await asyncio.create_subprocess_exec(
-            "gh", "pr", "comment", str(pr_number),
-            "--repo", project.repo,
-            "--body", "🤖 **Reviewer Gatekeeper**: Deterministic Quality Gate passed (CI 100% Green, mergeable). Approving and executing auto-merge into `main`.",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await p_comment.wait()
-
-        # Approve PR if not author
-        p_approve = await asyncio.create_subprocess_exec(
-            "gh", "pr", "review", str(pr_number),
-            "--repo", project.repo,
-            "--approve",
-            "--body", "🤖 **Architect Review**: Approved (Quality Gate 100% Green).",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await p_approve.wait()
-
-        # Merge PR via squash and delete branch
-        p_merge = await asyncio.create_subprocess_exec(
-            "gh", "pr", "merge", str(pr_number),
-            "--repo", project.repo,
-            "--squash",
-            "--delete-branch",
-            "--auto",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await p_merge.wait()
-
-        # Fallback direct merge if --auto not supported or already green
-        if p_merge.returncode != 0:
-            p_merge_direct = await asyncio.create_subprocess_exec(
+            p_merge = await asyncio.create_subprocess_exec(
                 "gh", "pr", "merge", str(pr_number),
                 "--repo", project.repo,
                 "--squash",
                 "--delete-branch",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            await p_merge_direct.wait()
+            await p_merge.wait()
 
-        # Remove trigger label
-        p_label = await asyncio.create_subprocess_exec(
-            "gh", "pr", "edit", str(pr_number),
-            "--repo", project.repo,
-            "--remove-label", trigger,
-        )
-        await p_label.wait()
+            if p_merge.returncode == 0:
+                merged_prs.append(pr_number)
+                console.print(f"  [{project.name}:reviewer] [bold green]✓ Successfully auto-merged PR #{pr_number} into main[/bold green]")
+            else:
+                console.print(f"  [{project.name}:reviewer] [bold yellow]Could not merge PR #{pr_number}[/bold yellow]")
 
         await state_manager.release_lock(pr_number, project.repo, "reviewer")
-        return True, f"Reviewer node approved and merged PR #{pr_number} into main."
 
-    await state_manager.release_lock(pr_number, project.repo, "reviewer")
-    return True, f"Reviewer node verified PR #{pr_number} (CI Green)."
+    if merged_prs:
+        merged_list = ", #".join(map(str, merged_prs))
+        return True, f"Reviewer auto-merged {len(merged_prs)} approved PR(s) into main: #{merged_list}."
+    elif conflict_prs:
+        return False, f"Reviewer flagged {len(conflict_prs)} PR(s) with conflicts/failures."
+    elif pending_prs:
+        return False, f"{len(pending_prs)} PR(s) waiting for remote CI checks."
+
+    return False, "No mergeable PRs processed."
+

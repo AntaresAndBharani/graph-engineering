@@ -45,7 +45,10 @@ async def fetch_issues_with_label(
         if process.returncode != 0 or not stdout:
             return []
         data = json.loads(stdout.decode("utf-8", errors="replace"))
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            data.sort(key=lambda x: x.get("number", 0))
+            return data[:limit]
+        return []
     except Exception:
         return []
 
@@ -56,6 +59,7 @@ async def fetch_all_open_issues(
 ) -> List[Dict[str, Any]]:
     """
     Fetches all open issues from GitHub using gh CLI for status auditing.
+    Sorted chronologically by issue number (FIFO).
     Consumes 0 LLM tokens.
     """
     if not shutil.which("gh"):
@@ -85,7 +89,10 @@ async def fetch_all_open_issues(
         if process.returncode != 0 or not stdout:
             return []
         data = json.loads(stdout.decode("utf-8", errors="replace"))
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            data.sort(key=lambda x: x.get("number", 0))
+            return data[:limit]
+        return []
     except Exception:
         return []
 
@@ -93,10 +100,11 @@ async def fetch_all_open_issues(
 async def fetch_open_prs(
     repo: str,
     label: Optional[str] = None,
-    limit: int = 5,
+    limit: int = 20,
 ) -> List[Dict[str, Any]]:
     """
     Fetches open PRs (optionally filtered by label) from GitHub using gh CLI.
+    Sorted chronologically by PR number (FIFO).
     Consumes 0 LLM tokens.
     """
     if not shutil.which("gh"):
@@ -129,7 +137,10 @@ async def fetch_open_prs(
         if process.returncode != 0 or not stdout:
             return []
         data = json.loads(stdout.decode("utf-8", errors="replace"))
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            data.sort(key=lambda x: x.get("number", 0))
+            return data[:limit]
+        return []
     except Exception:
         return []
 
