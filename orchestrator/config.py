@@ -34,6 +34,11 @@ class NodeConfig(BaseModel):
     processed_label: Optional[str] = None
     branch_prefix: Optional[str] = "feat/issue-"
     auto_merge_approved: bool = True
+    review_trigger: Optional[str] = "needs-architect-review"
+    research_harness: Optional[str] = None
+    research_model: Optional[str] = None
+    research_effort: Optional[str] = None
+    research_interval_seconds: int = 604800
 
 
 def resolve_path(v: str | Path) -> Path:

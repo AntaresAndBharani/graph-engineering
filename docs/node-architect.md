@@ -1,47 +1,64 @@
-# Architect & Triage Node (`node-architect`)
+# Architect & Governance Node (`node-architect`)
 
 **Module**: [`orchestrator/nodes/architect.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/architect.py)
 
-The **Architect Node** acts as Node 1 in the pipeline—an autonomous technical reasoning, triage, and task decomposition engine.
+The **Architect Node** acts as the primary technical authority, living architecture custodian, and quality gatekeeper in the graph engineering pipeline.
 
 ---
 
-## 🏛️ Autonomous Triage & Routing Matrix
-
-When an issue carrying `needs-triage` is detected, the Architect evaluates the issue and routes it through one of 6 distinct operational paths:
+## 🏛️ The 3 Pillars of Architectural Governance
 
 ```mermaid
 flowchart TD
-    Trigger["Issue labeled 'needs-triage'"] --> Eval["Architect Node Evaluation (Claude Sonnet 5)"]
+    subgraph Pillar 1 & 2: Living Architecture Plane
+        A1["Check .graph/architecture.md"] -->|Missing or 7-Day SLA Due| A2["Research Best Practices via Antigravity (gemini-3.7-flash-high)"]
+        A2 --> A3["Write/Update .graph/architecture.md & Commit"]
+    end
 
-    Eval -->|Case 1: Already Satisfied| C1["Close Issue with verification comment"]
-    Eval -->|Case 2: Standalone Task / Bug| C2["Label 'ready-for-dev' (Ready for DevTest)"]
-    Eval -->|Case 3: Tech Debt| C3["Label 'tech-debt' (Queued for BAU Node)"]
-    Eval -->|Case 4: Enhancement| C4["Label 'enhancement' (Queued for BAU Node)"]
-    Eval -->|Case 5: Ambiguous Requirements| C5["Label 'needs-po-review' + Post Clarifications"]
-    Eval -->|Case 6: Full User Story| C6["Decompose into Subtasks ('ready-for-dev')\nLabel parent 'architect-processed'"]
+    subgraph Pillar 3: Architectural Code Review
+        B1["PR labeled 'needs-architect-review'"] --> B2["Inspect Code Diff against .graph/architecture.md (Claude Sonnet 5)"]
+        B2 -->|Compliant| B3["Label 'architect-approved' (Proceeds to Reviewer/CI)"]
+        B2 -->|Violations| B4["Post Actionable Review & Label 'needs-refactor'"]
+    end
+
+    subgraph Pillar 4: Story Triage & Decomposition
+        C1["Issue labeled 'needs-triage'"] --> C2["Triage & Decompose into Subtasks (Claude Sonnet 5)"]
+        C2 --> C3["Label 'ready-for-dev' & Link to Parent"]
+    end
 ```
 
 ---
 
-## 🔑 Operational Rules
+## 💡 Dual-Model Specialization
 
-1. **Zero-Token Gating**:
-   - Checks GitHub CLI for open issues matching `needs-triage`.
-   - When no issues are present, exits immediately consuming **0 tokens**.
+To maximize reasoning depth while drastically minimizing token costs:
 
-2. **INVEST Subtask Decomposition**:
-   - Decomposes complex user stories into minimal, testable technical subtasks.
-   - Each child subtask is created with **Gherkin acceptance criteria** and labeled **`ready-for-dev`**.
-   - Links the parent story (`Parent: #<issue_id>`).
+| Responsibility | Model / Harness | Why |
+|---|---|---|
+| **Living Architecture Plane Sync** | **Antigravity (`gemini-3.7-flash-high`)** | High-volume web research, massive context ingestion, and cost-effective writing of `.graph/architecture.md`. |
+| **PR Architectural Code Review** | **Claude Sonnet (`claude-sonnet-5`)** | Deep reasoning on code diffs, contract verification, and identifying architectural anti-patterns. |
+| **Story Triage & Decomposition** | **Claude Sonnet (`claude-sonnet-5`)** | High-precision classification, INVEST decomposition, and Gherkin specification. |
 
-3. **Subtask Reconciliation & Idempotence**:
-   - If subtasks already exist on GitHub, ensures all open child issues carry `ready-for-dev` without creating duplicates.
-   - Updates the parent issue to **`architect-processed`** and removes `needs-triage`.
+---
 
-4. **Deterministic Post-Execution Safety Gate**:
-   - Inspects the issue state via GitHub CLI immediately after the AI harness runs.
-   - If the harness fails or times out, the issue is safely escalated to **`needs-po-review`** or **`orchestration-failed`** with a diagnostic comment.
+## 🔑 Operational Capabilities
+
+### 1. Living Architecture Plane Custodian (`.graph/architecture.md`)
+- If `.graph/architecture.md` is missing from the repository, the Architect automatically inspects the codebase and bootstraps the baseline standards.
+- Every 7 days (weekly SLA tracked in `state.db`), Antigravity performs a modern best-practice sweep of the web and updates `.graph/architecture.md`.
+
+### 2. Architectural PR Code Review (`needs-architect-review`)
+- Inspects code diffs exclusively through an **architectural lens**:
+  - *Are Clean Architecture layers and domain boundaries respected?*
+  - *Are there circular dependencies or inappropriate coupling?*
+  - *Does the implementation adhere to package and pattern rules in `.graph/architecture.md`?*
+- **Approved**: Labels `architect-approved`, signaling the `Reviewer` node to verify CI and auto-merge.
+- **Refactoring Required**: Posts detailed review comments and returns the task to `DevTest` with `needs-refactor`.
+
+### 3. Story Triage & INVEST Decomposition (`needs-triage`)
+- Decomposes complex user stories into minimal, testable technical subtasks.
+- Each child subtask is created with **Gherkin acceptance criteria** and labeled **`ready-for-dev`**.
+- Links the parent story (`Parent: #<issue_id>`) and synchronizes the parent checklist.
 
 ---
 
@@ -53,16 +70,23 @@ Configured in `~/.config/orchestrator/config.yaml`:
 projects:
   - name: "crosstrainingapp"
     repo: "AntaresAndBharani/crosstrainingapp"
-    local_path: "c:/Users/rogal/workspaces/ws-setups/crosstrainingapp"
+    local_path: "~/workspaces/crosstrainingapp"
     context_files:
-      - "architecture.md"
+      - ".graph/architecture.md"
+      - ".graph/testing-standards.md"
+      - ".graph/git-workflow.md"
     nodes:
       architect:
         enabled: true
+        # Primary Harness for PR Review & Story Decomposition
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
-        processed_label: "architect-processed"
+        review_trigger: "needs-architect-review"
+        # Specialized Research Harness for Weekly Architecture Modernization
+        research_harness: "antigravity"
+        research_model: "gemini-3.7-flash-high"
+        research_interval_seconds: 604800  # 7 days (weekly)
 ```

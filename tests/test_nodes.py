@@ -31,6 +31,12 @@ async def test_zero_token_gating_idle(tmp_path: Path, monkeypatch):
     state_manager = StateManager(tmp_path / "state.db")
     await state_manager.init_db()
 
+    # Precondition: architecture plane is already synced
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Architecture Standards\n", encoding="utf-8")
+    await state_manager.record_node_run("architect_research", project.repo)
+
     ran, msg = await run_architect_node(project, config, state_manager)
     assert ran is False
     assert "Idle (0 tokens)" in msg

@@ -27,6 +27,12 @@ managed_labels:
   - name: "needs-architect-review"
     color: "FBCA04"
     description: "PR submitted, ready for architectural review"
+  - name: "architect-approved"
+    color: "2EA44F"
+    description: "Architectural review passed, ready for final CI merge"
+  - name: "needs-refactor"
+    color: "D93F0B"
+    description: "Architect identified structural violations, returned to DevTest"
   - name: "dev-implemented"
     color: "C2E0C6"
     description: "Implementation completed by DevTest node"
@@ -92,9 +98,13 @@ projects:
         enabled: true
         harness: "claude"
         model: "claude-sonnet-5"
-        effort: "medium"              # High reasoning effort for architectural decomposition
+        effort: "medium"              # High reasoning effort for architectural decomposition & PR review
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
+        review_trigger: "needs-architect-review"
+        research_harness: "antigravity"
+        research_model: "gemini-3.7-flash-high"
+        research_interval_seconds: 604800  # 7 days (weekly evolutionary architecture refresh)
       devtest:
         enabled: true
         harness: "antigravity"
@@ -108,7 +118,7 @@ projects:
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"
-        label_trigger: "needs-architect-review"
+        label_trigger: "architect-approved"
         auto_merge_approved: true
       bau:
         enabled: true

@@ -90,13 +90,19 @@ async def run_reviewer_node(
     if not node_cfg.enabled:
         return False, "Reviewer node disabled for project."
 
-    trigger = node_cfg.label_trigger or "needs-architect-review"
+    trigger = node_cfg.label_trigger or "architect-approved"
     auto_merge = node_cfg.auto_merge_approved if node_cfg.auto_merge_approved is not None else True
 
     # 1. Deterministic Gating (0 Tokens)
     prs = await fetch_open_prs(project.repo, label=trigger, limit=1)
     if not prs:
-        return False, f"No PRs labeled '{trigger}'. Idle (0 tokens)."
+        # Fallback check for backwards compatibility with needs-architect-review if architect review disabled
+        if trigger == "architect-approved":
+            arch_node = project.nodes.get("architect")
+            if not arch_node or not arch_node.enabled:
+                prs = await fetch_open_prs(project.repo, label="needs-architect-review", limit=1)
+        if not prs:
+            return False, f"No PRs labeled '{trigger}'. Idle (0 tokens)."
 
     target_pr = prs[0]
     pr_number = target_pr["number"]
