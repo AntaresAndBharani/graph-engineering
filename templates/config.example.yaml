@@ -46,20 +46,21 @@ harnesses:
     binary: "claude"
     args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
     model_flag: "--model"
+    effort_flag: "--effort"           # Claude CLI supports level of effort flag (--effort low|medium|high|max)
     timeout_minutes: 30
     retry_on_failure: 1
 
   antigravity:
     binary: "agy"
     args: ["run", "{prompt}"]
-    model_flag: "--model"
+    model_flag: "--model"             # For Antigravity, reasoning/effort is embedded in the model name (e.g. gemini-3.7-flash-thinking)
     timeout_minutes: 45
     retry_on_failure: 1
 
   devin:
     binary: "devin"
     args: ["-p", "{prompt}", "--permission-mode", "bypass"]
-    model_flag: "--model"
+    model_flag: "--model"             # Devin model selection is managed via model name
     timeout_minutes: 60
     retry_on_failure: 1
 
@@ -76,16 +77,18 @@ projects:
       supervisor:
         enabled: true
         harness: "claude"
+        effort: "low"                 # Fast, lightweight consistency check
       architect:
         enabled: true
         harness: "claude"
         model: "claude-sonnet-5"
+        effort: "high"                # High reasoning effort for architectural decomposition
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
       devtest:
         enabled: true
         harness: "antigravity"
-        model: "gemini-3.7-flash"
+        model: "gemini-3.7-flash-thinking"  # Antigravity specifies reasoning effort in model name
         label_trigger: "ready-for-dev"
         label_output: "needs-architect-review"
         branch_prefix: "feat/issue-"

@@ -11,11 +11,25 @@ def test_harness_build_command():
         binary="claude",
         args=["-p", "{prompt}", "--dangerously-skip-permissions"],
         model_flag="--model",
+        effort_flag="--effort",
     )
     adapter = AsyncHarnessAdapter("claude", cfg)
 
-    cmd = adapter.build_command("Analyze issue #10", model="claude-sonnet-5")
-    assert cmd == ["claude", "--model", "claude-sonnet-5", "-p", "Analyze issue #10", "--dangerously-skip-permissions"]
+    cmd = adapter.build_command("Analyze issue #10", model="claude-sonnet-5", effort="high")
+    assert cmd == ["claude", "--model", "claude-sonnet-5", "--effort", "high", "-p", "Analyze issue #10", "--dangerously-skip-permissions"]
+
+
+def test_harness_build_command_no_effort_flag():
+    cfg = HarnessConfig(
+        binary="agy",
+        args=["run", "{prompt}"],
+        model_flag="--model",
+    )
+    adapter = AsyncHarnessAdapter("antigravity", cfg)
+
+    cmd = adapter.build_command("Run tests", model="gemini-3.7-flash-thinking", effort="high")
+    # effort flag is None, so effort argument is ignored
+    assert cmd == ["agy", "--model", "gemini-3.7-flash-thinking", "run", "Run tests"]
 
 
 def test_harness_build_env():

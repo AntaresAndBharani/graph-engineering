@@ -139,6 +139,7 @@ async def run_devtest_node(
         cwd=project.local_path,
         log_file=log_file,
         model=node_cfg.model,
+        effort=node_cfg.effort,
     )
 
     if exit_code != 0:

@@ -12,6 +12,7 @@ class HarnessConfig(BaseModel):
     binary: str
     args: List[str] = Field(default_factory=list)
     model_flag: Optional[str] = None
+    effort_flag: Optional[str] = None
     timeout_minutes: int = 30
     retry_on_failure: int = 1
     env_vars: Dict[str, str] = Field(default_factory=dict)
@@ -27,6 +28,7 @@ class NodeConfig(BaseModel):
     enabled: bool = True
     harness: str = "claude"
     model: Optional[str] = None
+    effort: Optional[str] = None
     label_trigger: Optional[str] = None
     label_output: Optional[str] = None
     processed_label: Optional[str] = None
@@ -89,6 +91,7 @@ DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
         binary="claude",
         args=["-p", "{prompt}", "--dangerously-skip-permissions"],
         model_flag="--model",
+        effort_flag="--effort",
         timeout_minutes=30,
         retry_on_failure=1,
     ),
