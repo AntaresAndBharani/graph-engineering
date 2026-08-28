@@ -36,6 +36,38 @@ class NodeConfig(BaseModel):
     auto_merge_approved: bool = True
 
 
+def resolve_path(v: str | Path) -> Path:
+    """
+    Robustly expands paths across platforms, supporting:
+    - Tilde (~) expansion
+    - POSIX $HOME / ${HOME} variables even when running in Windows shells
+    - Windows %USERPROFILE% / %APPDATA% variables on Linux/Windows
+    - Any custom environment variables ($VAR, %VAR%)
+    - Relative paths resolved against current working directory
+    """
+    if isinstance(v, Path):
+        raw = str(v)
+    else:
+        raw = str(v)
+
+    # 1. Expand ~ to user home
+    expanded = os.path.expanduser(raw)
+
+    # 2. Cross-platform home alias resolution ($HOME on Windows or %USERPROFILE% on POSIX)
+    home_dir = str(Path.home())
+    if "$HOME" in expanded:
+        expanded = expanded.replace("$HOME", home_dir)
+    if "${HOME}" in expanded:
+        expanded = expanded.replace("${HOME}", home_dir)
+    if "%USERPROFILE%" in expanded:
+        expanded = expanded.replace("%USERPROFILE%", home_dir)
+
+    # 3. Expand remaining environment variables
+    expanded = os.path.expandvars(expanded)
+
+    return Path(expanded).resolve()
+
+
 class ProjectConfig(BaseModel):
     name: str
     repo: str
@@ -47,10 +79,7 @@ class ProjectConfig(BaseModel):
     @field_validator("local_path", mode="before")
     @classmethod
     def expand_local_path(cls, v: str | Path) -> Path:
-        if isinstance(v, str):
-            expanded = os.path.expandvars(os.path.expanduser(v))
-            return Path(expanded).resolve()
-        return v.resolve()
+        return resolve_path(v)
 
 
 class SettingsConfig(BaseModel):
@@ -63,15 +92,13 @@ class SettingsConfig(BaseModel):
 
     @property
     def resolved_db_path(self) -> Path:
-        expanded = os.path.expandvars(os.path.expanduser(self.db_path))
-        p = Path(expanded).resolve()
+        p = resolve_path(self.db_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
     @property
     def resolved_log_dir(self) -> Path:
-        expanded = os.path.expandvars(os.path.expanduser(self.log_dir))
-        p = Path(expanded).resolve()
+        p = resolve_path(self.log_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -137,7 +164,7 @@ def get_default_config_search_paths() -> List[Path]:
 
 def find_config_file(custom_path: Optional[Path | str] = None) -> Optional[Path]:
     if custom_path:
-        p = Path(os.path.expandvars(os.path.expanduser(str(custom_path)))).resolve()
+        p = resolve_path(custom_path)
         if p.exists() and p.is_file():
             return p
         raise FileNotFoundError(f"Specified configuration file does not exist: {p}")
