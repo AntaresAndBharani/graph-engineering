@@ -140,6 +140,7 @@ Built with `typer` and `rich` for live diagnostics and formatted tables:
 | `orchestrator labels` | Idempotently synchronizes workflow taxonomy labels on GitHub. |
 | `orchestrator run [--project <NAME>] [--node <NAME>] [--force]` | Executes an on-demand evaluation pass across all active projects or a targeted repository. |
 | `orchestrator watch [--interval <SEC>]` | Starts the continuous background polling daemon with parallel multi-project workers. |
+| `orchestrator stop [--force]` | Gracefully halts running background daemons, prevents new nodes from starting, and cleans up active AI agents. |
 | `orchestrator logs <PROJECT> [--lines <N>]` | Streams recent execution traces and stdout/stderr from AI subprocesses for troubleshooting. |
 | `orchestrator clean [--stale-only]` | Forces a cleanup of stale/expired locks in the SQLite state database. |
 

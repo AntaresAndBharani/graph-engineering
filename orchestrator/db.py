@@ -48,7 +48,120 @@ class StateManager:
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daemon_control (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                """
+            )
             await db.commit()
+
+    async def register_daemon(self, pid: int) -> None:
+        """Registers the active daemon process ID and clears any stop requests."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('status', 'RUNNING', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = 'RUNNING', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('pid', ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;",
+                (str(pid), now),
+            )
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('stop_requested', '0', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.commit()
+
+    async def unregister_daemon(self) -> None:
+        """Unregisters the daemon on clean shutdown."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('status', 'STOPPED', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = 'STOPPED', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.execute(
+                "DELETE FROM daemon_control WHERE key = 'pid';"
+            )
+            await db.commit()
+
+    async def request_stop(self) -> Optional[int]:
+        """
+        Signals a safe stop to all running workers.
+        Returns the registered daemon PID if currently recorded.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('stop_requested', '1', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('status', 'STOP_REQUESTED', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = 'STOP_REQUESTED', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.commit()
+
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'pid';")
+            row = await cursor.fetchone()
+            if row and row[0]:
+                try:
+                    return int(row[0])
+                except (ValueError, TypeError):
+                    return None
+            return None
+
+    async def is_stop_requested(self) -> bool:
+        """Checks whether a safe stop has been requested."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'stop_requested';")
+            row = await cursor.fetchone()
+            return bool(row and row[0] == "1")
+
+    async def clear_stop_request(self) -> None:
+        """Clears the stop request flag."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('stop_requested', '0', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.execute(
+                "UPDATE daemon_control SET value = 'STOPPED', updated_at = ? WHERE key = 'status' AND value = 'STOP_REQUESTED';",
+                (now,),
+            )
+            await db.commit()
+
+    async def get_daemon_info(self) -> Dict[str, Any]:
+        """Returns the current status, PID, and stop requested flag for daemon."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute("SELECT key, value FROM daemon_control;")
+            rows = await cursor.fetchall()
+            return {r[0]: r[1] for r in rows}
 
     async def acquire_lock(
         self,

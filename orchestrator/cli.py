@@ -15,6 +15,7 @@ from rich.live import Live
 from orchestrator import __version__
 from orchestrator.config import GlobalConfig, load_config
 from orchestrator.db import StateManager
+from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.housekeeping import sync_all_projects_labels, sync_repository_labels
 from orchestrator.logging import setup_logger
 from orchestrator.nodes.architect import run_architect_node
@@ -91,11 +92,16 @@ async def run_project_cycle(
     requiring an immediate follow-up pass.
     Returns False if all development nodes were idle (even if the supervisor completed a watchdog audit).
     """
+    if await state_manager.is_stop_requested():
+        return False
+
     pipeline_work_done = False
     prefix = f"[{project.name}]"
 
     # 1. Supervisor Node (Periodic Watchdog Audit - does not trigger 1s tight loop)
     if node_name is None or node_name == "supervisor":
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
         force_sup = node_name == "supervisor"
         ran, msg = await run_supervisor_node(project, config, state_manager, force=force_sup)
         if ran:
@@ -105,6 +111,8 @@ async def run_project_cycle(
 
     # 2. Architect Node (Active development work)
     if node_name is None or node_name == "architect":
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
         ran, msg = await run_architect_node(project, config, state_manager)
         if ran:
             pipeline_work_done = True
@@ -114,6 +122,8 @@ async def run_project_cycle(
 
     # 3. DevTest Node (Active development work)
     if node_name is None or node_name == "devtest":
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
         ran, msg = await run_devtest_node(project, config, state_manager)
         if ran:
             pipeline_work_done = True
@@ -123,6 +133,8 @@ async def run_project_cycle(
 
     # 4. Reviewer / Gatekeeper Node (Active development work)
     if node_name is None or node_name in ("reviewer", "review"):
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
         ran, msg = await run_reviewer_node(project, config, state_manager)
         if ran:
             pipeline_work_done = True
@@ -132,6 +144,8 @@ async def run_project_cycle(
 
     # 5. BAU Maintenance Node (Daily tech-debt & enhancement consolidation)
     if node_name is None or node_name in ("bau", "maintenance"):
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
         force_bau = node_name in ("bau", "maintenance")
         ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
         if ran:
@@ -196,8 +210,17 @@ async def _project_worker_loop(
     """
     while True:
         try:
+            if await state_manager.is_stop_requested():
+                console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
+                break
+
             await state_manager.cleanup_expired_locks()
             work_done = await run_project_cycle(project, config, state_manager, silent_idle=False)
+
+            if await state_manager.is_stop_requested():
+                console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
+                break
+
             if work_done:
                 console.print(f"[bold cyan]⚡ [{project.name}]: Active work completed. Starting immediate follow-up pass...[/bold cyan]")
                 await asyncio.sleep(1)
@@ -243,6 +266,11 @@ async def _watch_daemon(
     state_manager = StateManager(config.settings.resolved_db_path)
     await state_manager.init_db()
 
+    # Register daemon process ID and clear past stop flags
+    import os
+    daemon_pid = os.getpid()
+    await state_manager.register_daemon(daemon_pid)
+
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
 
@@ -250,6 +278,7 @@ async def _watch_daemon(
         f"[bold green]Starting Orchestrator Daemon[/bold green]\n"
         f"• Poll Interval: [cyan]{interval}s[/cyan]\n"
         f"• Managed Projects: [cyan]{len(enabled_projects)}[/cyan] (Parallel Workers)\n"
+        f"• Daemon PID: [cyan]{daemon_pid}[/cyan]\n"
         f"• State DB: [cyan]{config.settings.resolved_db_path}[/cyan]\n"
         f"• Logs: [cyan]{config.settings.resolved_log_dir}[/cyan]",
         title="Daemon Active",
@@ -262,6 +291,7 @@ async def _watch_daemon(
 
     if not enabled_projects:
         console.print("[yellow]No enabled projects found in configuration.[/yellow]")
+        await state_manager.unregister_daemon()
         return
 
     # Spawn concurrent worker tasks for each project
@@ -276,6 +306,9 @@ async def _watch_daemon(
         for w in workers:
             w.cancel()
         console.print("[yellow]Daemon stopped by user.[/yellow]")
+    finally:
+        AsyncHarnessAdapter.terminate_all_active()
+        await state_manager.unregister_daemon()
 
 
 @app.command("list")
@@ -668,6 +701,58 @@ def logs_command(
         except Exception:
             sys.stdout.buffer.write(content.encode("utf-8", errors="replace"))
             sys.stdout.flush()
+
+
+@app.command("stop")
+def stop_command(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Immediately terminate daemon process and all running child agents.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Gracefully halts the running background daemon and stops all active agents."""
+    asyncio.run(_stop_daemon(force, config_path))
+
+
+async def _stop_daemon(force: bool, config_path: Optional[Path]) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    daemon_pid = await state_manager.request_stop()
+    active_killed = AsyncHarnessAdapter.terminate_all_active()
+
+    if force and daemon_pid:
+        try:
+            import psutil
+            proc = psutil.Process(daemon_pid)
+            for child in proc.children(recursive=True):
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+            proc.kill()
+            console.print(f"[bold green]✓ Force killed daemon process (PID: {daemon_pid}) and active agent processes.[/bold green]")
+        except Exception as e:
+            console.print(f"[bold yellow]Daemon PID {daemon_pid} was not active or already terminated: {e}[/bold yellow]")
+    else:
+        console.print("[bold green]✓ Safe stop signal registered in state database.[/bold green]")
+        console.print("[dim]Daemon workers will finish current step without scheduling any new nodes.[/dim]")
+        if active_killed > 0:
+            console.print(f"[bold yellow]Terminated {active_killed} active AI harness process(es).[/bold yellow]")
 
 
 if __name__ == "__main__":

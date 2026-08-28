@@ -17,6 +17,8 @@ _console = Console()
 
 
 class AsyncHarnessAdapter:
+    _active_processes: set[asyncio.subprocess.Process] = set()
+
     def __init__(self, name: str, config: HarnessConfig):
         self.name = name
         self.config = config
@@ -27,6 +29,15 @@ class AsyncHarnessAdapter:
         self.timeout_seconds = config.timeout_minutes * 60
         self.retry_limit = config.retry_on_failure
         self.env_vars = config.env_vars
+
+    @classmethod
+    def terminate_all_active(cls) -> int:
+        """Terminates all currently running harness subprocesses and their process trees."""
+        count = len(cls._active_processes)
+        for proc in list(cls._active_processes):
+            cls._kill_process_tree(proc)
+        cls._active_processes.clear()
+        return count
 
     def is_available(self) -> bool:
         """Checks if the CLI executable is available in PATH."""
@@ -107,6 +118,7 @@ class AsyncHarnessAdapter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+            AsyncHarnessAdapter._active_processes.add(process)
 
             async def stream_output():
                 with open(log_file, "a", encoding="utf-8") as f:
@@ -145,8 +157,12 @@ class AsyncHarnessAdapter:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n\n[ORCHESTRATOR ERROR] Subprocess execution error: {e}\n")
             return 1
+        finally:
+            if process:
+                AsyncHarnessAdapter._active_processes.discard(process)
 
-    def _kill_process_tree(self, process: Optional[asyncio.subprocess.Process]) -> None:
+    @staticmethod
+    def _kill_process_tree(process: Optional[asyncio.subprocess.Process]) -> None:
         """Recursively terminates a process and all its child processes to avoid zombies."""
         if not process or process.returncode is not None:
             return
@@ -167,3 +183,4 @@ class AsyncHarnessAdapter:
                 process.kill()
             except Exception:
                 pass
+
