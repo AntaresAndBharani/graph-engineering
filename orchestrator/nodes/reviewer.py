@@ -158,12 +158,24 @@ async def run_reviewer_node(
 
     # 5. Deterministic Approval & Auto-Merge
     if auto_merge and shutil.which("gh"):
-        # Approve PR
+        # Post confirmation comment
+        p_comment = await asyncio.create_subprocess_exec(
+            "gh", "pr", "comment", str(pr_number),
+            "--repo", project.repo,
+            "--body", "🤖 **Reviewer Gatekeeper**: Deterministic Quality Gate passed (CI 100% Green, mergeable). Approving and executing auto-merge into `main`.",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await p_comment.wait()
+
+        # Approve PR if not author
         p_approve = await asyncio.create_subprocess_exec(
             "gh", "pr", "review", str(pr_number),
             "--repo", project.repo,
             "--approve",
-            "--body", "🤖 **Architect Review**: Deterministic Quality Gate passed (CI 100% Green, mergeable, verified). Approving and executing auto-merge.",
+            "--body", "🤖 **Architect Review**: Approved (Quality Gate 100% Green).",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         await p_approve.wait()
 
@@ -174,6 +186,8 @@ async def run_reviewer_node(
             "--squash",
             "--delete-branch",
             "--auto",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         await p_merge.wait()
 
