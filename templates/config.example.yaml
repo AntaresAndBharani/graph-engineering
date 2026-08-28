@@ -1,0 +1,92 @@
+# ==============================================================================
+# Graph Orchestrator Configuration Template (v2)
+# ==============================================================================
+# Save this file to ~/.config/orchestrator/config.yaml (Linux/macOS)
+# or %USERPROFILE%/.orchestrator/config.yaml (Windows)
+
+version: 2
+
+# Global Engine Settings
+settings:
+  poll_interval_seconds: 300          # 5 minutes idle sweep interval
+  supervisor_interval_seconds: 3600   # 1 hour consistency supervisor check
+  max_concurrent_jobs: 4              # Concurrency threshold to prevent RAM exhaustion
+  db_path: "~/.config/orchestrator/state.db"
+  log_dir: "~/.config/orchestrator/logs"
+  log_level: "INFO"
+
+# Standard Repository Workflow Taxonomy
+managed_labels:
+  - name: "needs-triage"
+    color: "E2B7E1"
+    description: "Awaiting Architect Node triage and decomposition"
+  - name: "ready-for-dev"
+    color: "0E8A16"
+    description: "Awaiting 3Amigos DevTest implementation"
+  - name: "needs-architect-review"
+    color: "FBCA04"
+    description: "PR submitted, ready for architectural review"
+  - name: "dev-implemented"
+    color: "C2E0C6"
+    description: "Implementation completed by DevTest node"
+  - name: "orchestration-failed"
+    color: "B60205"
+    description: "AI Harness execution failed"
+  - name: "needs-po-review"
+    color: "D93F0B"
+    description: "Supervisor flagged methodological conflict"
+  - name: "architect-processed"
+    color: "D4C5F9"
+    description: "Architect decomposition complete"
+
+# Pluggable AI CLI Harness Adapters
+# CLIs inherit active local OAuth user subscriptions (zero raw API token charges).
+harnesses:
+  claude:
+    binary: "claude"
+    args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
+    model_flag: "--model"
+    timeout_minutes: 30
+    retry_on_failure: 1
+
+  antigravity:
+    binary: "agy"
+    args: ["run", "{prompt}"]
+    model_flag: "--model"
+    timeout_minutes: 45
+    retry_on_failure: 1
+
+  devin:
+    binary: "devin"
+    args: ["-p", "{prompt}", "--permission-mode", "bypass"]
+    model_flag: "--model"
+    timeout_minutes: 60
+    retry_on_failure: 1
+
+# Managed Projects Registry
+projects:
+  - name: "project-alpha"
+    repo: "my-org/project-alpha"
+    local_path: "C:/Projects/project-alpha"
+    enabled: true
+    context_files:
+      - "docs/ARCHITECTURE.md"
+      - "docs/METHODOLOGY.md"
+    nodes:
+      supervisor:
+        enabled: true
+        harness: "claude"
+      architect:
+        enabled: true
+        harness: "claude"
+        model: "claude-sonnet-5"
+        label_trigger: "needs-triage"
+        label_output: "ready-for-dev"
+      devtest:
+        enabled: true
+        harness: "antigravity"
+        model: "gemini-3.7-flash"
+        label_trigger: "ready-for-dev"
+        label_output: "needs-architect-review"
+        branch_prefix: "feat/issue-"
+        auto_merge_approved: true

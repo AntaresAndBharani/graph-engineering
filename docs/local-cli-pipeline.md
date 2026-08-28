@@ -558,3 +558,67 @@ Architect's batch run should now produce naturally via Three Amigos + Dev
   `.claude/tasks/three-amigos-judge.md` (new),
   `.antigravity/tasks/dev-test-fixup.md` and `dev-test-implement.md`
   (new); Windows Task Scheduler `CTA-ThreeAmigosDevTest`.
+
+---
+
+## Evolution to Decoupled, Agnostic Multi-Agent Orchestrator CLI (`graph-orchestrator`)
+
+### Motivation & Architectural Shift
+Moving beyond static OS-level Windows Task Scheduler scripts and single-repository wrappers, the **Graph Orchestrator** decouples the automation control plane from target application repositories entirely.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Orchestrator CLI Engine (Zero-Token Idle Polling)          │
+│  Reads: ~/.config/orchestrator/config.yaml                  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+┌───────────────────────────┐         ┌───────────────────────────┐
+│ Node 0: Consistency Super.│         │ Node 1: Architect         │
+│ 1. 0-Token Anomaly Filter │         │ 1. 0-Token gh issue check │
+│ 2. Self-Heal / PO Escalate│         │ 2. AI CLI Decomposition   │
+│ 3. State Auto-Healing     │         │ 3. Child issue creation   │
+└───────────────────────────┘         └───────────────────────────┘
+                                                  │
+                                                  ▼
+                                      ┌───────────────────────────┐
+                                      │ Node 2: 3AmigosDevTest    │
+                                      │ 1. Remote-match git check │
+                                      │ 2. Clean workspace & code │
+                                      │ 3. Automated PR & Auto-M. │
+                                      └───────────────────────────┘
+```
+
+### Key Pillars
+1. **Zero-Token Polling & Anomaly Gating**: Batched queries examine issue labels (`needs-triage`, `ready-for-dev`) and PR statuses without launching AI models when idle ($0 token cost).
+2. **Native OAuth Session Token Support**: The execution layer inherits user environment variables so `claude` and `agy` (Antigravity CLI) leverage existing active subscriptions rather than pay-per-token API keys.
+3. **Pluggable CLI Harnesses**: Declarative adapter layer in `config.yaml` supporting `claude`, `antigravity`, `devin`, or custom commands.
+4. **State Locking with SQLite WAL & TTL**: Prevents duplicate executions across asynchronous loops and recovers automatically from daemon interruptions.
+5. **Destructive Git Pre-flight Safety**: Validates `.git` and `remote.origin.url` matching before running clean commands (`git reset --hard && git clean -fd`).
+6. **Structured Logging & ANSI Stripping**: Hierarchical log storage under `~/.config/orchestrator/logs/<project>/<node>/` with real-time ANSI escape filtering.
+
+### CLI Usage Reference
+```powershell
+# Run diagnostics across tools and database
+orchestrator doctor
+
+# List registered projects and harness mappings
+orchestrator list
+
+# Run a single evaluation sweep
+orchestrator run
+
+# Target a specific project or node
+orchestrator run --project project-alpha --node devtest
+
+# Launch background daemon with live dashboard
+orchestrator watch --interval 300
+
+# Publish a refined User Story directly to GitHub
+orchestrator ingest --project project-alpha --file ./specs/us-feature.md
+
+# Inspect execution logs
+orchestrator logs project-alpha --node devtest --lines 50
+```
+

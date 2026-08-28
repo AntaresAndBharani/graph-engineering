@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import time
+from typing import Any, Dict, List, Optional
+import aiosqlite
+
+
+class StateManager:
+    """
+    Asynchronous state and lock manager using SQLite in WAL mode.
+    Handles concurrency, deduplication, and TTL lock recovery.
+    """
+
+    def __init__(self, db_path: Path | str):
+        expanded = os.path.expandvars(os.path.expanduser(str(db_path)))
+        self.db_path = Path(expanded).resolve()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async def init_db(self) -> None:
+        """Initializes SQLite database and tables with WAL mode."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS active_jobs (
+                    issue_id TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    PRIMARY KEY (issue_id, repo, node_type)
+                );
+                """
+            )
+            await db.commit()
+
+    async def acquire_lock(
+        self,
+        issue_id: str | int,
+        repo: str,
+        node_type: str,
+        ttl_minutes: int = 30,
+    ) -> bool:
+        """
+        Attempts to acquire an execution lock for (issue_id, repo, node_type).
+        Returns True if acquired, False if currently locked by an unexpired job.
+        """
+        issue_str = str(issue_id)
+        now = time.time()
+        expires_at = now + (ttl_minutes * 60)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+
+            # Check existing lock
+            cursor = await db.execute(
+                """
+                SELECT status, expires_at, retry_count
+                FROM active_jobs
+                WHERE issue_id = ? AND repo = ? AND node_type = ?
+                """,
+                (issue_str, repo, node_type),
+            )
+            row = await cursor.fetchone()
+
+            if row:
+                status, existing_expires, retry_count = row
+                # If currently running and unexpired, lock cannot be acquired
+                if status == "RUNNING" and existing_expires > now:
+                    return False
+
+                # Otherwise update existing entry
+                await db.execute(
+                    """
+                    UPDATE active_jobs
+                    SET status = 'RUNNING', started_at = ?, expires_at = ?, error_message = NULL
+                    WHERE issue_id = ? AND repo = ? AND node_type = ?
+                    """,
+                    (now, expires_at, issue_str, repo, node_type),
+                )
+            else:
+                # Insert new lock
+                await db.execute(
+                    """
+                    INSERT INTO active_jobs (issue_id, repo, node_type, status, started_at, expires_at, retry_count)
+                    VALUES (?, ?, ?, 'RUNNING', ?, ?, 0)
+                    """,
+                    (issue_str, repo, node_type, now, expires_at),
+                )
+
+            await db.commit()
+            return True
+
+    async def release_lock(
+        self,
+        issue_id: str | int,
+        repo: str,
+        node_type: str,
+    ) -> None:
+        """Releases/deletes the lock upon successful task completion."""
+        issue_str = str(issue_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                DELETE FROM active_jobs
+                WHERE issue_id = ? AND repo = ? AND node_type = ?
+                """,
+                (issue_str, repo, node_type),
+            )
+            await db.commit()
+
+    async def fail_job(
+        self,
+        issue_id: str | int,
+        repo: str,
+        node_type: str,
+        error_message: str,
+    ) -> int:
+        """Marks a job as FAILED and increments its retry count."""
+        issue_str = str(issue_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                UPDATE active_jobs
+                SET status = 'FAILED',
+                    retry_count = retry_count + 1,
+                    error_message = ?
+                WHERE issue_id = ? AND repo = ? AND node_type = ?
+                """,
+                (error_message, issue_str, repo, node_type),
+            )
+            await db.commit()
+
+            cursor = await db.execute(
+                """
+                SELECT retry_count FROM active_jobs
+                WHERE issue_id = ? AND repo = ? AND node_type = ?
+                """,
+                (issue_str, repo, node_type),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 1
+
+    async def cleanup_expired_locks(self) -> int:
+        """Identifies expired RUNNING locks and updates them to FAILED."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                UPDATE active_jobs
+                SET status = 'FAILED', error_message = 'Lock TTL Expired (Daemon Interruption)'
+                WHERE status = 'RUNNING' AND expires_at <= ?
+                """,
+                (now,),
+            )
+            count = cursor.rowcount
+            await db.commit()
+            return count if count > 0 else 0
+
+    async def get_active_jobs(self) -> List[Dict[str, Any]]:
+        """Returns all currently active or failed jobs."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT issue_id, repo, node_type, status, started_at, expires_at, retry_count, error_message
+                FROM active_jobs
+                ORDER BY started_at DESC
+                """
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_all_locks(self, stale_only: bool = False) -> int:
+        """Cleans locks from database."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            if stale_only:
+                cursor = await db.execute(
+                    "DELETE FROM active_jobs WHERE status = 'FAILED' OR expires_at <= ?",
+                    (now,),
+                )
+            else:
+                cursor = await db.execute("DELETE FROM active_jobs")
+            count = cursor.rowcount
+            await db.commit()
+            return count if count > 0 else 0
