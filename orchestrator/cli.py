@@ -18,6 +18,7 @@ from orchestrator.db import StateManager
 from orchestrator.housekeeping import sync_all_projects_labels, sync_repository_labels
 from orchestrator.logging import setup_logger
 from orchestrator.nodes.architect import run_architect_node
+from orchestrator.nodes.bau import run_bau_node
 from orchestrator.nodes.devtest import run_devtest_node
 from orchestrator.nodes.reviewer import run_reviewer_node
 from orchestrator.nodes.supervisor import run_supervisor_node
@@ -147,6 +148,16 @@ async def _run_single_pass(
             else:
                 console.print(f"  [dim]Reviewer: {msg}[/dim]")
 
+        # 5. BAU Maintenance Node (Daily tech-debt & enhancement consolidation)
+        if node_name is None or node_name in ("bau", "maintenance"):
+            force_bau = node_name in ("bau", "maintenance")
+            with console.status("[bold cyan]Evaluating BAU Maintenance Node...[/bold cyan]"):
+                ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
+            if ran:
+                console.print(f"  [bold green]BAU:[/bold green] {msg}")
+            else:
+                console.print(f"  [dim]BAU: {msg}[/dim]")
+
 
 @app.command("watch")
 def watch_command(
@@ -208,6 +219,7 @@ async def _watch_daemon(
                 await run_architect_node(project, config, state_manager)
                 await run_devtest_node(project, config, state_manager)
                 await run_reviewer_node(project, config, state_manager)
+                await run_bau_node(project, config, state_manager, force=False)
 
             await asyncio.sleep(interval)
     except asyncio.CancelledError:

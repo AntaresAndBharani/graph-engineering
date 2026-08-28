@@ -38,6 +38,16 @@ class StateManager:
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS node_runs (
+                    node_type TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    last_run_at REAL NOT NULL,
+                    PRIMARY KEY (node_type, repo)
+                );
+                """
+            )
             await db.commit()
 
     async def acquire_lock(
@@ -200,3 +210,31 @@ class StateManager:
             count = cursor.rowcount
             await db.commit()
             return count if count > 0 else 0
+
+    async def get_last_run(self, node_type: str, repo: str) -> Optional[float]:
+        """Retrieves the timestamp of the last execution for a node_type and repo."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "SELECT last_run_at FROM node_runs WHERE node_type = ? AND repo = ?",
+                (node_type, repo),
+            )
+            row = await cursor.fetchone()
+            return float(row[0]) if row else None
+
+    async def record_node_run(self, node_type: str, repo: str) -> None:
+        """Records the current timestamp as the last run time for a node_type and repo."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO node_runs (node_type, repo, last_run_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(node_type, repo) DO UPDATE SET last_run_at = excluded.last_run_at
+                """,
+                (node_type, repo, now),
+            )
+            await db.commit()

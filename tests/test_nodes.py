@@ -44,6 +44,11 @@ async def test_zero_token_gating_idle(tmp_path: Path, monkeypatch):
     assert ran_rev is False
     assert "Idle (0 tokens)" in msg_rev
 
+    from orchestrator.nodes.bau import run_bau_node
+    ran_bau, msg_bau = await run_bau_node(project, config, state_manager, force=True)
+    assert ran_bau is False
+    assert "Idle (0 tokens)" in msg_bau
+
 
 @pytest.mark.asyncio
 async def test_reviewer_node_ci_checks_logic():
@@ -51,3 +56,20 @@ async def test_reviewer_node_ci_checks_logic():
     # When gh is not available or mock returns no checks
     status, msg = await check_pr_ci_status("org/repo", 999)
     assert status in ("PASS", "NO_CHECKS", "PENDING")
+
+
+@pytest.mark.asyncio
+async def test_bau_node_schedule_gating(tmp_path: Path):
+    from orchestrator.nodes.bau import run_bau_node
+    config = GlobalConfig()
+    project = ProjectConfig(name="test", repo="org/repo", local_path=str(tmp_path))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Record run now
+    await state_manager.record_node_run("bau", project.repo)
+
+    # Without force, should report not due
+    ran, msg = await run_bau_node(project, config, state_manager, force=False)
+    assert ran is False
+    assert "not due" in msg.lower()

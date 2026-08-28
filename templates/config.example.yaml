@@ -10,6 +10,7 @@ version: 2
 settings:
   poll_interval_seconds: 300          # 5 minutes idle sweep interval
   supervisor_interval_seconds: 3600   # 1 hour consistency supervisor check
+  bau_interval_seconds: 86400         # 1 day / 24 hours interval for BAU maintenance
   max_concurrent_jobs: 4              # Concurrency threshold to prevent RAM exhaustion
   db_path: "~/.config/orchestrator/state.db"
   log_dir: "~/.config/orchestrator/logs"
@@ -38,6 +39,12 @@ managed_labels:
   - name: "architect-processed"
     color: "D4C5F9"
     description: "Architect decomposition complete"
+  - name: "tech-debt"
+    color: "FBCA04"
+    description: "Technical debt or non-blocking improvement"
+  - name: "enhancement"
+    color: "A2EEEF"
+    description: "New feature request or enhancement"
 
 # Pluggable AI CLI Harness Adapters
 # CLIs inherit active local OAuth user subscriptions (zero raw API token charges).
@@ -102,3 +109,7 @@ projects:
         effort: "medium"
         label_trigger: "needs-architect-review"
         auto_merge_approved: true
+      bau:
+        enabled: true
+        harness: "antigravity"
+        model: "gemini-3.7-flash-low"     # Fast, lightweight model for daily maintenance grouping

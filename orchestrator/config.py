@@ -85,6 +85,7 @@ class ProjectConfig(BaseModel):
 class SettingsConfig(BaseModel):
     poll_interval_seconds: int = 300
     supervisor_interval_seconds: int = 3600
+    bau_interval_seconds: int = 86400  # 1 day / 24 hours interval for BAU maintenance
     max_concurrent_jobs: int = 4
     db_path: str = "~/.config/orchestrator/state.db"
     log_dir: str = "~/.config/orchestrator/logs"
@@ -111,6 +112,8 @@ DEFAULT_MANAGED_LABELS: List[LabelConfig] = [
     LabelConfig(name="orchestration-failed", color="B60205", description="AI Harness execution failed"),
     LabelConfig(name="needs-po-review", color="D93F0B", description="Supervisor flagged methodological conflict"),
     LabelConfig(name="architect-processed", color="D4C5F9", description="Architect decomposition complete"),
+    LabelConfig(name="tech-debt", color="FBCA04", description="Technical debt or non-blocking improvement"),
+    LabelConfig(name="enhancement", color="A2EEEF", description="New feature request or enhancement"),
 ]
 
 DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
