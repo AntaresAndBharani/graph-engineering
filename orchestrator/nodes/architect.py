@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,13 +16,113 @@ from orchestrator.logging import get_project_log_path
 from orchestrator.poller import fetch_issues_with_label
 
 
+async def sync_parent_subtask_links(
+    repo: str,
+    parent_id: int,
+    processed_label: str,
+    trigger_label: str,
+) -> int:
+    """
+    Deterministically searches for child subtasks referencing the parent issue,
+    ensures the parent issue body contains the '## Subtasks' checklist,
+    and posts an audit comment if missing.
+    Returns the count of linked children.
+    """
+    if not shutil.which("gh"):
+        return 0
+
+    # 1. Fetch parent issue details
+    proc_parent = await asyncio.create_subprocess_exec(
+        "gh", "issue", "view", str(parent_id),
+        "--repo", repo,
+        "--json", "body,labels,title",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_p, _ = await proc_parent.communicate()
+    if proc_parent.returncode != 0 or not stdout_p:
+        return 0
+
+    try:
+        parent_data = json.loads(stdout_p.decode("utf-8", errors="replace"))
+    except Exception:
+        return 0
+
+    parent_body = parent_data.get("body", "")
+
+    # 2. Search for child subtasks referencing Parent: #<parent_id>
+    proc_search = await asyncio.create_subprocess_exec(
+        "gh", "issue", "list",
+        "--repo", repo,
+        "--search", f"#{parent_id}",
+        "--json", "number,title,state",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_s, _ = await proc_search.communicate()
+    if proc_search.returncode != 0 or not stdout_s:
+        return 0
+
+    try:
+        results = json.loads(stdout_s.decode("utf-8", errors="replace"))
+        children = [c for c in results if c.get("number") != parent_id]
+    except Exception:
+        return 0
+
+    if not children:
+        return 0
+
+    # Sort children by issue number
+    children.sort(key=lambda x: x.get("number", 0))
+
+    # Check if all children are already listed in the parent body
+    missing_links = [c for c in children if f"#{c['number']}" not in parent_body]
+    if missing_links:
+        subtasks_md = "\n\n## Subtasks\n" + "\n".join([
+            f"- [{'x' if c.get('state') == 'CLOSED' else ' '}] #{c['number']} - {c.get('title', '')}"
+            for c in children
+        ])
+
+        if "## Subtasks" in parent_body:
+            new_body = re.sub(r"## Subtasks.*?(?=\n## |\Z)", subtasks_md.strip(), parent_body, flags=re.DOTALL)
+        else:
+            new_body = parent_body.rstrip() + subtasks_md
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+            tf.write(new_body)
+            temp_path = tf.name
+
+        try:
+            p_edit = await asyncio.create_subprocess_exec(
+                "gh", "issue", "edit", str(parent_id),
+                "--repo", repo,
+                "--body-file", temp_path,
+                "--remove-label", trigger_label,
+                "--add-label", processed_label,
+            )
+            await p_edit.wait()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        links_list = "\n".join([f"- #{c['number']}: {c.get('title', '')}" for c in children])
+        p_comment = await asyncio.create_subprocess_exec(
+            "gh", "issue", "comment", str(parent_id),
+            "--repo", repo,
+            "--body", f"🤖 **Architect Decomposition Complete**: Decomposed into {len(children)} subtask(s):\n{links_list}",
+        )
+        await p_comment.wait()
+
+    return len(children)
+
+
 async def run_architect_node(
     project: ProjectConfig,
     config: GlobalConfig,
     state_manager: StateManager,
 ) -> tuple[bool, str]:
     """
-    Executes Architect Node (Triage, Classification & Decomposition).
+    Executes Architect & Triage Node (Story Decomposition & Classification).
     Zero-token gating: if no issues labeled 'needs-triage', exits with 0 tokens consumed.
     """
     node_cfg = project.nodes.get("architect", NodeConfig(harness="claude"))
@@ -87,10 +190,10 @@ async def run_architect_node(
         f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'needs-po-review'`\n"
         f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Requirements are ambiguous. Flagging for PO review with questions: <clarification questions>'`\n"
         f"   - **Case 6: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable subtasks following 3-amigos and INVEST principles:\n"
-        f"     - If subtasks already exist on GitHub, ensure all open subtasks are labeled '{output_label}'.\n"
-        f"     - Otherwise, create new subtask issues: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+        f"     - Create new subtask issues: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
         f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
         f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
+        f"     - Post a comment on the parent issue listing all created subtask numbers.\n"
     )
 
     # 4. Execute Agnostic Harness (Local OAuth Session)
@@ -127,7 +230,9 @@ async def run_architect_node(
             await p2.wait()
         return False, f"Architect execution failed on issue #{issue_id} (exit code {exit_code})."
 
-    # 5. Deterministic Post-Execution Verification
+    # 5. Deterministic Post-Execution Verification & Subtask Linking
+    linked_count = await sync_parent_subtask_links(project.repo, issue_id, processed_label, trigger)
+
     if shutil.which("gh"):
         # Check current state and labels of parent issue
         proc_view = await asyncio.create_subprocess_exec(
@@ -152,42 +257,15 @@ async def run_architect_node(
             await state_manager.release_lock(issue_id, project.repo, "architect")
             return True, f"Architect node verified issue #{issue_id} was already satisfied and closed it."
 
+        if linked_count > 0 or processed_label in current_labels:
+            await state_manager.release_lock(issue_id, project.repo, "architect")
+            return True, f"Architect node triaged and decomposed issue #{issue_id} into {linked_count} linked subtask(s) ('{output_label}')."
+
         # If the architect classified/triaged the issue into another status (e.g. ready-for-dev, tech-debt, enhancement, needs-po-review, architect-processed)
         if trigger not in current_labels:
             await state_manager.release_lock(issue_id, project.repo, "architect")
             labels_str = ", ".join(current_labels) or "no labels"
             return True, f"Architect node classified and transitioned issue #{issue_id} to [{labels_str}]."
-
-        # Check if child subtasks were created or exist on GitHub
-        proc_children = await asyncio.create_subprocess_exec(
-            "gh", "issue", "list",
-            "--repo", project.repo,
-            "--search", f"#{issue_id}",
-            "--json", "number,title,labels",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_children, _ = await proc_children.communicate()
-        children: List[Dict[str, Any]] = []
-        if proc_children.returncode == 0 and stdout_children:
-            try:
-                all_found = json.loads(stdout_children.decode("utf-8", errors="replace"))
-                children = [c for c in all_found if c.get("number") != issue_id]
-            except Exception:
-                pass
-
-        if children:
-            # Transition parent story to architect-processed
-            p_edit = await asyncio.create_subprocess_exec(
-                "gh", "issue", "edit", str(issue_id),
-                "--repo", project.repo,
-                "--remove-label", trigger,
-                "--add-label", processed_label,
-            )
-            await p_edit.wait()
-
-            await state_manager.release_lock(issue_id, project.repo, "architect")
-            return True, f"Architect node triaged and decomposed issue #{issue_id} into {len(children)} subtask(s) ('{output_label}')."
 
         # If no classification action was taken and no subtasks exist, escalate to needs-po-review
         await state_manager.fail_job(

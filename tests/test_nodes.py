@@ -133,3 +133,14 @@ async def test_supervisor_status_audit_and_sla(tmp_path: Path, monkeypatch):
     assert 102 in anomaly_issues
     # 103 (tech-debt) must NOT trigger STALE_ISSUE_SLA
     assert 103 not in anomaly_issues
+
+
+@pytest.mark.asyncio
+async def test_sync_parent_subtask_links_no_gh(monkeypatch):
+    import shutil
+    from orchestrator.nodes.architect import sync_parent_subtask_links
+
+    # If gh not available, returns 0 cleanly
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    linked = await sync_parent_subtask_links("org/repo", 100, "architect-processed", "needs-triage")
+    assert linked == 0
