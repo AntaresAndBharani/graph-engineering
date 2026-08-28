@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Implemented **State Locking & Concurrency Engine** (`orchestrator/db.py`): Asynchronous SQLite database (`state.db`) configured with Write-Ahead Logging (WAL) and TTL lock expiration to prevent duplicate executions and recover from daemon restarts.
 - Implemented **Structured Logging & ANSI Stripping** (`orchestrator/logging.py`): Dedicated per-project/per-node log hierarchies (`~/.config/orchestrator/logs/<project>/<node>/`) with active regex ANSI filtering and automatic rotation.
 - Added **Automated Label Housekeeping** (`orchestrator/housekeeping.py`): Automatic idempotent provisioning of workflow taxonomy labels across all registered repositories using `gh label create --force`.
-- Added **CLI Command Suite** (`orchestrator/cli.py`): Full Typer + Rich CLI supporting `run`, `watch` (live dashboard), `list`, `doctor`, `ingest`, `clean`, and `logs`.
+- Added **CLI Command Suite** (`orchestrator/cli.py`): Full Typer + Rich CLI supporting `run`, `watch` (live dashboard), `list`, `doctor` (with optional `--sync-labels`), `init`, `labels` (taxonomy sync/list), `ingest`, `clean`, and `logs`.
 - Added full unit and integration test suite (`tests/`) achieving 100% pass rate across configuration, state locking, harness execution, zero-token gating, and CLI diagnostics.
 - Added GitHub Actions CI workflow (`.github/workflows/ci.yml`) matrix-testing across Python 3.11 and 3.12 with automated build verification.
 - Added configuration template `templates/config.example.yaml`.
