@@ -78,6 +78,69 @@ def run_command(
     asyncio.run(_run_single_pass(project_name, node_name, config_path))
 
 
+async def run_project_cycle(
+    project: ProjectConfig,
+    config: GlobalConfig,
+    state_manager: StateManager,
+    node_name: Optional[str] = None,
+    silent_idle: bool = False,
+) -> bool:
+    """
+    Executes a single sequential pass across all enabled nodes for a project.
+    Returns True if ANY node executed active work (not idle), False if all nodes were idle.
+    """
+    any_work_done = False
+    prefix = f"[{project.name}]"
+
+    # 1. Supervisor Node
+    if node_name is None or node_name == "supervisor":
+        ran, msg = await run_supervisor_node(project, config, state_manager)
+        if ran:
+            any_work_done = True
+            console.print(f"  {prefix} [bold green]Supervisor:[/bold green] {msg}")
+        elif not silent_idle:
+            console.print(f"  {prefix} [dim]Supervisor: {msg}[/dim]")
+
+    # 2. Architect Node
+    if node_name is None or node_name == "architect":
+        ran, msg = await run_architect_node(project, config, state_manager)
+        if ran:
+            any_work_done = True
+            console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
+        elif not silent_idle:
+            console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
+
+    # 3. DevTest Node
+    if node_name is None or node_name == "devtest":
+        ran, msg = await run_devtest_node(project, config, state_manager)
+        if ran:
+            any_work_done = True
+            console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
+        elif not silent_idle:
+            console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
+
+    # 4. Reviewer / Gatekeeper Node
+    if node_name is None or node_name in ("reviewer", "review"):
+        ran, msg = await run_reviewer_node(project, config, state_manager)
+        if ran:
+            any_work_done = True
+            console.print(f"  {prefix} [bold green]Reviewer:[/bold green] {msg}")
+        elif not silent_idle:
+            console.print(f"  {prefix} [dim]Reviewer: {msg}[/dim]")
+
+    # 5. BAU Maintenance Node (Daily tech-debt & enhancement consolidation)
+    if node_name is None or node_name in ("bau", "maintenance"):
+        force_bau = node_name in ("bau", "maintenance")
+        ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
+        if ran:
+            any_work_done = True
+            console.print(f"  {prefix} [bold green]BAU:[/bold green] {msg}")
+        elif not silent_idle:
+            console.print(f"  {prefix} [dim]BAU: {msg}[/dim]")
+
+    return any_work_done
+
+
 async def _run_single_pass(
     project_name: Optional[str],
     node_name: Optional[str],
@@ -109,54 +172,40 @@ async def _run_single_pass(
         console.print("[dim]No enabled projects configured. Run 'orchestrator list' to view registered projects.[/dim]")
         return
 
-    for project in targets:
-        console.rule(f"[bold cyan]Project: {project.name} ({project.repo})[/bold cyan]")
+    # Execute target projects in parallel
+    tasks = [
+        run_project_cycle(p, config, state_manager, node_name=node_name)
+        for p in targets
+    ]
+    await asyncio.gather(*tasks)
 
-        # 1. Supervisor Node
-        if node_name is None or node_name == "supervisor":
-            with console.status("[bold blue]Checking Consistency Supervisor...[/bold blue]"):
-                ran, msg = await run_supervisor_node(project, config, state_manager)
-            if ran:
-                console.print(f"  [bold green]Supervisor:[/bold green] {msg}")
-            else:
-                console.print(f"  [dim]Supervisor: {msg}[/dim]")
 
-        # 2. Architect Node
-        if node_name is None or node_name == "architect":
-            with console.status("[bold magenta]Evaluating Architect Node...[/bold magenta]"):
-                ran, msg = await run_architect_node(project, config, state_manager)
-            if ran:
-                console.print(f"  [bold green]Architect:[/bold green] {msg}")
+async def _project_worker_loop(
+    project: ProjectConfig,
+    config: GlobalConfig,
+    state_manager: StateManager,
+    interval: int,
+) -> None:
+    """
+    Independent worker loop for a single project.
+    Runs sequentially within this project.
+    If work is performed in a pass, immediately starts the next pass (with a 1s debounce).
+    Only sleeps for `interval` when all nodes in this project are idle.
+    """
+    while True:
+        try:
+            await state_manager.cleanup_expired_locks()
+            work_done = await run_project_cycle(project, config, state_manager, silent_idle=False)
+            if work_done:
+                console.print(f"[bold cyan]⚡ [{project.name}]: Active work completed. Starting immediate follow-up pass...[/bold cyan]")
+                await asyncio.sleep(1)
             else:
-                console.print(f"  [dim]Architect: {msg}[/dim]")
-
-        # 3. DevTest Node
-        if node_name is None or node_name == "devtest":
-            with console.status("[bold yellow]Evaluating DevTest Node...[/bold yellow]"):
-                ran, msg = await run_devtest_node(project, config, state_manager)
-            if ran:
-                console.print(f"  [bold green]DevTest:[/bold green] {msg}")
-            else:
-                console.print(f"  [dim]DevTest: {msg}[/dim]")
-
-        # 4. Reviewer / Gatekeeper Node
-        if node_name is None or node_name in ("reviewer", "review"):
-            with console.status("[bold green]Evaluating Reviewer Gatekeeper Node...[/bold green]"):
-                ran, msg = await run_reviewer_node(project, config, state_manager)
-            if ran:
-                console.print(f"  [bold green]Reviewer:[/bold green] {msg}")
-            else:
-                console.print(f"  [dim]Reviewer: {msg}[/dim]")
-
-        # 5. BAU Maintenance Node (Daily tech-debt & enhancement consolidation)
-        if node_name is None or node_name in ("bau", "maintenance"):
-            force_bau = node_name in ("bau", "maintenance")
-            with console.status("[bold cyan]Evaluating BAU Maintenance Node...[/bold cyan]"):
-                ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
-            if ran:
-                console.print(f"  [bold green]BAU:[/bold green] {msg}")
-            else:
-                console.print(f"  [dim]BAU: {msg}[/dim]")
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            console.print(f"[bold red]Worker Error on [{project.name}]:[/bold red] {e}")
+            await asyncio.sleep(interval)
 
 
 @app.command("watch")
@@ -193,10 +242,12 @@ async def _watch_daemon(
     await state_manager.init_db()
 
     interval = interval_override or config.settings.poll_interval_seconds
+    enabled_projects = [p for p in config.projects if p.enabled]
+
     console.print(Panel(
         f"[bold green]Starting Orchestrator Daemon[/bold green]\n"
         f"• Poll Interval: [cyan]{interval}s[/cyan]\n"
-        f"• Managed Projects: [cyan]{len([p for p in config.projects if p.enabled])}[/cyan]\n"
+        f"• Managed Projects: [cyan]{len(enabled_projects)}[/cyan] (Parallel Workers)\n"
         f"• State DB: [cyan]{config.settings.resolved_db_path}[/cyan]\n"
         f"• Logs: [cyan]{config.settings.resolved_log_dir}[/cyan]",
         title="Daemon Active",
@@ -207,22 +258,21 @@ async def _watch_daemon(
     console.print("[dim]Synchronizing repository workflow labels...[/dim]")
     await sync_all_projects_labels(config.projects, config.managed_labels)
 
-    iteration = 0
+    if not enabled_projects:
+        console.print("[yellow]No enabled projects found in configuration.[/yellow]")
+        return
+
+    # Spawn concurrent worker tasks for each project
+    workers = [
+        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval))
+        for p in enabled_projects
+    ]
+
     try:
-        while True:
-            iteration += 1
-            await state_manager.cleanup_expired_locks()
-
-            # Execute run pass
-            for project in [p for p in config.projects if p.enabled]:
-                await run_supervisor_node(project, config, state_manager)
-                await run_architect_node(project, config, state_manager)
-                await run_devtest_node(project, config, state_manager)
-                await run_reviewer_node(project, config, state_manager)
-                await run_bau_node(project, config, state_manager, force=False)
-
-            await asyncio.sleep(interval)
+        await asyncio.gather(*workers)
     except asyncio.CancelledError:
+        for w in workers:
+            w.cancel()
         console.print("[yellow]Daemon stopped by user.[/yellow]")
 
 

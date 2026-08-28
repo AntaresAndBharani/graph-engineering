@@ -72,3 +72,23 @@ def test_cli_labels_help():
     result = runner.invoke(app, ["labels", "--help"])
     assert result.exit_code == 0
     assert "Provisions and synchronizes workflow taxonomy labels" in result.stdout
+
+
+import pytest
+from pathlib import Path
+from orchestrator.config import GlobalConfig, ProjectConfig
+from orchestrator.db import StateManager
+from orchestrator.cli import run_project_cycle
+
+
+@pytest.mark.asyncio
+async def test_run_project_cycle_idle(tmp_path: Path):
+    config = GlobalConfig()
+    project = ProjectConfig(name="test", repo="org/repo", local_path=str(tmp_path))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # When no issues or PRs exist, all nodes report idle (0 tokens) -> False
+    work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
+    assert work_done is False
+
