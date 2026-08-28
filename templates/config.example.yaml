@@ -68,7 +68,7 @@ harnesses:
 projects:
   - name: "project-alpha"
     repo: "my-org/project-alpha"
-    local_path: "C:/Projects/project-alpha"
+    local_path: "~/workspaces/project-alpha"  # Cross-platform path expansion (supports ~, $HOME, %USERPROFILE%, or relative paths)
     enabled: true
     context_files:
       - "docs/ARCHITECTURE.md"
@@ -77,19 +77,19 @@ projects:
       supervisor:
         enabled: true
         harness: "claude"
-        model: "claude-haiku-3-5"     # Fast, cost-efficient model for supervisor diagnosis
-        effort: "low"                 # Fast, lightweight consistency check
+        model: "claude-haiku-4-5"     # Fast, cost-efficient model for supervisor diagnosis
+        effort: "medium"              # Fast, lightweight consistency check
       architect:
         enabled: true
         harness: "claude"
         model: "claude-sonnet-5"
-        effort: "high"                # High reasoning effort for architectural decomposition
+        effort: "medium"              # High reasoning effort for architectural decomposition
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
       devtest:
         enabled: true
         harness: "antigravity"
-        model: "gemini-3.7-flash-thinking"  # Antigravity specifies reasoning effort in model name
+        model: "gemini-3.7-flash-medium"  # Antigravity specifies reasoning effort in model name
         label_trigger: "ready-for-dev"
         label_output: "needs-architect-review"
         branch_prefix: "feat/issue-"

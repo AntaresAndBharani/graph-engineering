@@ -29,6 +29,14 @@ def test_project_config_path_expansion(tmp_path: Path):
     assert proj.local_path == tmp_path.resolve()
     assert proj.enabled is True
 
+    # Test tilde expansion (OS-agnostic)
+    proj_tilde = ProjectConfig(
+        name="tilde-proj",
+        repo="org/tilde-repo",
+        local_path="~/some_workspace",
+    )
+    assert str(Path.home()) in str(proj_tilde.local_path)
+
 
 def test_load_config_from_file(tmp_path: Path):
     yaml_file = tmp_path / "test_config.yaml"
