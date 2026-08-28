@@ -119,12 +119,17 @@ async def run_bau_node(
     model = node_cfg.model or "gemini-3.7-flash-low"
     effort = node_cfg.effort
 
+    from rich.console import Console
+    console = Console()
+    console.print(f"  [{project.name}:bau] [bold cyan]⚡ Synthesizing {len(candidate_issues)} maintenance issues via {harness_name}[/bold cyan] ({model})")
+
     exit_code = await adapter.execute(
         prompt=prompt,
         cwd=project.local_path,
         log_file=log_file,
         model=model,
         effort=effort,
+        console_prefix=f"[{project.name}:bau]",
     )
 
     if exit_code != 0:

@@ -60,3 +60,17 @@ async def test_harness_execution_missing_binary(tmp_path: Path):
     exit_code = await adapter.execute("test prompt", tmp_path, log_file)
     assert exit_code == 127
     assert "not found in PATH" in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_harness_execution_with_console_prefix(tmp_path: Path):
+    cfg = HarnessConfig(
+        binary="non_existent_binary_xyz_123",
+        args=["{prompt}"],
+    )
+    adapter = AsyncHarnessAdapter("fake", cfg)
+    log_file = tmp_path / "test.log"
+
+    exit_code = await adapter.execute("test prompt", tmp_path, log_file, console_prefix="[test:prefix]")
+    assert exit_code == 127
+

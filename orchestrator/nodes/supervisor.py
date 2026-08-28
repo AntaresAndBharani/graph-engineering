@@ -156,9 +156,9 @@ async def run_supervisor_node(
                     "--body", f"🤖 **Supervisor Notification**: PR #{pr_num} has unresolved merge conflicts. Flagging for PO / Developer review (`needs-po-review`).",
                 ]
                 try:
-                    p1 = await asyncio.create_subprocess_exec(*cmd_label)
+                    p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     await p1.wait()
-                    p2 = await asyncio.create_subprocess_exec(*cmd_comment)
+                    p2 = await asyncio.create_subprocess_exec(*cmd_comment, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     await p2.wait()
                     healing_actions.append(f"Flagged PR #{pr_num} with needs-po-review.")
                 except Exception as e:
@@ -178,9 +178,9 @@ async def run_supervisor_node(
                     "--body", "🤖 **Supervisor Status Audit**: Issue was missing a managed workflow label. Automatically assigned `needs-triage` for Architect review.",
                 ]
                 try:
-                    p1 = await asyncio.create_subprocess_exec(*cmd_label)
+                    p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     await p1.wait()
-                    p2 = await asyncio.create_subprocess_exec(*cmd_comment)
+                    p2 = await asyncio.create_subprocess_exec(*cmd_comment, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     await p2.wait()
                     healing_actions.append(f"Labeled Issue #{issue_id} with needs-triage.")
                 except Exception as e:
@@ -194,14 +194,14 @@ async def run_supervisor_node(
                 cmd_comment = [
                     "gh", "issue", "comment", str(issue_id),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Supervisor SLA Alert**: Issue #{issue_id} has been open for {age_hours:.1f} hours (> 12 hours threshold). Flagged with `needs-po-review` for priority escalation.",
+                    "--body", f"🤖 **Supervisor SLA Alert**: Issue #{issue_id} has been open for {age_hours:.1f} hours (> 12h SLA threshold) without completion. Flagged for PO review (`needs-po-review`).",
                 ]
                 try:
-                    p1 = await asyncio.create_subprocess_exec(*cmd_label)
+                    p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     await p1.wait()
-                    p2 = await asyncio.create_subprocess_exec(*cmd_comment)
+                    p2 = await asyncio.create_subprocess_exec(*cmd_comment, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     await p2.wait()
-                    healing_actions.append(f"Escalated stale Issue #{issue_id} ({age_hours:.1f}h) with needs-po-review.")
+                    healing_actions.append(f"Escalated stale Issue #{issue_id} ({age_hours:.1f}h open) with needs-po-review.")
                 except Exception as e:
                     healing_actions.append(f"Failed to escalate Issue #{issue_id}: {e}")
 

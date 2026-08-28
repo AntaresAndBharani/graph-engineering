@@ -11,6 +11,11 @@ from orchestrator.config import HarnessConfig
 from orchestrator.logging import strip_ansi
 
 
+from rich.console import Console
+
+_console = Console()
+
+
 class AsyncHarnessAdapter:
     def __init__(self, name: str, config: HarnessConfig):
         self.name = name
@@ -73,16 +78,19 @@ class AsyncHarnessAdapter:
         model: Optional[str] = None,
         effort: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        console_prefix: Optional[str] = None,
     ) -> int:
         """
         Executes the CLI harness asynchronously in the project directory.
-        Streams stdout/stderr with ANSI stripping to log_file.
+        Streams stdout/stderr with ANSI stripping to log_file and live to console if console_prefix is provided.
         Gracefully kills process tree on timeout.
         """
         if not self.is_available():
             err_msg = f"[ERROR] Binary '{self.binary}' for harness '{self.name}' not found in PATH."
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{err_msg}\n")
+            if console_prefix:
+                _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
             return 127
 
         cmd = self.build_command(prompt, model=model, effort=effort)
@@ -114,6 +122,12 @@ class AsyncHarnessAdapter:
                         cleaned = strip_ansi(decoded)
                         f.write(cleaned)
                         f.flush()
+
+                        # Live real-time console streaming
+                        if console_prefix and cleaned.strip():
+                            for subline in cleaned.splitlines():
+                                if subline.strip():
+                                    _console.print(f"  [dim cyan]{console_prefix}[/dim cyan] [dim]{subline}[/dim]")
 
             await asyncio.wait_for(stream_output(), timeout=self.timeout_seconds)
             await process.wait()

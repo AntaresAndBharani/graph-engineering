@@ -104,6 +104,10 @@ async def run_reviewer_node(
     mergeable = target_pr.get("mergeable", "UNKNOWN")
 
     # 2. Acquire State Lock
+    from rich.console import Console
+    console = Console()
+    console.print(f"  [{project.name}:reviewer] [bold green]🔍 Evaluating PR #{pr_number}[/bold green] ('{pr_title}')")
+
     lock_acquired = await state_manager.acquire_lock(
         issue_id=pr_number,
         repo=project.repo,

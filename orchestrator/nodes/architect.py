@@ -197,12 +197,18 @@ async def run_architect_node(
     )
 
     # 4. Execute Agnostic Harness (Local OAuth Session)
+    from rich.console import Console
+    console = Console()
+    console.print(f"  [{project.name}:architect] [bold magenta]⚡ Starting Architect evaluation on Issue #{issue_id}[/bold magenta] ('{issue_title}')")
+    console.print(f"  [{project.name}:architect] [dim]Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+
     exit_code = await adapter.execute(
         prompt=prompt,
         cwd=project.local_path,
         log_file=log_file,
         model=node_cfg.model,
         effort=node_cfg.effort,
+        console_prefix=f"[{project.name}:architect]",
     )
 
     if exit_code != 0:
