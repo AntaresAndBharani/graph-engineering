@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
@@ -32,18 +33,15 @@ async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await proc.communicate()
-        remote_url = stdout.decode("utf-8", errors="replace").strip().lower()
+        remote_url = stdout.decode("utf-8").strip()
 
-        # Check if expected repo is a substring of the remote URL (handles https://github.com/org/repo.git and git@github.com:org/repo.git)
-        clean_expected = expected_repo.strip().lower().replace(".git", "")
-        clean_remote = remote_url.replace(".git", "")
-
-        if clean_expected not in clean_remote:
-            return False, f"Safety check failed: git remote '{remote_url}' does not match expected repo '{expected_repo}'."
-
-        return True, "Safety check passed."
+        # Normalize repo identifiers (e.g. git@github.com:org/repo.git or https://github.com/org/repo)
+        if expected_repo.lower() not in remote_url.lower():
+            return False, f"Safety check failed: local git remote '{remote_url}' does not match expected repo '{expected_repo}'."
     except Exception as e:
-        return False, f"Safety check failed: error reading git remote: {e}"
+        return False, f"Safety check failed: error reading remote URL: {e}"
+
+    return True, "Safety verified."
 
 
 async def run_devtest_node(
@@ -52,7 +50,7 @@ async def run_devtest_node(
     state_manager: StateManager,
 ) -> tuple[bool, str]:
     """
-    Executes 3AmigosDevTest Node (Code & Test Generation, PR Creation).
+    Executes 3Amigos DevTest Node (Implementation & Verification).
     Zero-token gating: if no issues labeled 'ready-for-dev', exits with 0 tokens consumed.
     """
     node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
@@ -72,7 +70,12 @@ async def run_devtest_node(
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 
-    # 2. Acquire State Lock
+    # 2. Destructive Git Safety Check
+    is_safe, safety_msg = await verify_git_safety(project.local_path, project.repo)
+    if not is_safe:
+        return False, safety_msg
+
+    # 3. Acquire State Lock
     harness_name = node_cfg.harness or "antigravity"
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
@@ -94,40 +97,27 @@ async def run_devtest_node(
         issue_id=issue_id,
     )
 
-    # 3. Destructive Git Safety Check
-    is_safe, safety_msg = await verify_git_safety(project.local_path, project.repo)
-    if not is_safe:
-        await state_manager.fail_job(
-            issue_id=issue_id,
-            repo=project.repo,
-            node_type="devtest",
-            error_message=f"Git safety check failed: {safety_msg}",
-        )
-        return False, f"Aborting DevTest for issue #{issue_id}: {safety_msg}"
-
-    # 4. Workspace Sanitization
+    # 4. Pre-Flight Cleanup: wipe aborted AI artifacts and ensure clean workspace
     try:
-        p1 = await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path))
-        await p1.wait()
-        p2 = await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(project.local_path))
-        await p2.wait()
-        p3 = await asyncio.create_subprocess_exec("git", "checkout", "main", cwd=str(project.local_path))
-        await p3.wait()
-        p4 = await asyncio.create_subprocess_exec("git", "pull", "origin", "main", cwd=str(project.local_path))
-        await p4.wait()
+        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path))).wait()
+        await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(project.local_path))).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", "main", cwd=str(project.local_path))).wait()
+        await (await asyncio.create_subprocess_exec("git", "pull", "origin", "main", cwd=str(project.local_path))).wait()
     except Exception as e:
         await state_manager.fail_job(
             issue_id=issue_id,
             repo=project.repo,
             node_type="devtest",
-            error_message=f"Workspace sanitization failed: {e}",
+            error_message=f"Pre-flight git reset failed: {e}",
         )
-        return False, f"Workspace sanitization failed: {e}"
+        return False, f"Pre-flight reset failed: {e}"
 
-    # 5. Execute Agnostic Harness (Local OAuth Session)
     adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+
+    # 5. Build Implementation Prompt
     prompt = (
-        f"You are the 3-Amigos Developer & QA Engineer. Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n"
+        f"You are the 3-Amigos Developer & QA Engineer. Implement the technical requirements for "
+        f"Issue #{issue_id} ('{issue_title}').\n"
         f"1. Read the Gherkin acceptance criteria in the issue and context files.\n"
         f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
         f"3. Implement the minimal clean code required to make all tests pass.\n"
@@ -139,6 +129,7 @@ async def run_devtest_node(
         cwd=project.local_path,
         log_file=log_file,
         model=node_cfg.model,
+        effort=node_cfg.effort,
     )
 
     if exit_code != 0:
@@ -149,20 +140,71 @@ async def run_devtest_node(
             error_message=f"Harness exited with code {exit_code}. See logs: {log_file.name}",
         )
         if shutil.which("gh"):
-            await asyncio.create_subprocess_exec(
+            p1 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
                 "--repo", project.repo,
                 "--remove-label", trigger,
                 "--add-label", "orchestration-failed",
             )
-            await asyncio.create_subprocess_exec(
+            await p1.wait()
+
+            p2 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "comment", str(issue_id),
                 "--repo", project.repo,
                 "--body", f"🤖 **DevTest Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
             )
+            await p2.wait()
         return False, f"DevTest execution failed on issue #{issue_id} (exit code {exit_code})."
 
-    # 6. Verify Git Diff (Did the model produce code?)
+    # 6. Verify if PR was already created by the harness (autonomous lifecycle)
+    branch_name = f"{branch_prefix}{issue_id}"
+    existing_pr: Optional[Dict[str, Any]] = None
+
+    if shutil.which("gh"):
+        proc_pr = await asyncio.create_subprocess_exec(
+            "gh", "pr", "list",
+            "--repo", project.repo,
+            "--search", f"#{issue_id}",
+            "--state", "open",
+            "--json", "number,title,labels,headRefName",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_pr, _ = await proc_pr.communicate()
+        if proc_pr.returncode == 0 and stdout_pr:
+            try:
+                prs = json.loads(stdout_pr.decode("utf-8", errors="replace"))
+                if prs:
+                    existing_pr = prs[0]
+            except Exception:
+                pass
+
+    if existing_pr:
+        pr_num = existing_pr["number"]
+        # Ensure PR has the output_label (needs-architect-review)
+        pr_labels = [l.get("name") for l in existing_pr.get("labels", []) if isinstance(l, dict)]
+        if output_label not in pr_labels and shutil.which("gh"):
+            p_pr_label = await asyncio.create_subprocess_exec(
+                "gh", "pr", "edit", str(pr_num),
+                "--repo", project.repo,
+                "--add-label", output_label,
+            )
+            await p_pr_label.wait()
+
+        # Transition parent issue to dev-implemented
+        if shutil.which("gh"):
+            p_issue_edit = await asyncio.create_subprocess_exec(
+                "gh", "issue", "edit", str(issue_id),
+                "--repo", project.repo,
+                "--remove-label", trigger,
+                "--add-label", "dev-implemented",
+            )
+            await p_issue_edit.wait()
+
+        await state_manager.release_lock(issue_id, project.repo, "devtest")
+        return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_num} ('{output_label}')."
+
+    # 7. Fallback: Check Git Diff (Did the model leave uncommitted code?)
     diff_proc = await asyncio.create_subprocess_exec(
         "git", "status", "--porcelain",
         cwd=str(project.local_path),
@@ -174,12 +216,11 @@ async def run_devtest_node(
             issue_id=issue_id,
             repo=project.repo,
             node_type="devtest",
-            error_message="Model finished but left 0 git changes.",
+            error_message="Model finished but left 0 git changes and no PR was created.",
         )
         return False, f"DevTest finished with 0 file changes for issue #{issue_id}."
 
-    # 7. Branch, Commit, Push & PR Lifecycle
-    branch_name = f"{branch_prefix}{issue_id}"
+    # 8. Branch, Commit, Push & PR Lifecycle (if uncommitted changes exist)
     try:
         await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, cwd=str(project.local_path))).wait()
         await (await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(project.local_path))).wait()
@@ -189,7 +230,7 @@ async def run_devtest_node(
         await (await asyncio.create_subprocess_exec("git", "push", "-u", "origin", branch_name, cwd=str(project.local_path))).wait()
 
         if shutil.which("gh"):
-            await asyncio.create_subprocess_exec(
+            p_pr = await asyncio.create_subprocess_exec(
                 "gh", "pr", "create",
                 "--repo", project.repo,
                 "--title", f"feat: resolve #{issue_id} - {issue_title}",
@@ -197,12 +238,15 @@ async def run_devtest_node(
                 "--label", output_label,
                 cwd=str(project.local_path),
             )
-            await asyncio.create_subprocess_exec(
+            await p_pr.wait()
+
+            p_edit = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
                 "--repo", project.repo,
                 "--remove-label", trigger,
                 "--add-label", "dev-implemented",
             )
+            await p_edit.wait()
     except Exception as e:
         await state_manager.fail_job(
             issue_id=issue_id,

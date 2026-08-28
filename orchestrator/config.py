@@ -12,6 +12,7 @@ class HarnessConfig(BaseModel):
     binary: str
     args: List[str] = Field(default_factory=list)
     model_flag: Optional[str] = None
+    effort_flag: Optional[str] = None
     timeout_minutes: int = 30
     retry_on_failure: int = 1
     env_vars: Dict[str, str] = Field(default_factory=dict)
@@ -27,11 +28,44 @@ class NodeConfig(BaseModel):
     enabled: bool = True
     harness: str = "claude"
     model: Optional[str] = None
+    effort: Optional[str] = None
     label_trigger: Optional[str] = None
     label_output: Optional[str] = None
     processed_label: Optional[str] = None
     branch_prefix: Optional[str] = "feat/issue-"
     auto_merge_approved: bool = True
+
+
+def resolve_path(v: str | Path) -> Path:
+    """
+    Robustly expands paths across platforms, supporting:
+    - Tilde (~) expansion
+    - POSIX $HOME / ${HOME} variables even when running in Windows shells
+    - Windows %USERPROFILE% / %APPDATA% variables on Linux/Windows
+    - Any custom environment variables ($VAR, %VAR%)
+    - Relative paths resolved against current working directory
+    """
+    if isinstance(v, Path):
+        raw = str(v)
+    else:
+        raw = str(v)
+
+    # 1. Expand ~ to user home
+    expanded = os.path.expanduser(raw)
+
+    # 2. Cross-platform home alias resolution ($HOME on Windows or %USERPROFILE% on POSIX)
+    home_dir = str(Path.home())
+    if "$HOME" in expanded:
+        expanded = expanded.replace("$HOME", home_dir)
+    if "${HOME}" in expanded:
+        expanded = expanded.replace("${HOME}", home_dir)
+    if "%USERPROFILE%" in expanded:
+        expanded = expanded.replace("%USERPROFILE%", home_dir)
+
+    # 3. Expand remaining environment variables
+    expanded = os.path.expandvars(expanded)
+
+    return Path(expanded).resolve()
 
 
 class ProjectConfig(BaseModel):
@@ -45,15 +79,13 @@ class ProjectConfig(BaseModel):
     @field_validator("local_path", mode="before")
     @classmethod
     def expand_local_path(cls, v: str | Path) -> Path:
-        if isinstance(v, str):
-            expanded = os.path.expandvars(os.path.expanduser(v))
-            return Path(expanded).resolve()
-        return v.resolve()
+        return resolve_path(v)
 
 
 class SettingsConfig(BaseModel):
     poll_interval_seconds: int = 300
     supervisor_interval_seconds: int = 3600
+    bau_interval_seconds: int = 86400  # 1 day / 24 hours interval for BAU maintenance
     max_concurrent_jobs: int = 4
     db_path: str = "~/.config/orchestrator/state.db"
     log_dir: str = "~/.config/orchestrator/logs"
@@ -61,15 +93,13 @@ class SettingsConfig(BaseModel):
 
     @property
     def resolved_db_path(self) -> Path:
-        expanded = os.path.expandvars(os.path.expanduser(self.db_path))
-        p = Path(expanded).resolve()
+        p = resolve_path(self.db_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
     @property
     def resolved_log_dir(self) -> Path:
-        expanded = os.path.expandvars(os.path.expanduser(self.log_dir))
-        p = Path(expanded).resolve()
+        p = resolve_path(self.log_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -82,6 +112,8 @@ DEFAULT_MANAGED_LABELS: List[LabelConfig] = [
     LabelConfig(name="orchestration-failed", color="B60205", description="AI Harness execution failed"),
     LabelConfig(name="needs-po-review", color="D93F0B", description="Supervisor flagged methodological conflict"),
     LabelConfig(name="architect-processed", color="D4C5F9", description="Architect decomposition complete"),
+    LabelConfig(name="tech-debt", color="FBCA04", description="Technical debt or non-blocking improvement"),
+    LabelConfig(name="enhancement", color="A2EEEF", description="New feature request or enhancement"),
 ]
 
 DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
@@ -89,13 +121,15 @@ DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
         binary="claude",
         args=["-p", "{prompt}", "--dangerously-skip-permissions"],
         model_flag="--model",
+        effort_flag="--effort",
         timeout_minutes=30,
         retry_on_failure=1,
     ),
     "antigravity": HarnessConfig(
         binary="agy",
-        args=["run", "{prompt}"],
+        args=["-p", "{prompt}", "--dangerously-skip-permissions", "--print-timeout", "45m"],
         model_flag="--model",
+        effort_flag="--effort",
         timeout_minutes=45,
         retry_on_failure=1,
     ),
@@ -134,7 +168,7 @@ def get_default_config_search_paths() -> List[Path]:
 
 def find_config_file(custom_path: Optional[Path | str] = None) -> Optional[Path]:
     if custom_path:
-        p = Path(os.path.expandvars(os.path.expanduser(str(custom_path)))).resolve()
+        p = resolve_path(custom_path)
         if p.exists() and p.is_file():
             return p
         raise FileNotFoundError(f"Specified configuration file does not exist: {p}")

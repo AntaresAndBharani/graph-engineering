@@ -18,6 +18,7 @@ class AsyncHarnessAdapter:
         self.binary = config.binary
         self.args_template = config.args
         self.model_flag = config.model_flag
+        self.effort_flag = config.effort_flag
         self.timeout_seconds = config.timeout_minutes * 60
         self.retry_limit = config.retry_on_failure
         self.env_vars = config.env_vars
@@ -26,11 +27,18 @@ class AsyncHarnessAdapter:
         """Checks if the CLI executable is available in PATH."""
         return shutil.which(self.binary) is not None
 
-    def build_command(self, prompt: str, model: Optional[str] = None) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+    ) -> List[str]:
         """Constructs the command argument list."""
         cmd = [self.binary]
         if model and self.model_flag:
             cmd.extend([self.model_flag, model])
+        if effort and self.effort_flag:
+            cmd.extend([self.effort_flag, str(effort)])
 
         for arg in self.args_template:
             cmd.append(arg.replace("{prompt}", prompt))
@@ -63,6 +71,7 @@ class AsyncHarnessAdapter:
         cwd: Path,
         log_file: Path,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> int:
         """
@@ -76,7 +85,7 @@ class AsyncHarnessAdapter:
                 f.write(f"\n{err_msg}\n")
             return 127
 
-        cmd = self.build_command(prompt, model)
+        cmd = self.build_command(prompt, model=model, effort=effort)
         env = self.build_env(extra_env)
         log_file.parent.mkdir(parents=True, exist_ok=True)
 

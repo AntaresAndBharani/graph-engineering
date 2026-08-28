@@ -15,4 +15,8 @@ dist/
 .coverage
 htmlcov/
 state.db*
+.venv/
+venv/
+env/
+
 

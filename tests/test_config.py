@@ -29,6 +29,41 @@ def test_project_config_path_expansion(tmp_path: Path):
     assert proj.local_path == tmp_path.resolve()
     assert proj.enabled is True
 
+    # Test tilde expansion (OS-agnostic)
+    proj_tilde = ProjectConfig(
+        name="tilde-proj",
+        repo="org/tilde-repo",
+        local_path="~/some_workspace",
+    )
+    assert str(Path.home()) in str(proj_tilde.local_path)
+
+    # Test $HOME expansion on any platform
+    proj_dollar_home = ProjectConfig(
+        name="dollar-home-proj",
+        repo="org/dollar-home",
+        local_path="$HOME/workspaces/my-app",
+    )
+    assert "$HOME" not in str(proj_dollar_home.local_path)
+    assert str(Path.home()) in str(proj_dollar_home.local_path)
+
+    # Test ${HOME} expansion
+    proj_bracket_home = ProjectConfig(
+        name="bracket-home-proj",
+        repo="org/bracket-home",
+        local_path="${HOME}/workspaces/my-app",
+    )
+    assert "${HOME}" not in str(proj_bracket_home.local_path)
+    assert str(Path.home()) in str(proj_bracket_home.local_path)
+
+    # Test %USERPROFILE% expansion
+    proj_win_home = ProjectConfig(
+        name="win-home-proj",
+        repo="org/win-home",
+        local_path="%USERPROFILE%/workspaces/my-app",
+    )
+    assert "%USERPROFILE%" not in str(proj_win_home.local_path)
+    assert str(Path.home()) in str(proj_win_home.local_path)
+
 
 def test_load_config_from_file(tmp_path: Path):
     yaml_file = tmp_path / "test_config.yaml"

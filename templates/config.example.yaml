@@ -10,6 +10,7 @@ version: 2
 settings:
   poll_interval_seconds: 300          # 5 minutes idle sweep interval
   supervisor_interval_seconds: 3600   # 1 hour consistency supervisor check
+  bau_interval_seconds: 86400         # 1 day / 24 hours interval for BAU maintenance
   max_concurrent_jobs: 4              # Concurrency threshold to prevent RAM exhaustion
   db_path: "~/.config/orchestrator/state.db"
   log_dir: "~/.config/orchestrator/logs"
@@ -38,6 +39,12 @@ managed_labels:
   - name: "architect-processed"
     color: "D4C5F9"
     description: "Architect decomposition complete"
+  - name: "tech-debt"
+    color: "FBCA04"
+    description: "Technical debt or non-blocking improvement"
+  - name: "enhancement"
+    color: "A2EEEF"
+    description: "New feature request or enhancement"
 
 # Pluggable AI CLI Harness Adapters
 # CLIs inherit active local OAuth user subscriptions (zero raw API token charges).
@@ -46,20 +53,22 @@ harnesses:
     binary: "claude"
     args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
     model_flag: "--model"
+    effort_flag: "--effort"           # Claude CLI supports level of effort flag (--effort low|medium|high|max)
     timeout_minutes: 30
     retry_on_failure: 1
 
   antigravity:
     binary: "agy"
-    args: ["run", "{prompt}"]
+    args: ["-p", "{prompt}", "--dangerously-skip-permissions", "--print-timeout", "45m"]
     model_flag: "--model"
+    effort_flag: "--effort"           # Antigravity CLI supports level of effort flag (--effort low|medium|high)
     timeout_minutes: 45
     retry_on_failure: 1
 
   devin:
     binary: "devin"
     args: ["-p", "{prompt}", "--permission-mode", "bypass"]
-    model_flag: "--model"
+    model_flag: "--model"             # Devin model selection is managed via model name
     timeout_minutes: 60
     retry_on_failure: 1
 
@@ -67,7 +76,7 @@ harnesses:
 projects:
   - name: "project-alpha"
     repo: "my-org/project-alpha"
-    local_path: "C:/Projects/project-alpha"
+    local_path: "~/workspaces/project-alpha"  # Cross-platform path expansion (supports ~, $HOME, %USERPROFILE%, or relative paths)
     enabled: true
     context_files:
       - "docs/ARCHITECTURE.md"
@@ -76,17 +85,31 @@ projects:
       supervisor:
         enabled: true
         harness: "claude"
+        model: "claude-haiku-4-5"     # Fast, cost-efficient model for supervisor diagnosis
+        effort: "medium"              # Fast, lightweight consistency check
       architect:
         enabled: true
         harness: "claude"
         model: "claude-sonnet-5"
+        effort: "medium"              # High reasoning effort for architectural decomposition
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
       devtest:
         enabled: true
         harness: "antigravity"
-        model: "gemini-3.7-flash"
+        model: "gemini-3.7-flash-medium"  # Antigravity specifies reasoning effort in model name
         label_trigger: "ready-for-dev"
         label_output: "needs-architect-review"
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
+      reviewer:
+        enabled: true
+        harness: "claude"
+        model: "claude-sonnet-5"
+        effort: "medium"
+        label_trigger: "needs-architect-review"
+        auto_merge_approved: true
+      bau:
+        enabled: true
+        harness: "antigravity"
+        model: "gemini-3.7-flash-low"     # Fast, lightweight model for daily maintenance grouping

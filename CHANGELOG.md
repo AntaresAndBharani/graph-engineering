@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Implemented the **Decoupled, Agnostic Multi-Agent Orchestrator CLI (`graph-orchestrator`)** in Python (`pyproject.toml`, `orchestrator/`), decoupling workflow execution and state from target application repositories.
 - Added **Zero-Token Idle Polling**: GitHub issues/PRs are queried deterministically using batched GitHub CLI / GraphQL queries, spending zero AI tokens during idle periods.
 - Added **Agnostic AI CLI Harness Adapter Pattern** (`orchestrator/harness.py`): Supports interchangeable execution across `claude` (Claude Code), `agy` (Antigravity CLI), `devin`, or custom runners via declarative configuration (`config.yaml`).
+- Added **Model Level of Effort / Reasoning Configuration**: Supported via `effort_flag` in `HarnessConfig` (e.g. `--effort low|medium|high|max` for Claude), embedded model naming for Antigravity (`gemini-3.7-flash-thinking`), and `effort` specifications in `NodeConfig`.
 - Implemented **Native OAuth Subscription Token Support**: Harnesses seamlessly inherit user profile paths and OAuth credentials, utilizing developers' active hired subscriptions rather than requiring raw API tokens.
 - Implemented **Consistency Supervisor Node (Node 0)** (`orchestrator/nodes/supervisor.py`): Scheduled/startup self-healing node with zero-token anomaly filtering (detects merge conflicts, orphaned PRs, stuck locks) that auto-resolves state or escalates to `needs-po-review`.
 - Implemented **Architect Node (Node 1)** (`orchestrator/nodes/architect.py`): Evaluates `needs-triage` issues, decomposes stories into INVEST/3-amigos subtasks with Gherkin criteria, and provisions child issues labeled `ready-for-dev`.
@@ -17,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Implemented **State Locking & Concurrency Engine** (`orchestrator/db.py`): Asynchronous SQLite database (`state.db`) configured with Write-Ahead Logging (WAL) and TTL lock expiration to prevent duplicate executions and recover from daemon restarts.
 - Implemented **Structured Logging & ANSI Stripping** (`orchestrator/logging.py`): Dedicated per-project/per-node log hierarchies (`~/.config/orchestrator/logs/<project>/<node>/`) with active regex ANSI filtering and automatic rotation.
 - Added **Automated Label Housekeeping** (`orchestrator/housekeeping.py`): Automatic idempotent provisioning of workflow taxonomy labels across all registered repositories using `gh label create --force`.
-- Added **CLI Command Suite** (`orchestrator/cli.py`): Full Typer + Rich CLI supporting `run`, `watch` (live dashboard), `list`, `doctor`, `ingest`, `clean`, and `logs`.
+- Added **CLI Command Suite** (`orchestrator/cli.py`): Full Typer + Rich CLI supporting `run`, `watch` (live dashboard), `list`, `doctor` (with optional `--sync-labels`), `init`, `labels` (taxonomy sync/list), `ingest`, `clean`, and `logs`.
 - Added full unit and integration test suite (`tests/`) achieving 100% pass rate across configuration, state locking, harness execution, zero-token gating, and CLI diagnostics.
 - Added GitHub Actions CI workflow (`.github/workflows/ci.yml`) matrix-testing across Python 3.11 and 3.12 with automated build verification.
 - Added configuration template `templates/config.example.yaml`.

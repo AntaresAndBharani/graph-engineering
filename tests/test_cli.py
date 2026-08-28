@@ -44,3 +44,31 @@ def test_cli_doctor(tmp_path):
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "Orchestrator System Diagnostics" in result.stdout
+
+
+def test_cli_init(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["init", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert "Initializing Graph Orchestrator" in result.stdout
+    assert "SQLite WAL State Database initialized" in result.stdout
+
+
+def test_cli_labels_help():
+    result = runner.invoke(app, ["labels", "--help"])
+    assert result.exit_code == 0
+    assert "Provisions and synchronizes workflow taxonomy labels" in result.stdout
