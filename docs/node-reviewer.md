@@ -1,6 +1,8 @@
-# Reviewer & Gatekeeper Node (`run_reviewer_node`)
+# Reviewer & Gatekeeper Node (`node-reviewer`)
 
-The **Reviewer Node** is the deterministic gatekeeper and auto-merge engine of the Graph Engineering pipeline. It verifies remote CI test suites, checks git mergeability, and merges approved PRs into `main`.
+**Module**: [`orchestrator/nodes/reviewer.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/reviewer.py)
+
+The **Reviewer Node** acts as Node 3 in the pipeline—a deterministic quality gatekeeper that verifies remote CI test suites, checks git mergeability, and merges approved PRs into `main`.
 
 ---
 
@@ -45,7 +47,7 @@ flowchart TD
 
 ---
 
-## ⚙️ Configuration Example
+## ⚙️ Configuration
 
 Configured in `~/.config/orchestrator/config.yaml`:
 

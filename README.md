@@ -1,116 +1,84 @@
-# Graph Engineering — Autonomous Agentic SDLC
+# Graph Orchestrator (`graph-orchestrator`)
 
-**Graph Engineering** is a decoupled, model-agnostic multi-agent orchestration framework that automates the complete Software Development Lifecycle (SDLC) as a directed state graph.
-
-It runs locally on the developer's machine using active developer OAuth subscriptions (`Claude Code`, `Google Antigravity`, `Devin`) to execute autonomous agent loops with **zero per-token API fees**.
+A decoupled, local-first Python CLI daemon for autonomous multi-agent engineering pipelines. The orchestrator decouples workflow automation from application repositories, providing zero-token idle polling via batched GitHub CLI/GraphQL queries, pluggable AI CLI harnesses, and state locking via SQLite with TTL protection.
 
 ---
 
-## 🏛️ Autonomous 5-Node Architecture
+## ✨ Features
 
-```mermaid
-flowchart TD
-    subgraph Watchdog & Supervision
-        SUP["0. Consistency Supervisor\n(Zero-token Anomaly Audit & 12h SLA Monitoring)"]
-    end
-
-    subgraph Core Autonomous Development Graph
-        A["1. Architect Node\n(Autonomous Triage, Routing & INVEST Subtasks)"]
-        B["2. DevTest Node\n(3-Amigos Implementation, Test Harness & PR)"]
-        C["3. Reviewer Node\n(Deterministic 100% Green CI Gate & Auto-Merge)"]
-        
-        A -->|ready-for-dev| B
-        B -->|needs-architect-review| C
-        C -->|Merged| Main["main Branch (Published)"]
-    end
-
-    subgraph Maintenance & Continuous Improvement
-        BAU["4. BAU Maintenance Node\n(Daily 24h sweep: Consolidates tech-debt & enhancements)"]
-        BAU -->|needs-triage| A
-    end
-
-    SUP -.->|needs-triage / needs-po-review| A
-```
-
-| Node | Role | Trigger Label / Cadence | Output Label / Action | Harness / Model |
-|------|------|-------------------------|-----------------------|-----------------|
-| **Supervisor** | Watchdog & SLA monitor | Every 1 hour (periodic) | Flags `needs-triage` (missing label) or `needs-po-review` (> 12h SLA) | Deterministic ($0) + `gemini-3.7-flash-low` |
-| **Architect** | Triage & Decomposition | `needs-triage` | Classifies tasks, creates subtasks (`ready-for-dev`), sets parent `architect-processed` | `claude` (`claude-sonnet-5`) |
-| **DevTest** | 3-Amigos Implementation | `ready-for-dev` | Writes code & tests, opens PR (`needs-architect-review`), marks subtask `dev-implemented` | `antigravity` (`gemini-3.7-flash-medium`) |
-| **Reviewer** | CI Gatekeeper & Merger | `needs-architect-review` | Verifies CI is 100% green, squash-merges PR, deletes branch | Deterministic ($0) + `claude-sonnet-5` |
-| **BAU** | Backlog Consolidation | Every 24 hours (periodic) | Groups `tech-debt` & `enhancement` into new stories (`needs-triage`), auto-closes old issues | `antigravity` (`gemini-3.7-flash-low`) |
+- **Zero-Token Polling**: Deterministic GitHub CLI checks run first. If no issues or pull requests match trigger labels, **0 LLM tokens are consumed**.
+- **Agnostic AI Harnesses**: Swap between Claude Code CLI (`claude`), Antigravity CLI (`agy`), Devin CLI (`devin`), or custom tools via simple string configuration changes without code modifications.
+- **Repository Isolation**: Managed repositories contain only application code and standard GitHub issues/PRs. Orchestrator logic lives strictly in the control plane.
+- **Consistency Supervisor (Node 0)**: Evaluates repository health, auto-heals stalled/interrupted states, audits label taxonomies, monitors 12-hour issue SLAs, and escalates unresolvable conflicts to humans.
+- **Concurrency & Parallel Workers**: An `aiosqlite` state database prevents duplicate execution across nodes, while independent async workers process multiple repositories concurrently in parallel.
+- **Reactive Back-to-Back Chaining**: When a node completes active work, downstream nodes trigger immediately without waiting for the cooldown interval.
 
 ---
 
-## 🚀 Quick Start
+## 📋 Prerequisites
 
-### 1. Prerequisites
 - **Python 3.11+**
-- **Git** & **GitHub CLI (`gh`)** authenticated (`gh auth login`)
-- Local CLI agent(s) installed and logged in:
-  - **Claude Code CLI**: `claude` (Anthropic subscription)
-  - **Antigravity CLI**: `agy` (Google Antigravity subscription)
-  - **Devin CLI** (Optional): `devin`
+- **Git**
+- **GitHub CLI (`gh`)** authenticated with repository access (`gh auth login`)
+- Local CLI AI agent(s) logged in under active developer subscriptions:
+  - **Claude Code CLI** (`claude`)
+  - **Antigravity CLI** (`agy`)
+  - **Devin CLI** (`devin`, optional)
 
-### 2. Installation
-Clone and install the package in editable mode:
-```bash
-git clone https://github.com/AntaresAndBharani/graph-engineering.git
-cd graph-engineering
+---
+
+## 📦 Installation
+
+Clone the repository and install the orchestrator in editable mode using a virtual environment:
+
+### PowerShell (Windows)
+```powershell
+# Create and activate virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# Install package and dependencies in editable mode
 pip install -e .
 ```
 
-### 3. Verify Environment (`doctor`)
-Run system diagnostics to verify CLI binaries, GitHub CLI authentication, SQLite state DB, and configured project paths:
+### Bash (macOS / Linux)
 ```bash
-orchestrator doctor
-```
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
 
-### 4. Initialize Configuration & Provision GitHub Labels
-```bash
-# Creates ~/.config/orchestrator/config.yaml if not already present
-orchestrator init
-
-# Idempotently syncs all 9 workflow labels on configured GitHub repositories
-orchestrator labels
-```
-
-### 5. Run the Autonomous Orchestrator
-```bash
-# Start continuous autonomous daemon
-orchestrator watch
-
-# Or trigger an on-demand single evaluation pass
-orchestrator run --project crosstrainingapp
+# Install package and dependencies in editable mode
+pip install -e .
 ```
 
 ---
 
-## 🏷️ Standard Workflow Taxonomy Labels
+## ⚙️ Configuration
 
-| Label | Color | Purpose |
-|-------|-------|---------|
-| `needs-triage` | `#E2B7E1` | Raw or consolidated story waiting for Architect triage |
-| `ready-for-dev` | `#0E8A16` | Actionable technical subtask ready for DevTest implementation |
-| `needs-architect-review` | `#FBCA04` | Open PR ready for Reviewer / CI evaluation |
-| `dev-implemented` | `#C2E0C6` | Subtask whose code has been implemented and PR opened |
-| `architect-processed` | `#D4C5F9` | Parent User Story whose subtasks have been created |
-| `orchestration-failed` | `#B60205` | Task where execution encountered a harness error or timeout |
-| `needs-po-review` | `#D93F0B` | Merge conflicts, ambiguous requirements, or issues open > 12 hours |
-| `tech-debt` | `#FBCA04` | Non-blocking technical debt or refactoring item for BAU Node |
-| `enhancement` | `#A2EEEF` | Feature improvement or enhancement for BAU Node |
+The orchestrator relies on a global configuration file located at `%USERPROFILE%\.orchestrator\config.yaml` (Windows) or `~/.config/orchestrator/config.yaml` (macOS/Linux).
 
----
+To initialize your configuration, copy the provided template:
 
-## ⚙️ Configuration Example (`~/.config/orchestrator/config.yaml`)
+```powershell
+# Windows
+New-Item -ItemType Directory -Force -Path "$HOME\.orchestrator"
+Copy-Item .\templates\config.example.yaml "$HOME\.orchestrator\config.yaml"
+```
 
+```bash
+# Linux / macOS
+mkdir -p ~/.config/orchestrator
+cp templates/config.example.yaml ~/.config/orchestrator/config.yaml
+```
+
+### Configuration Example
 ```yaml
 version: "1.0"
 
 settings:
-  poll_interval_seconds: 300
-  supervisor_interval_seconds: 3600
-  bau_interval_seconds: 86400
+  poll_interval_seconds: 300          # 5 minutes idle cooldown
+  supervisor_interval_seconds: 3600   # 1 hour supervisor audit
+  bau_interval_seconds: 86400         # 24 hours daily BAU sweep
   db_path: "~/.config/orchestrator/state.db"
   log_dir: "~/.config/orchestrator/logs"
 
@@ -137,6 +105,7 @@ projects:
         enabled: true
         harness: "claude"
         model: "claude-sonnet-5"
+        effort: "medium"
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
       devtest:
@@ -159,11 +128,61 @@ projects:
 
 ---
 
-## 🧪 Testing & Quality Gates
+## 💻 CLI Commands
 
-Run the local test suite:
+Built with `typer` and `rich` for live diagnostics and formatted tables:
+
+| Command | Description |
+|---------|-------------|
+| `orchestrator doctor` | Verifies system prerequisites, tool availability in PATH (`gh`, `git`, `claude`, `agy`), and database connectivity. |
+| `orchestrator list` | Displays a formatted table of all registered repositories, paths, and active harness assignments. |
+| `orchestrator init` | Initializes the SQLite state database and provisions managed labels across repositories. |
+| `orchestrator labels` | Idempotently synchronizes workflow taxonomy labels on GitHub. |
+| `orchestrator run [--project <NAME>] [--node <NAME>] [--force]` | Executes an on-demand evaluation pass across all active projects or a targeted repository. |
+| `orchestrator watch [--interval <SEC>]` | Starts the continuous background polling daemon with parallel multi-project workers. |
+| `orchestrator logs <PROJECT> [--lines <N>]` | Streams recent execution traces and stdout/stderr from AI subprocesses for troubleshooting. |
+| `orchestrator clean [--stale-only]` | Forces a cleanup of stale/expired locks in the SQLite state database. |
+
+---
+
+## 🏛️ Node Architecture
+
+```mermaid
+flowchart TD
+    subgraph Watchdog & Supervision
+        SUP["Node 0: Supervisor\n(docs/node-supervisor.md)"]
+    end
+
+    subgraph Core Autonomous Development Graph
+        A["Node 1: Architect\n(docs/node-architect.md)"]
+        B["Node 2: 3-Amigos DevTest\n(docs/node-devtest.md)"]
+        C["Node 3: Reviewer\n(docs/node-reviewer.md)"]
+        
+        A -->|ready-for-dev| B
+        B -->|needs-architect-review| C
+        C -->|Merged| Main["main Branch"]
+    end
+
+    subgraph Continuous Maintenance
+        BAU["Node 4: BAU Maintenance\n(docs/node-bau.md)"]
+        BAU -->|needs-triage| A
+    end
+
+    SUP -.->|needs-triage / needs-po-review| A
+```
+
+- **[Supervisor (Node 0)](docs/node-supervisor.md)**: Audits repository methodology compliance, detects git merge conflicts, heals orphaned locks, and monitors 12-hour issue SLAs.
+- **[Architect (Node 1)](docs/node-architect.md)**: Ingests raw User Stories (`needs-triage`), performs multi-category classification, and decomposes complex features into atomic subtasks (`ready-for-dev`).
+- **[3-Amigos DevTest (Node 2)](docs/node-devtest.md)**: Validates git working trees, implements code and tests, verifies builds, and creates Pull Requests (`needs-architect-review`).
+- **[Reviewer Gatekeeper (Node 3)](docs/node-reviewer.md)**: Deterministically gates PRs against remote CI (100% green requirement) and performs squash auto-merges into `main`.
+- **[BAU Maintenance (Node 4)](docs/node-bau.md)**: Daily 24-hour sweep under `gemini-3.7-flash-low` to consolidate `tech-debt` and `enhancement` issues into cohesive User Stories.
+
+---
+
+## 🧪 Testing & CI
+
+Run unit and integration tests:
 ```bash
 pytest -v
 ```
-
-All Pull Requests and commits to `main` are automatically verified by GitHub Actions (`.github/workflows/ci.yml`) against Python 3.11 and 3.12.
+All commits to `main` and Pull Requests are automatically verified across Python 3.11 and 3.12 via GitHub Actions.

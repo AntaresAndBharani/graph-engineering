@@ -1,6 +1,8 @@
-# Architect & Triage Node (`run_architect_node`)
+# Architect & Triage Node (`node-architect`)
 
-The **Architect Node** is the autonomous technical reasoning and classification engine of the Graph Engineering pipeline. It triages raw requirements, classifies incoming work, and decomposes complex User Stories into testable subtasks.
+**Module**: [`orchestrator/nodes/architect.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/architect.py)
+
+The **Architect Node** acts as Node 1 in the pipeline—an autonomous technical reasoning, triage, and task decomposition engine.
 
 ---
 
@@ -43,7 +45,7 @@ flowchart TD
 
 ---
 
-## ⚙️ Configuration Example
+## ⚙️ Configuration
 
 Configured in `~/.config/orchestrator/config.yaml`:
 

@@ -1,6 +1,8 @@
-# BAU Maintenance Node (`run_bau_node`)
+# BAU Maintenance Node (`node-bau`)
 
-The **BAU (Business-As-Usual) Node** is the continuous maintenance and technical backlog consolidation engine of the Graph Engineering pipeline. It runs on a periodic daily schedule (every 24 hours) to convert non-blocking technical debt and enhancements into architect-ready User Stories.
+**Module**: [`orchestrator/nodes/bau.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/bau.py)
+
+The **BAU (Business-As-Usual) Node** acts as Node 4 in the pipeline—a continuous maintenance and technical debt consolidation engine running on a periodic daily schedule (every 24 hours).
 
 ---
 
@@ -42,7 +44,7 @@ flowchart TD
 
 ---
 
-## ⚙️ Configuration Example
+## ⚙️ Configuration
 
 Configured in `~/.config/orchestrator/config.yaml`:
 

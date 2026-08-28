@@ -1,6 +1,8 @@
-# 3-Amigos DevTest Node (`run_devtest_node`)
+# 3-Amigos DevTest Node (`node-devtest`)
 
-The **DevTest Node** is the core implementation and verification engine of the Graph Engineering pipeline. It implements technical subtasks, writes unit and regression tests, verifies builds, and creates pull requests.
+**Module**: [`orchestrator/nodes/devtest.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/devtest.py)
+
+The **DevTest Node** acts as Node 2 in the pipeline—responsible for test-driven code implementation, local test suite verification, and pull request creation.
 
 ---
 
@@ -48,7 +50,7 @@ flowchart TD
 
 ---
 
-## ⚙️ Configuration Example
+## ⚙️ Configuration
 
 Configured in `~/.config/orchestrator/config.yaml`:
 
