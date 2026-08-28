@@ -8,6 +8,7 @@ from orchestrator.cli import app, run_project_cycle
 from orchestrator.config import GlobalConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
+from orchestrator.logging import strip_ansi
 
 runner = CliRunner()
 
@@ -90,8 +91,9 @@ projects:
 def test_cli_stop_help():
     result = runner.invoke(app, ["stop", "--help"])
     assert result.exit_code == 0
-    assert "Gracefully halts the running background daemon" in result.stdout
-    assert "--force" in result.stdout
+    clean_stdout = strip_ansi(result.stdout)
+    assert "Gracefully halts the running background daemon" in clean_stdout
+    assert "--force" in clean_stdout
 
 
 def test_harness_terminate_all_active():
