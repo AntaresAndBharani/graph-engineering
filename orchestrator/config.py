@@ -124,8 +124,9 @@ DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
     ),
     "antigravity": HarnessConfig(
         binary="agy",
-        args=["run", "{prompt}"],
+        args=["-p", "{prompt}", "--dangerously-skip-permissions"],
         model_flag="--model",
+        effort_flag="--effort",
         timeout_minutes=45,
         retry_on_failure=1,
     ),

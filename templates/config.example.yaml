@@ -52,8 +52,9 @@ harnesses:
 
   antigravity:
     binary: "agy"
-    args: ["run", "{prompt}"]
-    model_flag: "--model"             # For Antigravity, reasoning/effort is embedded in the model name (e.g. gemini-3.7-flash-thinking)
+    args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
+    model_flag: "--model"
+    effort_flag: "--effort"           # Antigravity CLI supports level of effort flag (--effort low|medium|high)
     timeout_minutes: 45
     retry_on_failure: 1
 
