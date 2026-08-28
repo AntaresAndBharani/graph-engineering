@@ -77,6 +77,7 @@ projects:
       supervisor:
         enabled: true
         harness: "claude"
+        model: "claude-haiku-3-5"     # Fast, cost-efficient model for supervisor diagnosis
         effort: "low"                 # Fast, lightweight consistency check
       architect:
         enabled: true
