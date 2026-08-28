@@ -50,6 +50,46 @@ async def fetch_issues_with_label(
         return []
 
 
+async def fetch_all_open_issues(
+    repo: str,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Fetches all open issues from GitHub using gh CLI for status auditing.
+    Consumes 0 LLM tokens.
+    """
+    if not shutil.which("gh"):
+        return []
+
+    cmd = [
+        "gh",
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--json",
+        "number,title,body,labels,createdAt,updatedAt,url",
+        "--limit",
+        str(limit),
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0 or not stdout:
+            return []
+        data = json.loads(stdout.decode("utf-8", errors="replace"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 async def fetch_open_prs(
     repo: str,
     label: Optional[str] = None,

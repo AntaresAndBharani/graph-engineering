@@ -73,3 +73,46 @@ async def test_bau_node_schedule_gating(tmp_path: Path):
     ran, msg = await run_bau_node(project, config, state_manager, force=False)
     assert ran is False
     assert "not due" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_status_audit_and_sla(tmp_path: Path, monkeypatch):
+    import time
+    from orchestrator import poller
+    from orchestrator.nodes.supervisor import check_repository_anomalies
+
+    # 15 hours ago
+    stale_iso = "2020-01-01T00:00:00Z"
+
+    mock_issues = [
+        # Issue 1: Unclassified (no managed label)
+        {"number": 101, "title": "Unclassified Issue", "labels": [], "createdAt": "2026-01-01T00:00:00Z"},
+        # Issue 2: Stale (> 12h) on active workflow
+        {"number": 102, "title": "Stale Story", "labels": [{"name": "needs-triage"}], "createdAt": stale_iso},
+        # Issue 3: Tech debt (excluded from 12h SLA)
+        {"number": 103, "title": "Tech Debt Item", "labels": [{"name": "tech-debt"}], "createdAt": stale_iso},
+    ]
+
+    async def mock_fetch_open_issues(*args, **kwargs):
+        return mock_issues
+
+    async def mock_fetch_open_prs(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(poller, "fetch_all_open_issues", mock_fetch_open_issues)
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_open_prs)
+
+    project = ProjectConfig(name="test", repo="org/repo", local_path=str(tmp_path))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    anomalies = await check_repository_anomalies(project, state_manager)
+    anomaly_types = [a["type"] for a in anomalies]
+    anomaly_issues = [a.get("issue_id") for a in anomalies]
+
+    assert "UNCLASSIFIED_ISSUE" in anomaly_types
+    assert 101 in anomaly_issues
+    assert "STALE_ISSUE_SLA" in anomaly_types
+    assert 102 in anomaly_issues
+    # 103 (tech-debt) must NOT trigger STALE_ISSUE_SLA
+    assert 103 not in anomaly_issues
