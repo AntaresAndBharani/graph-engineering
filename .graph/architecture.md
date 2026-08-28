@@ -59,7 +59,7 @@ flowchart TD
 
 ---
 
-## 🧱 Layer Boundaries & Clean Architecture
+## 🧱 Layer Boundaries & Clean Architecture (Domain, Data, Presentation/UI separation of concerns)
 
 The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports and Adapters)**. The fundamental architectural rule is the **Dependency Rule**: dependencies point strictly inward toward the Domain and Application cores. External infrastructure, databases, and UI CLI commands must never dictate or leak into domain models.
 
@@ -193,6 +193,23 @@ exit_code = await adapter.execute(
 - **TTL Lock Protection**: Every task execution is bounded by a Time-To-Live (TTL). If a daemon crashes or an agent hangs, subsequent worker cycles automatically detect expired locks, transition their state to `FAILED`, and recover execution safely.
 - **Inter-Process Communication (IPC) via DB**: Graceful daemon shutdown (`orchestrator stop`) sets a `stop_requested` flag in SQLite, allowing active workers to finish their current atomic unit without starting new nodes.
 
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE: Initialize / Start Cycle
+    IDLE --> ZERO_TOKEN_GATE: Poll Local State (gh / git)
+    ZERO_TOKEN_GATE --> IDLE: No actionable tasks (0 tokens)
+    ZERO_TOKEN_GATE --> ACQUIRE_LOCK: Actionable task detected
+    ACQUIRE_LOCK --> IN_PROGRESS: Lock acquired (TTL bounded)
+    ACQUIRE_LOCK --> IDLE: Lock held by active worker
+    IN_PROGRESS --> EXECUTE_HARNESS: Run AI CLI Harness
+    EXECUTE_HARNESS --> RELEASE_LOCK: Harness exit 0 (Success)
+    EXECUTE_HARNESS --> FAIL_JOB: Harness exit != 0 (Failure)
+    RELEASE_LOCK --> TRANSITION_LABEL: Transition GitHub Labels
+    FAIL_JOB --> ESCALATE_PO: Flag needs-po-review / unlock
+    TRANSITION_LABEL --> IDLE: Cycle complete
+    ESCALATE_PO --> IDLE: Cycle complete
+```
+
 ### 3. Reactive Chaining with Debounce
 - In daemon mode (`orchestrator watch`), worker loops execute sequentially within a project.
 - **Active Transition**: When a node completes work (e.g., Architect breaks down a story to `ready-for-dev`), `run_project_cycle` returns `True`, triggering an immediate follow-up pass (1-second debounce).
@@ -203,7 +220,7 @@ Configuration is loaded once via `load_config()` and passed explicitly down the 
 
 ---
 
-## 🚫 Architectural Constraints & Anti-Patterns
+## 🚫 Architectural Constraints & Anti-Patterns (e.g. No circular dependencies, No UI logic in Domain)
 
 ### Strict Constraints
 1. **Zero LLM Token Waste on Idle**:
