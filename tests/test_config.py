@@ -88,3 +88,11 @@ projects:
     assert loaded.projects[0].name == "alpha"
     assert len(loaded.managed_labels) > 0  # Default labels populated
     assert "claude" in loaded.harnesses  # Default harnesses populated
+
+
+def test_project_config_default_context_files(tmp_path: Path):
+    proj = ProjectConfig(name="proj", repo="org/repo", local_path=str(tmp_path))
+    assert ".graph/architecture.md" in proj.context_files
+    assert ".graph/testing-standards.md" in proj.context_files
+    assert ".graph/git-workflow.md" in proj.context_files
+

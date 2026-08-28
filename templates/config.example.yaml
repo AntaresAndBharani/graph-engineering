@@ -79,8 +79,9 @@ projects:
     local_path: "~/workspaces/project-alpha"  # Cross-platform path expansion (supports ~, $HOME, %USERPROFILE%, or relative paths)
     enabled: true
     context_files:
-      - "docs/ARCHITECTURE.md"
-      - "docs/METHODOLOGY.md"
+      - ".graph/architecture.md"
+      - ".graph/testing-standards.md"
+      - ".graph/git-workflow.md"
     nodes:
       supervisor:
         enabled: true

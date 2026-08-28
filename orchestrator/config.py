@@ -68,12 +68,19 @@ def resolve_path(v: str | Path) -> Path:
     return Path(expanded).resolve()
 
 
+DEFAULT_CONTEXT_FILES: List[str] = [
+    ".graph/architecture.md",
+    ".graph/testing-standards.md",
+    ".graph/git-workflow.md",
+]
+
+
 class ProjectConfig(BaseModel):
     name: str
     repo: str
     local_path: Path
     enabled: bool = True
-    context_files: List[str] = Field(default_factory=list)
+    context_files: List[str] = Field(default_factory=lambda: list(DEFAULT_CONTEXT_FILES))
     nodes: Dict[str, NodeConfig] = Field(default_factory=dict)
 
     @field_validator("local_path", mode="before")

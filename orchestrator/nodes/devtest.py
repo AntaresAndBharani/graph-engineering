@@ -115,13 +115,25 @@ async def run_devtest_node(
     adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
 
     # 5. Build Implementation Prompt
+    context_note = ""
+    if project.context_files:
+        files_str = ", ".join(project.context_files)
+        context_note = (
+            f"Read the methodology and architecture files listed in: {files_str}.\n"
+            f"Implement the code strictly adhering to those local repository standards.\n"
+        )
+
     prompt = (
-        f"You are the 3-Amigos Developer & QA Engineer. Implement the technical requirements for "
-        f"Issue #{issue_id} ('{issue_title}').\n"
-        f"1. Read the Gherkin acceptance criteria in the issue and context files.\n"
+        f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
+        f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n\n"
+        f"{context_note}"
+        f"OPERATIONAL STEPS:\n"
+        f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
         f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
         f"3. Implement the minimal clean code required to make all tests pass.\n"
-        f"4. Verify that the entire test suite passes before concluding.\n"
+        f"4. Verify that the entire test suite and linter pass cleanly.\n"
+        f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
+        f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
     )
 
     exit_code = await adapter.execute(
