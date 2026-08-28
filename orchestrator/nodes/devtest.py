@@ -150,17 +150,20 @@ async def run_devtest_node(
             error_message=f"Harness exited with code {exit_code}. See logs: {log_file.name}",
         )
         if shutil.which("gh"):
-            await asyncio.create_subprocess_exec(
+            p1 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
                 "--repo", project.repo,
                 "--remove-label", trigger,
                 "--add-label", "orchestration-failed",
             )
-            await asyncio.create_subprocess_exec(
+            await p1.wait()
+
+            p2 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "comment", str(issue_id),
                 "--repo", project.repo,
                 "--body", f"🤖 **DevTest Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
             )
+            await p2.wait()
         return False, f"DevTest execution failed on issue #{issue_id} (exit code {exit_code})."
 
     # 6. Verify Git Diff (Did the model produce code?)
@@ -190,7 +193,7 @@ async def run_devtest_node(
         await (await asyncio.create_subprocess_exec("git", "push", "-u", "origin", branch_name, cwd=str(project.local_path))).wait()
 
         if shutil.which("gh"):
-            await asyncio.create_subprocess_exec(
+            p_pr = await asyncio.create_subprocess_exec(
                 "gh", "pr", "create",
                 "--repo", project.repo,
                 "--title", f"feat: resolve #{issue_id} - {issue_title}",
@@ -198,12 +201,15 @@ async def run_devtest_node(
                 "--label", output_label,
                 cwd=str(project.local_path),
             )
-            await asyncio.create_subprocess_exec(
+            await p_pr.wait()
+
+            p_edit = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
                 "--repo", project.repo,
                 "--remove-label", trigger,
                 "--add-label", "dev-implemented",
             )
+            await p_edit.wait()
     except Exception as e:
         await state_manager.fail_job(
             issue_id=issue_id,

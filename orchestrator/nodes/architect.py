@@ -75,8 +75,11 @@ async def run_architect_node(
         f"1. You are fully autonomous. Do NOT ask questions or wait for human confirmation. Perform all required actions immediately.\n"
         f"2. Check if this story's acceptance criteria are ALREADY FULLY IMPLEMENTED on 'main':\n"
         f"   - If ALREADY IMPLEMENTED: Comment on #{issue_id} detailing the existing commit/tests, close the issue using `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`, and conclude.\n"
-        f"   - If WORK IS REQUIRED: Break the story down into minimal, testable technical subtasks following 3-amigos and INVEST principles. "
-        f"     For each subtask, create a new GitHub issue using `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\n\nParent: #{issue_id}' --label '{output_label}'`.\n"
+        f"3. Check if SUBTASKS ALREADY EXIST for this issue:\n"
+        f"   - If subtasks exist on GitHub (open or closed): Ensure all open child subtasks are labeled with '{output_label}' using `gh issue edit <subtask_id> --repo '{project.repo}' --add-label '{output_label}'`, comment on #{issue_id} summarizing existing subtasks, and conclude.\n"
+        f"4. If WORK IS REQUIRED and no subtasks exist:\n"
+        f"   - Break the story down into minimal, testable technical subtasks following 3-amigos and INVEST principles.\n"
+        f"   - For each subtask, create a new GitHub issue using `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\n\nParent: #{issue_id}' --label '{output_label}'`.\n"
     )
 
     # 4. Execute Agnostic Harness (Local OAuth Session)
@@ -97,17 +100,20 @@ async def run_architect_node(
         )
         if shutil.which("gh"):
             # Mark issue as failed and leave diagnostic comment
-            await asyncio.create_subprocess_exec(
+            p1 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
                 "--repo", project.repo,
                 "--remove-label", trigger,
                 "--add-label", "orchestration-failed",
             )
-            await asyncio.create_subprocess_exec(
+            await p1.wait()
+
+            p2 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "comment", str(issue_id),
                 "--repo", project.repo,
                 "--body", f"🤖 **Architect Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
             )
+            await p2.wait()
         return False, f"Architect execution failed on issue #{issue_id} (exit code {exit_code})."
 
     # 5. Deterministic Post-Execution Verification
@@ -133,52 +139,70 @@ async def run_architect_node(
             await state_manager.release_lock(issue_id, project.repo, "architect")
             return True, f"Architect node verified issue #{issue_id} was already satisfied and closed it."
 
-        # If issue is still open, check if child issues were created
+        # If issue is still open, check if child issues exist (either labeled output_label or mentioning #issue_id)
         proc_children = await asyncio.create_subprocess_exec(
             "gh", "issue", "list",
             "--repo", project.repo,
-            "--label", output_label,
             "--search", f"#{issue_id}",
-            "--json", "number,title",
+            "--json", "number,title,labels",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout_children, _ = await proc_children.communicate()
-        children = []
+        children: List[Dict[str, Any]] = []
         if proc_children.returncode == 0 and stdout_children:
             try:
-                children = json.loads(stdout_children.decode("utf-8", errors="replace"))
+                all_found = json.loads(stdout_children.decode("utf-8", errors="replace"))
+                # Filter out the parent issue itself
+                children = [c for c in all_found if c.get("number") != issue_id]
             except Exception:
                 pass
 
         if not children:
-            # The model exited without closing the issue or creating subtasks
+            # The model exited without closing the issue or creating/finding subtasks
             await state_manager.fail_job(
                 issue_id=issue_id,
                 repo=project.repo,
                 node_type="architect",
                 error_message="Architect node finished without creating subtasks or closing the issue.",
             )
-            await asyncio.create_subprocess_exec(
+            p_edit = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
                 "--repo", project.repo,
                 "--remove-label", trigger,
                 "--add-label", "needs-po-review",
             )
-            await asyncio.create_subprocess_exec(
+            await p_edit.wait()
+
+            p_comment = await asyncio.create_subprocess_exec(
                 "gh", "issue", "comment", str(issue_id),
                 "--repo", project.repo,
                 "--body", f"🤖 **Architect Escalation**: Architect node evaluated this story but did not create child subtasks (`{output_label}`) or close it. Flagging for PO review (`needs-po-review`). See log trace in `{log_file.name}`.",
             )
+            await p_comment.wait()
+
             return False, f"Architect node did not produce subtasks for issue #{issue_id}. Flagged with 'needs-po-review'."
 
-        # Subtasks were created: swap trigger label to processed_label
-        await asyncio.create_subprocess_exec(
+        # Subtasks exist: Ensure all open subtasks have output_label
+        for child in children:
+            child_num = child["number"]
+            child_labels = [l.get("name") for l in child.get("labels", []) if isinstance(l, dict)]
+            if output_label not in child_labels:
+                p_child = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "edit", str(child_num),
+                    "--repo", project.repo,
+                    "--add-label", output_label,
+                )
+                await p_child.wait()
+
+        # Swap parent trigger label to processed_label
+        p_swap = await asyncio.create_subprocess_exec(
             "gh", "issue", "edit", str(issue_id),
             "--repo", project.repo,
             "--remove-label", trigger,
             "--add-label", processed_label,
         )
+        await p_swap.wait()
 
         await state_manager.release_lock(issue_id, project.repo, "architect")
         return True, f"Architect node triaged and decomposed issue #{issue_id} into {len(children)} subtask(s) ('{output_label}')."
