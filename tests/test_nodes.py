@@ -76,6 +76,23 @@ async def test_bau_node_schedule_gating(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_supervisor_node_schedule_gating(tmp_path: Path):
+    from orchestrator.nodes.supervisor import run_supervisor_node
+    config = GlobalConfig()
+    project = ProjectConfig(name="test", repo="org/repo", local_path=str(tmp_path))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Record run now
+    await state_manager.record_node_run("supervisor", project.repo)
+
+    # Without force, should report not due
+    ran, msg = await run_supervisor_node(project, config, state_manager, force=False)
+    assert ran is False
+    assert "not due" in msg.lower()
+
+
+@pytest.mark.asyncio
 async def test_supervisor_status_audit_and_sla(tmp_path: Path, monkeypatch):
     import time
     from orchestrator import poller

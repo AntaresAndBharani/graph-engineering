@@ -115,6 +115,7 @@ async def run_supervisor_node(
     project: ProjectConfig,
     config: GlobalConfig,
     state_manager: StateManager,
+    force: bool = False,
 ) -> tuple[bool, str]:
     """
     Executes Consistency Supervisor Node.
@@ -124,8 +125,18 @@ async def run_supervisor_node(
     if not node_cfg.enabled:
         return False, "Supervisor node disabled for project."
 
-    # 1. Deterministic Anomaly Filter (0 Tokens)
+    # 1. Schedule Gating (Default: 3600s / 1 hour)
+    if not force:
+        last_run = await state_manager.get_last_run("supervisor", project.repo)
+        if last_run is not None:
+            elapsed = time.time() - last_run
+            interval = getattr(config.settings, "supervisor_interval_seconds", 3600)
+            if elapsed < interval:
+                return False, f"Supervisor check not due ({int((interval - elapsed) / 60)}m remaining). Idle (0 tokens)."
+
+    # 2. Deterministic Anomaly Filter (0 Tokens)
     anomalies = await check_repository_anomalies(project, state_manager)
+    await state_manager.record_node_run("supervisor", project.repo)
     if not anomalies:
         return False, "No workflow anomalies detected. State is consistent (0 tokens)."
 

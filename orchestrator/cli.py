@@ -87,43 +87,45 @@ async def run_project_cycle(
 ) -> bool:
     """
     Executes a single sequential pass across all enabled nodes for a project.
-    Returns True if ANY node executed active work (not idle), False if all nodes were idle.
+    Returns True if a development pipeline node (Architect, DevTest, Reviewer, BAU) executed active work,
+    requiring an immediate follow-up pass.
+    Returns False if all development nodes were idle (even if the supervisor completed a watchdog audit).
     """
-    any_work_done = False
+    pipeline_work_done = False
     prefix = f"[{project.name}]"
 
-    # 1. Supervisor Node
+    # 1. Supervisor Node (Periodic Watchdog Audit - does not trigger 1s tight loop)
     if node_name is None or node_name == "supervisor":
-        ran, msg = await run_supervisor_node(project, config, state_manager)
+        force_sup = node_name == "supervisor"
+        ran, msg = await run_supervisor_node(project, config, state_manager, force=force_sup)
         if ran:
-            any_work_done = True
             console.print(f"  {prefix} [bold green]Supervisor:[/bold green] {msg}")
         elif not silent_idle:
             console.print(f"  {prefix} [dim]Supervisor: {msg}[/dim]")
 
-    # 2. Architect Node
+    # 2. Architect Node (Active development work)
     if node_name is None or node_name == "architect":
         ran, msg = await run_architect_node(project, config, state_manager)
         if ran:
-            any_work_done = True
+            pipeline_work_done = True
             console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
         elif not silent_idle:
             console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
 
-    # 3. DevTest Node
+    # 3. DevTest Node (Active development work)
     if node_name is None or node_name == "devtest":
         ran, msg = await run_devtest_node(project, config, state_manager)
         if ran:
-            any_work_done = True
+            pipeline_work_done = True
             console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
         elif not silent_idle:
             console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
 
-    # 4. Reviewer / Gatekeeper Node
+    # 4. Reviewer / Gatekeeper Node (Active development work)
     if node_name is None or node_name in ("reviewer", "review"):
         ran, msg = await run_reviewer_node(project, config, state_manager)
         if ran:
-            any_work_done = True
+            pipeline_work_done = True
             console.print(f"  {prefix} [bold green]Reviewer:[/bold green] {msg}")
         elif not silent_idle:
             console.print(f"  {prefix} [dim]Reviewer: {msg}[/dim]")
@@ -133,12 +135,12 @@ async def run_project_cycle(
         force_bau = node_name in ("bau", "maintenance")
         ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
         if ran:
-            any_work_done = True
+            pipeline_work_done = True
             console.print(f"  {prefix} [bold green]BAU:[/bold green] {msg}")
         elif not silent_idle:
             console.print(f"  {prefix} [dim]BAU: {msg}[/dim]")
 
-    return any_work_done
+    return pipeline_work_done
 
 
 async def _run_single_pass(
