@@ -4,20 +4,24 @@ import datetime
 import logging
 from typing import Any, Dict, List, Optional
 
+from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, RichLog
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
+from orchestrator.ui.widgets import AnomalyAlertsWidget, SDLCProgressWidget
 
 
 class DashboardApp(App):
     """
     Read-only Async Textual TUI Observability Dashboard for graph-orchestrator watch.
-    Displays a live alphabetically-sorted projects status table and bounded orchestrator log stream.
+    Displays a live alphabetically-sorted projects status table and multi-pane bottom split
+    with SDLCProgressWidget and TabbedContent hosting RichLog and AnomalyAlertsWidget.
     """
 
     CSS = """
@@ -28,9 +32,23 @@ class DashboardApp(App):
         height: 40%;
         border: solid green;
     }
-    #log_view {
+    #bottom_container {
         height: 60%;
+        layout: horizontal;
+    }
+    #sdlc_widget {
+        width: 50%;
+        border: solid yellow;
+    }
+    #tabs {
+        width: 50%;
         border: solid cyan;
+    }
+    #log_view {
+        height: 100%;
+    }
+    #alerts_widget {
+        height: 100%;
     }
     """
 
@@ -59,19 +77,26 @@ class DashboardApp(App):
         self.config = config or GlobalConfig()
         self.state_manager = state_manager
         self.log_handler = log_handler
+        self.selected_project: Optional[str] = None
         self.title = "Graph Orchestrator - TUI Dashboard"
         self.sub_title = "Real-time Autonomous SDLC Observability"
 
     def compose(self) -> ComposeResult:
-        """Compose the TUI layout with Header, DataTable, RichLog, and Footer."""
+        """Compose the TUI layout with Header, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
         yield Header(show_clock=True)
         yield DataTable(id="projects_table")
-        yield RichLog(id="log_view", highlight=True, markup=True, max_lines=1000)
+        with Horizontal(id="bottom_container"):
+            yield SDLCProgressWidget(id="sdlc_widget", state_manager=self.state_manager)
+            with TabbedContent(id="tabs"):
+                with TabPane("Logs", id="tab_logs"):
+                    yield RichLog(id="log_view", highlight=True, markup=True, max_lines=1000)
+                with TabPane("Alerts (24h)", id="tab_alerts"):
+                    yield AnomalyAlertsWidget(id="alerts_widget", state_manager=self.state_manager, hours=24.0)
         yield Footer()
 
     async def on_mount(self) -> None:
         """Initializes widgets, binds log stream, and schedules periodic refresh."""
-        table = self.query_one(DataTable)
+        table = self.query_one("#projects_table", DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_columns(*self.TABLE_COLUMNS)
@@ -122,7 +147,7 @@ class DashboardApp(App):
         sorted alphabetically by project name.
         """
         try:
-            table = self.query_one(DataTable)
+            table = self.query_one("#projects_table", DataTable)
         except Exception:
             return
 
@@ -169,7 +194,55 @@ class DashboardApp(App):
                 status,
                 now_str,
                 locks_info,
+                key=p.name,
             )
+
+        if self.selected_project:
+            await self._update_bottom_panes(self.selected_project)
+
+    @on(DataTable.RowHighlighted, "#projects_table")
+    async def on_project_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """
+        Handles row highlight event on projects table to reactively filter bottom panes.
+        """
+        table = self.query_one("#projects_table", DataTable)
+        project_name = None
+        try:
+            if event.row_key is not None:
+                row_data = table.get_row(event.row_key)
+                if row_data:
+                    project_name = str(row_data[0])
+        except Exception:
+            pass
+
+        if not project_name:
+            try:
+                if event.cursor_row is not None and 0 <= event.cursor_row < table.row_count:
+                    row_data = table.get_row_at(event.cursor_row)
+                    if row_data:
+                        project_name = str(row_data[0])
+            except Exception:
+                pass
+
+        if project_name:
+            self.selected_project = project_name
+            await self._update_bottom_panes(project_name)
+
+    async def _update_bottom_panes(self, project_name: Optional[str]) -> None:
+        """
+        Asynchronously updates SDLCProgressWidget and AnomalyAlertsWidget for the selected project.
+        """
+        try:
+            sdlc_widget = self.query_one(SDLCProgressWidget)
+            await sdlc_widget.update_project(project_name)
+        except Exception:
+            pass
+
+        try:
+            alerts_widget = self.query_one(AnomalyAlertsWidget)
+            await alerts_widget.update_project(project_name, hours=24.0)
+        except Exception:
+            pass
 
     async def action_refresh(self) -> None:
         """Manual refresh trigger via 'R' key."""

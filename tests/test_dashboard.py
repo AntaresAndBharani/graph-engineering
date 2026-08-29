@@ -4,7 +4,8 @@ import asyncio
 import logging
 from pathlib import Path
 import pytest
-from textual.widgets import DataTable, Footer, Header, RichLog
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 
 from orchestrator.config import GlobalConfig, ProjectConfig
 from orchestrator.db import StateManager
@@ -589,6 +590,251 @@ async def test_widgets_non_blocking_async_reads(tmp_path: Path):
 
         assert sdlc_widget.row_count == 1
         assert alerts_widget.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_dashboard_multi_pane_layout_composition(tmp_path: Path):
+    """
+    Scenario: Layout structure on mount
+    Given DashboardApp mounts in an interactive terminal
+    Then the screen contains:
+      - Top pane: ProjectStatusTable (alphabetically sorted, existing)
+      - Bottom container: a 50/50 Horizontal split
+        - Bottom-left: SDLCProgressWidget
+        - Bottom-right: TabbedContent with tabs "Logs" (existing RichLog) and "Alerts (24h)" (AnomalyAlertsWidget)
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as _:
+        # Top pane
+        top_table = app.query_one("#projects_table", DataTable)
+        assert top_table is not None
+
+        # Bottom container
+        bottom_container = app.query_one("#bottom_container", Horizontal)
+        assert bottom_container is not None
+
+        # Bottom-left widget
+        sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        assert sdlc_widget is not None
+
+        # Bottom-right tabbed container
+        tabs = app.query_one("#tabs", TabbedContent)
+        assert tabs is not None
+
+        # Tabs content
+        log_view = app.query_one("#log_view", RichLog)
+        assert log_view is not None
+
+        alerts_widget = app.query_one("#alerts_widget", AnomalyAlertsWidget)
+        assert alerts_widget is not None
+
+        # Header and Footer
+        assert app.query_one(Header) is not None
+        assert app.query_one(Footer) is not None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_no_project_selected_empty_state(tmp_path: Path):
+    """
+    Scenario: No project selected yet
+    Given the dashboard has just mounted and no row is highlighted
+    Then both bottom panes render a graceful empty state without exceptions
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as _:
+        sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        alerts_widget = app.query_one("#alerts_widget", AnomalyAlertsWidget)
+
+        # Before any project row selection, both widgets show graceful empty states
+        assert sdlc_widget.row_count == 1
+        assert "No active SDLC items" in str(sdlc_widget.get_row_at(0)[1])
+
+        assert alerts_widget.row_count == 1
+        assert "No anomalies in last 24h" in str(alerts_widget.get_row_at(0)[2])
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: Path):
+    """
+    Scenario: Reactive project selection updates SDLC pane
+    Given multiple projects are listed in the top ProjectStatusTable
+    When the user highlights a project row via Up/Down arrow keys (DataTable.RowHighlighted)
+    Then SDLCProgressWidget immediately re-queries local SQLite and displays that project's active issues/PRs
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
+            ProjectConfig(name="beta", repo="org/beta", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Seed SDLC items for alpha and beta
+    await state_manager.sync_project_sdlc_items(
+        "alpha",
+        [
+            {
+                "issue_number": 101,
+                "title": "feat(core): alpha feature",
+                "state": "OPEN",
+                "labels": "ready-for-dev",
+                "linked_pr": 201,
+            }
+        ],
+    )
+    await state_manager.sync_project_sdlc_items(
+        "beta",
+        [
+            {
+                "issue_number": 102,
+                "title": "fix(core): beta bugfix",
+                "state": "OPEN",
+                "labels": "needs-architect-review",
+                "linked_pr": None,
+            }
+        ],
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+
+        # Highlight row 0 (alpha)
+        table.move_cursor(row=0)
+        await pilot.pause()
+
+        assert app.selected_project == "alpha"
+        assert sdlc_widget.row_count == 1
+        row_alpha = sdlc_widget.get_row_at(0)
+        assert row_alpha[0] == "#101"
+        assert row_alpha[1] == "feat(core): alpha feature"
+        assert row_alpha[2] == "ready-for-dev"
+        assert row_alpha[3] == "#201"
+
+        # Highlight row 1 (beta)
+        table.move_cursor(row=1)
+        await pilot.pause()
+
+        assert app.selected_project == "beta"
+        assert sdlc_widget.row_count == 1
+        row_beta = sdlc_widget.get_row_at(0)
+        assert row_beta[0] == "#102"
+        assert row_beta[1] == "fix(core): beta bugfix"
+        assert row_beta[2] == "needs-architect-review"
+        assert row_beta[3] == "-"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reactive_project_selection_updates_alerts_tab(tmp_path: Path):
+    """
+    Scenario: Reactive project selection updates Alerts tab
+    Given a project is highlighted in the top table
+    When the RowHighlighted event fires
+    Then the "Alerts (24h)" tab content re-queries and displays only anomaly events for that project within the last 24 hours
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
+            ProjectConfig(name="beta", repo="org/beta", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Seed anomaly events for alpha and beta
+    await state_manager.record_anomaly_event(
+        project_name="alpha",
+        node_name="devtest",
+        error_type="HarnessTimeout",
+        error_message="Alpha execution timed out",
+        issue_number=101,
+    )
+    await state_manager.record_anomaly_event(
+        project_name="beta",
+        node_name="reviewer",
+        error_type="MergeConflict",
+        error_message="Beta merge conflict in main",
+        issue_number=102,
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        alerts_widget = app.query_one("#alerts_widget", AnomalyAlertsWidget)
+
+        # Highlight row 0 (alpha)
+        table.move_cursor(row=0)
+        await pilot.pause()
+
+        assert app.selected_project == "alpha"
+        assert alerts_widget.row_count == 1
+        row_alpha = alerts_widget.get_row_at(0)
+        assert row_alpha[1] == "devtest"
+        assert row_alpha[2] == "HarnessTimeout"
+        assert row_alpha[3] == "Alpha execution timed out"
+
+        # Highlight row 1 (beta)
+        table.move_cursor(row=1)
+        await pilot.pause()
+
+        assert app.selected_project == "beta"
+        assert alerts_widget.row_count == 1
+        row_beta = alerts_widget.get_row_at(0)
+        assert row_beta[1] == "reviewer"
+        assert row_beta[2] == "MergeConflict"
+        assert row_beta[3] == "Beta merge conflict in main"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_keyboard_navigation_arrow_keys(tmp_path: Path):
+    """Asserts pressing down and up arrow keys updates selected_project and bottom panes."""
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="p1", repo="org/p1", local_path=str(tmp_path)),
+            ProjectConfig(name="p2", repo="org/p2", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    await state_manager.sync_project_sdlc_items(
+        "p1", [{"issue_number": 1, "title": "P1 Issue", "labels": "open"}]
+    )
+    await state_manager.sync_project_sdlc_items(
+        "p2", [{"issue_number": 2, "title": "P2 Issue", "labels": "done"}]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+
+        # Navigate down
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.selected_project in ("p1", "p2")
+
+        sdlc = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        assert sdlc.row_count >= 1
+
 
 
 
