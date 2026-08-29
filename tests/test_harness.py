@@ -74,3 +74,282 @@ async def test_harness_execution_with_console_prefix(tmp_path: Path):
     exit_code = await adapter.execute("test prompt", tmp_path, log_file, console_prefix="[test:prefix]")
     assert exit_code == 127
 
+
+def test_is_retryable_error():
+    from orchestrator.harness import is_retryable_error, get_matched_retryable_pattern
+
+    patterns = [
+        "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "502", "504",
+        "rate limit", "quota exceeded", "connection reset", "server disconnected", "fetch failed"
+    ]
+
+    # Transient error matches
+    assert is_retryable_error("API Error: 503 UNAVAILABLE - upstream gateway timed out", patterns) is True
+    assert is_retryable_error("HTTP Status 429: Too Many Requests (Rate limit hit)", patterns) is True
+    assert is_retryable_error("RESOURCE_EXHAUSTED: Quota exceeded for project", patterns) is True
+    assert is_retryable_error("Fatal: connection reset by peer", patterns) is True
+    assert is_retryable_error("Error: server disconnected abruptly", patterns) is True
+    assert is_retryable_error("Fetch failed: network unreachable (502 Bad Gateway)", patterns) is True
+
+    # Case insensitivity checks
+    assert is_retryable_error("error 503 unavailable", patterns) is True
+    assert is_retryable_error("resource_exhausted", patterns) is True
+
+    # Non-retryable error mismatches
+    assert is_retryable_error("401 Unauthorized: Invalid API key", patterns) is False
+    assert is_retryable_error("400 Bad Request: Malformed JSON payload", patterns) is False
+    assert is_retryable_error("404 Not Found: Resource does not exist", patterns) is False
+    assert is_retryable_error("SyntaxError: invalid syntax in file.py", patterns) is False
+    assert is_retryable_error("", patterns) is False
+    assert is_retryable_error("Everything is fine", []) is False
+
+    # get_matched_retryable_pattern checks
+    assert get_matched_retryable_pattern("503 Service Unavailable", patterns) == "503"
+    assert get_matched_retryable_pattern("RESOURCE_EXHAUSTED error", patterns) == "RESOURCE_EXHAUSTED"
+    assert get_matched_retryable_pattern("401 Unauthorized", patterns) is None
+
+
+def test_calculate_backoff_delay():
+    from orchestrator.config import HarnessRetryConfig
+    from orchestrator.harness import calculate_backoff_delay
+
+    cfg = HarnessRetryConfig(
+        max_retries=3,
+        initial_delay_seconds=5.0,
+        backoff_factor=2.0,
+        max_delay_seconds=60.0,
+    )
+
+    # Attempt 0: base is 5.0 -> with jitter [0.8 * 5.0, 1.2 * 5.0] = [4.0, 6.0]
+    for _ in range(20):
+        d0 = calculate_backoff_delay(0, cfg)
+        assert 4.0 <= d0 <= 6.0
+
+    # Attempt 1: base is 5.0 * 2.0 = 10.0 -> [8.0, 12.0]
+    for _ in range(20):
+        d1 = calculate_backoff_delay(1, cfg)
+        assert 8.0 <= d1 <= 12.0
+
+    # Attempt 2: base is 5.0 * 4.0 = 20.0 -> [16.0, 24.0]
+    for _ in range(20):
+        d2 = calculate_backoff_delay(2, cfg)
+        assert 16.0 <= d2 <= 24.0
+
+    # High attempt: base capped at 60.0 -> [48.0, 72.0]
+    for _ in range(20):
+        d_high = calculate_backoff_delay(10, cfg)
+        assert 48.0 <= d_high <= 72.0
+
+
+def test_harness_retry_config_validation():
+    from orchestrator.config import HarnessRetryConfig
+    from pydantic import ValidationError
+
+    cfg = HarnessRetryConfig()
+    assert cfg.max_retries == 3
+    assert cfg.initial_delay_seconds == 5.0
+    assert cfg.backoff_factor == 2.0
+    assert cfg.max_delay_seconds == 60.0
+    assert "503" in cfg.retryable_patterns
+
+    with pytest.raises(ValidationError):
+        HarnessRetryConfig(max_retries=-1)
+
+    with pytest.raises(ValidationError):
+        HarnessRetryConfig(initial_delay_seconds=0.1)
+
+    with pytest.raises(ValidationError):
+        HarnessRetryConfig(backoff_factor=0.5)
+
+    with pytest.raises(ValidationError):
+        HarnessRetryConfig(max_delay_seconds=2.0)
+
+
+@pytest.mark.asyncio
+async def test_harness_transient_retry_success(tmp_path: Path, monkeypatch):
+    """
+    AC 1: When harness returns transient error (503 UNAVAILABLE), adapter retries with backoff & jitter.
+    If retry succeeds on attempt 2, returns 0.
+    """
+    import asyncio
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    retry_cfg = HarnessRetryConfig(
+        max_retries=3,
+        initial_delay_seconds=1.0,
+        backoff_factor=2.0,
+        max_delay_seconds=10.0,
+    )
+    cfg = HarnessConfig(binary="claude", args=["-p", "{prompt}"], retry=retry_cfg)
+    adapter = AsyncHarnessAdapter("claude", cfg)
+
+    # Mock availability
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+    slept_delays = []
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return 1, "Error: 503 UNAVAILABLE upstream server error"
+        return 0, "Task completed successfully"
+
+    async def mock_sleep(delay):
+        slept_delays.append(delay)
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    log_file = tmp_path / "harness_retry.log"
+    exit_code = await adapter.execute(
+        prompt="Build feature",
+        cwd=tmp_path,
+        log_file=log_file,
+        console_prefix="[test:claude]",
+    )
+
+    assert exit_code == 0
+    assert call_count == 2
+    assert len(slept_delays) == 1
+    assert 0.8 <= slept_delays[0] <= 1.2
+
+    log_content = log_file.read_text(encoding="utf-8")
+    assert "[WARN] [harness:claude] Transient upstream error detected (503)." in log_content
+    assert "Retrying attempt 1/3 in" in log_content
+
+
+@pytest.mark.asyncio
+async def test_harness_non_retryable_fail_fast(tmp_path: Path, monkeypatch):
+    """
+    AC 2: Non-retryable error (401 Unauthorized) fails fast on attempt 1 without retrying.
+    """
+    import asyncio
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    retry_cfg = HarnessRetryConfig(max_retries=3)
+    cfg = HarnessConfig(binary="claude", args=["-p", "{prompt}"], retry=retry_cfg)
+    adapter = AsyncHarnessAdapter("claude", cfg)
+
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+    slept_delays = []
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        return 1, "401 Unauthorized: Invalid credentials"
+
+    async def mock_sleep(delay):
+        slept_delays.append(delay)
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    log_file = tmp_path / "harness_fail_fast.log"
+    exit_code = await adapter.execute(
+        prompt="Build feature",
+        cwd=tmp_path,
+        log_file=log_file,
+    )
+
+    assert exit_code == 1
+    assert call_count == 1
+    assert len(slept_delays) == 0
+
+
+@pytest.mark.asyncio
+async def test_harness_retry_exhaustion(tmp_path: Path, monkeypatch):
+    """
+    AC 4: When transient error persists beyond max_retries, logs terminal error and returns failure exit code.
+    """
+    import asyncio
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    retry_cfg = HarnessRetryConfig(
+        max_retries=3,
+        initial_delay_seconds=1.0,
+        backoff_factor=2.0,
+        max_delay_seconds=10.0,
+    )
+    cfg = HarnessConfig(binary="antigravity", args=["-p", "{prompt}"], retry=retry_cfg)
+    adapter = AsyncHarnessAdapter("antigravity", cfg)
+
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+    slept_delays = []
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        return 2, "429 RESOURCE_EXHAUSTED: Rate limit exceeded"
+
+    async def mock_sleep(delay):
+        slept_delays.append(delay)
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    log_file = tmp_path / "harness_exhausted.log"
+    exit_code = await adapter.execute(
+        prompt="Build feature",
+        cwd=tmp_path,
+        log_file=log_file,
+        console_prefix="[test:antigravity]",
+    )
+
+    assert exit_code == 2
+    # 1 initial attempt + 3 retries = 4 total executions
+    assert call_count == 4
+    assert len(slept_delays) == 3
+
+    log_content = log_file.read_text(encoding="utf-8")
+    assert "[ERROR] [harness:antigravity] Retries exhausted (3/3). Upstream service unavailable." in log_content
+    assert "Retrying attempt 1/3 in" in log_content
+    assert "Retrying attempt 2/3 in" in log_content
+    assert "Retrying attempt 3/3 in" in log_content
+
+
+@pytest.mark.asyncio
+async def test_harness_retry_transition_to_non_retryable(tmp_path: Path, monkeypatch):
+    """
+    If transient error is followed by a non-retryable error on attempt 2, aborts immediately.
+    """
+    import asyncio
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    retry_cfg = HarnessRetryConfig(max_retries=3)
+    cfg = HarnessConfig(binary="devin", args=["-p", "{prompt}"], retry=retry_cfg)
+    adapter = AsyncHarnessAdapter("devin", cfg)
+
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return 1, "502 Bad Gateway"
+        return 1, "400 Bad Request: Syntax error in parameters"
+
+    async def mock_sleep(d):
+        pass
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    log_file = tmp_path / "harness_transition.log"
+    exit_code = await adapter.execute("prompt", tmp_path, log_file)
+
+    assert exit_code == 1
+    assert call_count == 2
+
+

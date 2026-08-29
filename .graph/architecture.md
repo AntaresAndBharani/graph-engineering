@@ -247,6 +247,13 @@ sequenceDiagram
 ### 2. Pluggable AI Harness Adapter Pattern (`AsyncHarnessAdapter`)
 All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to a unified interface. The system constructs commands dynamically based on configured flags (`--model`, `--effort`, timeout limits), ensuring that swapping models requires zero code modifications.
 
+`AsyncHarnessAdapter` incorporates an in-memory **Transient Upstream Error Retry Engine**:
+- **Automatic Detection**: Captures non-zero process exits matching transient API dropouts (`503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, `502/504 Bad Gateway/Timeout`, connection resets).
+- **Exponential Backoff & Randomized Jitter**:
+  $$\text{delay} = \min(\text{max\_delay}, \text{initial\_delay} \times \text{backoff\_factor}^{\text{attempt}}) \times (0.8 + 0.4 \times \text{random}())$$
+- **Fail-Fast Non-Retryable Errors**: Immediately returns on client errors (`401 Unauthorized`, `400 Bad Request`, `404 Not Found`, syntax compilation errors) without token or time waste.
+- **Terminal Exhaustion Protection**: Caps retries at `max_retries` before surfacing terminal failures to the calling node.
+
 ```python
 adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
 exit_code = await adapter.execute(
