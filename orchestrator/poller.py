@@ -1,10 +1,61 @@
 from __future__ import annotations
-
 import asyncio
+from datetime import datetime
 import json
+import logging
+import re
 import shutil
+import time
 from typing import Any, Dict, List, Optional
 from orchestrator.config import ProjectConfig
+from orchestrator.db import StateManager
+
+_logger = logging.getLogger(__name__)
+
+
+def parse_iso_timestamp(ts: Any) -> float:
+    """Parses an ISO 8601 string or numeric timestamp to epoch seconds."""
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str) and ts:
+        try:
+            clean_ts = ts.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_ts)
+            return dt.timestamp()
+        except Exception:
+            pass
+    return time.time()
+
+
+def extract_linked_pr(issue_number: int, prs: List[Dict[str, Any]]) -> Optional[int]:
+    """
+    Finds if any open PR is linked to the given issue number.
+    Inspects PR branch name (headRefName), title, and body for issue references.
+    """
+    if not prs or not issue_number:
+        return None
+
+    pattern_hash = re.compile(rf"#\b{issue_number}\b", re.IGNORECASE)
+    pattern_branch = re.compile(rf"issue[-/_]?{issue_number}\b", re.IGNORECASE)
+
+    for pr in prs:
+        pr_number = pr.get("number")
+        if not pr_number:
+            continue
+
+        head_ref = pr.get("headRefName") or ""
+        if pattern_branch.search(head_ref) or pattern_hash.search(head_ref):
+            return int(pr_number)
+
+        title = pr.get("title") or ""
+        if pattern_hash.search(title) or pattern_branch.search(title):
+            return int(pr_number)
+
+        body = pr.get("body") or ""
+        if pattern_hash.search(body) or pattern_branch.search(body):
+            return int(pr_number)
+
+    return None
 
 
 async def fetch_issues_with_label(
@@ -181,13 +232,70 @@ async def fetch_open_prs(
         return []
 
 
+async def poll_project_sdlc_items(
+    project: ProjectConfig,
+    state_manager: Optional[StateManager] = None,
+    limit_issues: int = 100,
+    limit_prs: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Zero-token polling sweep that fetches open issues and open PRs for a project,
+    correlates linked PRs to issues, and syncs them to StateManager (sdlc_items table).
+    Non-blocking / best-effort on SQLite errors.
+    """
+    open_issues = await fetch_all_open_issues(project.repo, limit=limit_issues)
+    open_prs = await fetch_open_prs(project.repo, limit=limit_prs)
+
+    items: List[Dict[str, Any]] = []
+    now = time.time()
+
+    for issue in open_issues:
+        issue_num = issue.get("number")
+        if not issue_num:
+            continue
+        title = str(issue.get("title", ""))
+        state = str(issue.get("state") or "OPEN")
+        labels = issue.get("labels", [])
+        linked_pr = extract_linked_pr(issue_num, open_prs)
+        updated_ts = parse_iso_timestamp(issue.get("updatedAt") or issue.get("updated_at", now))
+
+        items.append({
+            "project_name": project.name,
+            "issue_number": int(issue_num),
+            "title": title,
+            "state": state,
+            "labels": labels,
+            "linked_pr": linked_pr,
+            "updated_at": updated_ts,
+        })
+
+    if state_manager is not None:
+        try:
+            await state_manager.sync_project_sdlc_items(project.name, items)
+        except Exception as e:
+            _logger.warning(
+                "[%s] Non-blocking SDLC memory sync failed during polling sweep: %s",
+                project.name,
+                e,
+            )
+
+    return items
+
+
 async def fetch_project_workload(
     project: ProjectConfig,
+    state_manager: Optional[StateManager] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
     Determines all pending actionable tasks across a single project's nodes
-    with zero token consumption.
+    with zero token consumption, and optionally syncs SDLC items to state manager.
     """
+    if state_manager is not None:
+        try:
+            await poll_project_sdlc_items(project, state_manager)
+        except Exception as e:
+            _logger.warning("[%s] Best-effort workload SDLC sync failed: %s", project.name, e)
+
     workload: Dict[str, List[Dict[str, Any]]] = {
         "architect": [],
         "devtest": [],

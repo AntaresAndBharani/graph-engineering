@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 from typing import Callable, Dict, List, Optional
 import psutil
@@ -13,10 +14,41 @@ import psutil
 from rich.console import Console
 
 from orchestrator.config import HarnessConfig, HarnessRetryConfig
+from orchestrator.db import StateManager
 from orchestrator.logging import strip_ansi
 
 _logger = logging.getLogger(__name__)
 _console = Console()
+
+
+def classify_error(output: str, is_timeout: bool = False, error_snippet: Optional[str] = None) -> str:
+    """
+    Classifies failure / anomaly output into a standardized error type string
+    (e.g., 'http_503', 'http_429', 'http_502', 'http_504', 'sla_violation').
+    """
+    if is_timeout:
+        return "sla_violation"
+
+    lower_output = (output or "").lower()
+    lower_snippet = (error_snippet or "").lower()
+
+    if "503" in lower_output or "503" in lower_snippet or "unavailable" in lower_output:
+        return "http_503"
+    if "429" in lower_output or "429" in lower_snippet or "resource_exhausted" in lower_output or "rate limit" in lower_output or "quota" in lower_output:
+        return "http_429"
+    if "502" in lower_output or "502" in lower_snippet or "bad gateway" in lower_output:
+        return "http_502"
+    if "504" in lower_output or "504" in lower_snippet or "gateway timeout" in lower_output:
+        return "http_504"
+    if "sla" in lower_output or "sla_violation" in lower_output or "timed out" in lower_output:
+        return "sla_violation"
+
+    if error_snippet:
+        cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", error_snippet.strip().lower()).strip("_")
+        if cleaned:
+            return cleaned
+
+    return "execution_failure"
 
 
 def is_retryable_error(output: str, retryable_patterns: list[str]) -> bool:
@@ -65,9 +97,21 @@ class AsyncHarnessAdapter:
         """Unregisters a stream listener callback."""
         cls._stream_listeners.discard(listener)
 
-    def __init__(self, name: str, config: HarnessConfig):
+    def __init__(
+        self,
+        name: str,
+        config: HarnessConfig,
+        state_manager: Optional[StateManager] = None,
+        project_name: Optional[str] = None,
+        node_name: Optional[str] = None,
+        issue_number: Optional[int] = None,
+    ):
         self.name = name
         self.config = config
+        self.state_manager = state_manager
+        self.project_name = project_name
+        self.node_name = node_name
+        self.issue_number = issue_number
         self.retry_config = config.retry
         self.binary = config.binary
         self.args_template = config.args
@@ -240,12 +284,21 @@ class AsyncHarnessAdapter:
         effort: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
         console_prefix: Optional[str] = None,
+        project_name: Optional[str] = None,
+        node_name: Optional[str] = None,
+        issue_number: Optional[int] = None,
+        state_manager: Optional[StateManager] = None,
     ) -> int:
         """
         Executes the CLI harness asynchronously in the project directory with transient error retry engine.
         Streams stdout/stderr with ANSI stripping to log_file and live to console if console_prefix is provided.
-        Gracefully kills process tree on timeout.
+        Gracefully kills process tree on timeout and records anomaly events in StateManager.
         """
+        eff_project_name = project_name or self.project_name or "unknown"
+        eff_node_name = node_name or self.node_name or self.name
+        eff_issue_number = issue_number if issue_number is not None else self.issue_number
+        eff_state_manager = state_manager or self.state_manager
+
         if not self.is_available():
             err_msg = f"[ERROR] Binary '{self.binary}' for harness '{self.name}' not found in PATH."
             with open(log_file, "a", encoding="utf-8") as f:
@@ -262,12 +315,40 @@ class AsyncHarnessAdapter:
         if returncode == 0:
             return 0
 
+        if returncode == 124 and eff_state_manager is not None:
+            try:
+                await eff_state_manager.record_anomaly_event(
+                    project_name=eff_project_name,
+                    node_name=eff_node_name,
+                    error_type="sla_violation",
+                    error_message=f"Process timed out after {self.config.timeout_minutes} minutes (SLA violation).",
+                    issue_number=eff_issue_number,
+                )
+            except Exception as e:
+                _logger.warning("Failed to record anomaly event in state manager: %s", e)
+
         retry_cfg = self.retry_config
-        if not is_retryable_error(captured_output, retry_cfg.retryable_patterns) or retry_cfg.max_retries <= 0:
+        is_transient = is_retryable_error(captured_output, retry_cfg.retryable_patterns)
+
+        if not is_transient or retry_cfg.max_retries <= 0:
+            if is_transient and eff_state_manager is not None:
+                err_snip = get_matched_retryable_pattern(captured_output, retry_cfg.retryable_patterns)
+                err_type = classify_error(captured_output, is_timeout=False, error_snippet=err_snip)
+                try:
+                    await eff_state_manager.record_anomaly_event(
+                        project_name=eff_project_name,
+                        node_name=eff_node_name,
+                        error_type=err_type,
+                        error_message=f"Transient failure ({err_snip or err_type}): {captured_output[:200].strip()}",
+                        issue_number=eff_issue_number,
+                    )
+                except Exception as e:
+                    _logger.warning("Failed to record anomaly event in state manager: %s", e)
             return returncode
 
         for attempt_num in range(1, retry_cfg.max_retries + 1):
             error_snippet = get_matched_retryable_pattern(captured_output, retry_cfg.retryable_patterns) or "transient error"
+            err_type = classify_error(captured_output, is_timeout=False, error_snippet=error_snippet)
             delay = calculate_backoff_delay(attempt_num - 1, retry_cfg)
             warn_msg = (
                 f"[WARN] [harness:{self.name}] Transient upstream error detected ({error_snippet}). "
@@ -279,16 +360,42 @@ class AsyncHarnessAdapter:
             if console_prefix:
                 _console.print(f"  [bold yellow]{console_prefix}[/bold yellow] {warn_msg}")
 
+            if eff_state_manager is not None:
+                try:
+                    await eff_state_manager.record_anomaly_event(
+                        project_name=eff_project_name,
+                        node_name=eff_node_name,
+                        error_type=err_type,
+                        error_message=warn_msg,
+                        issue_number=eff_issue_number,
+                    )
+                except Exception as e:
+                    _logger.warning("Failed to record anomaly event in state manager: %s", e)
+
             await asyncio.sleep(delay)
 
             returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
             if returncode == 0:
                 return 0
 
+            if returncode == 124 and eff_state_manager is not None:
+                try:
+                    await eff_state_manager.record_anomaly_event(
+                        project_name=eff_project_name,
+                        node_name=eff_node_name,
+                        error_type="sla_violation",
+                        error_message=f"Retry attempt {attempt_num} timed out (SLA violation).",
+                        issue_number=eff_issue_number,
+                    )
+                except Exception as e:
+                    _logger.warning("Failed to record anomaly event in state manager: %s", e)
+
             if not is_retryable_error(captured_output, retry_cfg.retryable_patterns):
                 return returncode
 
         # Retries exhausted
+        err_snippet = get_matched_retryable_pattern(captured_output, retry_cfg.retryable_patterns) or "transient error"
+        err_type = classify_error(captured_output, is_timeout=(returncode == 124), error_snippet=err_snippet)
         err_msg = (
             f"[ERROR] [harness:{self.name}] Retries exhausted ({retry_cfg.max_retries}/{retry_cfg.max_retries}). "
             "Upstream service unavailable."
@@ -298,6 +405,18 @@ class AsyncHarnessAdapter:
             f.write(f"\n{err_msg}\n")
         if console_prefix:
             _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
+
+        if eff_state_manager is not None:
+            try:
+                await eff_state_manager.record_anomaly_event(
+                    project_name=eff_project_name,
+                    node_name=eff_node_name,
+                    error_type=err_type,
+                    error_message=err_msg,
+                    issue_number=eff_issue_number,
+                )
+            except Exception as e:
+                _logger.warning("Failed to record anomaly event in state manager: %s", e)
 
         return returncode
 

@@ -201,7 +201,13 @@ async def _sync_architecture_plane(
         f"4. Commit changes: `git add .graph/architecture.md && git commit -m 'docs(architecture): update architectural standards'`.\n"
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="architect",
+    )
     exit_code = await adapter.execute(
         prompt=prompt,
         cwd=project.local_path,
@@ -302,7 +308,14 @@ async def _review_pr_architecture(
         f"     `gh pr edit {pr_number} --repo '{project.repo}' --remove-label '{review_trigger}' --add-label 'needs-refactor'`\n"
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="architect",
+        issue_number=pr_number,
+    )
     try:
         exit_code = await adapter.execute(
             prompt=prompt,
@@ -448,8 +461,6 @@ async def _triage_story(
         issue_id=issue_id,
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
-
     # Ingest pre-approved Gherkin AC from Blackboard if available
     po_record = await state_manager.get_po_tracking(project.repo, issue_id)
 
@@ -467,6 +478,14 @@ async def _triage_story(
     console.print(f"  [dim]• Target: {project.repo} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
     console.print(f"  [dim]• Scope: Issue Classification, 3-Amigos Triage & INVEST Subtask Decomposition[/dim]")
 
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="architect",
+        issue_number=issue_id,
+    )
     exit_code = await adapter.execute(
         prompt=prompt,
         cwd=project.local_path,
