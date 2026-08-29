@@ -1,6 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import asyncio
 import datetime
 import logging
 from typing import Any, Dict, List, Optional
@@ -9,7 +8,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, RichLog
 
-from orchestrator.config import GlobalConfig, ProjectConfig
+from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
