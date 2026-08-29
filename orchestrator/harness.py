@@ -16,6 +16,7 @@ from rich.console import Console
 from orchestrator.config import HarnessConfig, HarnessRetryConfig
 from orchestrator.db import StateManager
 from orchestrator.logging import strip_ansi
+from orchestrator.quota import extract_token_usage
 
 _logger = logging.getLogger(__name__)
 _console = Console()
@@ -312,6 +313,15 @@ class AsyncHarnessAdapter:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
         returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
+        await self._record_tokens(
+            captured_output=captured_output,
+            prompt=prompt,
+            model=model,
+            eff_state_manager=eff_state_manager,
+            eff_project_name=eff_project_name,
+            eff_node_name=eff_node_name,
+            eff_issue_number=eff_issue_number,
+        )
         if returncode == 0:
             return 0
 
@@ -375,6 +385,15 @@ class AsyncHarnessAdapter:
             await asyncio.sleep(delay)
 
             returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
+            await self._record_tokens(
+                captured_output=captured_output,
+                prompt=prompt,
+                model=model,
+                eff_state_manager=eff_state_manager,
+                eff_project_name=eff_project_name,
+                eff_node_name=eff_node_name,
+                eff_issue_number=eff_issue_number,
+            )
             if returncode == 0:
                 return 0
 
@@ -419,6 +438,35 @@ class AsyncHarnessAdapter:
                 _logger.warning("Failed to record anomaly event in state manager: %s", e)
 
         return returncode
+
+    async def _record_tokens(
+        self,
+        captured_output: str,
+        prompt: str,
+        model: Optional[str],
+        eff_state_manager: Optional[StateManager],
+        eff_project_name: str,
+        eff_node_name: str,
+        eff_issue_number: Optional[int],
+    ) -> None:
+        """Extracts and records token usage events into StateManager ledger."""
+        if eff_state_manager is None:
+            return
+        p_tok, c_tok, tot_tok = extract_token_usage(captured_output, prompt=prompt)
+        if tot_tok > 0:
+            try:
+                await eff_state_manager.record_token_usage_event(
+                    harness_name=self.name,
+                    model_name=model or getattr(self.config, "model", None) or "default",
+                    project_name=eff_project_name,
+                    node_name=eff_node_name,
+                    issue_number=eff_issue_number,
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=tot_tok,
+                )
+            except Exception as e:
+                _logger.warning("Failed to record token usage event in state manager: %s", e)
 
     @staticmethod
     def _kill_process_tree(process: Optional[asyncio.subprocess.Process]) -> None:

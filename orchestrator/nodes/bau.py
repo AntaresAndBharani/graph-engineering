@@ -12,7 +12,7 @@ from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
-from orchestrator.poller import fetch_issues_with_label
+from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label
 
 
 async def run_bau_node(
@@ -68,6 +68,10 @@ async def run_bau_node(
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
+
+    allowed, q_res = await check_dispatch_quota(project, "bau", config, state_manager)
+    if not allowed:
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
     lock_acquired = await state_manager.acquire_lock(
         issue_id="global",

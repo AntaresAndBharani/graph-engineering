@@ -6,9 +6,9 @@ import logging
 import re
 import shutil
 import time
-from typing import Any, Dict, List, Optional
-from orchestrator.config import ProjectConfig
+from orchestrator.config import GlobalConfig, ProjectConfig
 from orchestrator.db import StateManager
+from orchestrator.quota import QuotaManager, QuotaCheckResult
 
 _logger = logging.getLogger(__name__)
 
@@ -318,3 +318,32 @@ async def fetch_project_workload(
         workload["prs"] = await fetch_open_prs(project.repo, label="needs-architect-review")
 
     return workload
+
+
+async def check_dispatch_quota(
+    project: ProjectConfig,
+    node_name: str,
+    config: GlobalConfig,
+    state_manager: StateManager,
+    quota_manager: Optional[QuotaManager] = None,
+) -> tuple[bool, QuotaCheckResult]:
+    """
+    Evaluates whether the resolved harness for the target project and node
+    has sufficient runway capacity for dispatch.
+    Consumes 0 LLM tokens (pure local SQLite computation).
+    If throttled, logs the renewal ETA countdown.
+    """
+    qm = quota_manager or QuotaManager(config, state_manager)
+    harness_name = qm.resolve_harness_for_node(project, node_name)
+    res = await qm.check_harness_capacity(harness_name)
+    if not res.allowed:
+        _logger.warning(
+            "[%s:%s] Quota throttled for harness '%s' (Deficit: %d tokens). Dispatch deferred. Renewal ETA: %s",
+            project.name,
+            node_name,
+            res.harness_name,
+            res.deficit,
+            res.formatted_eta,
+        )
+    return res.allowed, res
+

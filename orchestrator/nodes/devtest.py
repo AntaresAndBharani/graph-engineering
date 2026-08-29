@@ -11,7 +11,7 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
 from orchestrator import poller
-from orchestrator.poller import fetch_issues_with_label, fetch_open_prs
+from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
 
 
 async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool, str]:
@@ -67,6 +67,10 @@ async def _remediate_refactor_pr(
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
+
+    allowed, q_res = await poller.check_dispatch_quota(project, "devtest", config, state_manager)
+    if not allowed:
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
     retry_cfg = getattr(harness_cfg, "retry", None)
     max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
@@ -248,6 +252,9 @@ async def run_devtest_node(
     # Phase 1: Remediate PRs with 'needs-refactor'
     refactor_prs = await fetch_open_prs(project.repo, label="needs-refactor", limit=1)
     if refactor_prs:
+        allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager)
+        if not allowed:
+            return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
         target_pr = refactor_prs[0]
         pr_number = target_pr["number"]
         pr_title = target_pr.get("title", "")
@@ -270,6 +277,11 @@ async def run_devtest_node(
     issues = await fetch_issues_with_label(project.repo, trigger, limit=1)
     if not issues:
         return False, f"No PRs labeled 'needs-refactor' and no issues labeled '{trigger}'. Idle (0 tokens)."
+
+    # Pre-Flight Quota Gating (Pure local SQLite calculation, 0 LLM tokens)
+    allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager)
+    if not allowed:
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
     target_issue = issues[0]
     issue_id = target_issue["number"]

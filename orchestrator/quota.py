@@ -2,10 +2,95 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+import re
 from typing import Any
 
 from orchestrator.config import GlobalConfig, HarnessQuotaConfig, ProjectConfig
 from orchestrator.db import StateManager
+
+
+def extract_token_usage(output: str, prompt: str = "") -> tuple[int, int, int]:
+    """
+    Extracts (prompt_tokens, completion_tokens, total_tokens) from CLI output
+    using regex patterns, with fallback character-length estimation.
+    """
+    clean_out = output or ""
+    clean_prompt = prompt or ""
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+
+    # 1. Search for JSON structured token metrics
+    json_prompt = re.search(r'"(?:prompt_tokens|input_tokens)"\s*:\s*([0-9]+)', clean_out, re.IGNORECASE)
+    json_comp = re.search(r'"(?:completion_tokens|output_tokens)"\s*:\s*([0-9]+)', clean_out, re.IGNORECASE)
+    json_total = re.search(r'"total_tokens"\s*:\s*([0-9]+)', clean_out, re.IGNORECASE)
+
+    if json_prompt:
+        prompt_tokens = int(json_prompt.group(1))
+    if json_comp:
+        completion_tokens = int(json_comp.group(1))
+    if json_total:
+        total_tokens = int(json_total.group(1))
+
+    # 2. Text regex patterns
+    if prompt_tokens == 0:
+        p_match = (
+            re.search(r'(?:prompt|input)\s+tokens?:\s*([0-9,]+)', clean_out, re.IGNORECASE)
+            or re.search(r'tokens?\s+(?:in|input|prompt):\s*([0-9,]+)', clean_out, re.IGNORECASE)
+            or re.search(r'([0-9,]+)\s+(?:prompt|input)\s+tokens?', clean_out, re.IGNORECASE)
+        )
+        if p_match:
+            try:
+                prompt_tokens = int(p_match.group(1).replace(",", ""))
+            except ValueError:
+                pass
+
+    if completion_tokens == 0:
+        c_match = (
+            re.search(r'(?:completion|output)\s+tokens?:\s*([0-9,]+)', clean_out, re.IGNORECASE)
+            or re.search(r'tokens?\s+(?:out|output|completion):\s*([0-9,]+)', clean_out, re.IGNORECASE)
+            or re.search(r'([0-9,]+)\s+(?:completion|output)\s+tokens?', clean_out, re.IGNORECASE)
+        )
+        if c_match:
+            try:
+                completion_tokens = int(c_match.group(1).replace(",", ""))
+            except ValueError:
+                pass
+
+    if total_tokens == 0:
+        t_match = (
+            re.search(r'(?:total)\s+tokens?:\s*([0-9,]+)', clean_out, re.IGNORECASE)
+            or re.search(r'tokens?\s+(?:used|total):\s*([0-9,]+)', clean_out, re.IGNORECASE)
+            or re.search(r'([0-9,]+)\s+total\s+tokens?', clean_out, re.IGNORECASE)
+            or re.search(r'consumed\s+([0-9,]+)\s+tokens?', clean_out, re.IGNORECASE)
+            or re.search(r'([0-9,]+)\s+tokens\s+consumed', clean_out, re.IGNORECASE)
+            or re.search(r'([0-9,]+)\s+tokens\s+used', clean_out, re.IGNORECASE)
+            or re.search(r'Total tokens:\s*([0-9,]+)', clean_out, re.IGNORECASE)
+        )
+        if t_match:
+            try:
+                total_tokens = int(t_match.group(1).replace(",", ""))
+            except ValueError:
+                pass
+
+    # 3. Derive total from prompt + completion or vice-versa
+    if total_tokens == 0 and (prompt_tokens > 0 or completion_tokens > 0):
+        total_tokens = prompt_tokens + completion_tokens
+    elif total_tokens > 0 and prompt_tokens == 0 and completion_tokens == 0:
+        prompt_tokens = int(total_tokens * 0.8)
+        completion_tokens = total_tokens - prompt_tokens
+
+    # 4. Fallback estimation based on character length (~4 chars per token)
+    if total_tokens == 0 and (clean_prompt or clean_out):
+        p_len = len(clean_prompt)
+        o_len = len(clean_out)
+        prompt_tokens = max(1, p_len // 4) if p_len > 0 else 0
+        completion_tokens = max(1, o_len // 4) if o_len > 0 else 0
+        total_tokens = prompt_tokens + completion_tokens
+
+    return prompt_tokens, completion_tokens, total_tokens
+
 
 
 @dataclass

@@ -529,4 +529,125 @@ async def test_scenario_non_blocking_harness_anomaly_recording_failure(tmp_path:
     assert call_count == 2
 
 
+def test_extract_token_usage():
+    from orchestrator.quota import extract_token_usage
+
+    # 1. Standard text output
+    out1 = "Execution complete.\nPrompt tokens: 120,000\nCompletion tokens: 30,000\nTotal tokens: 150,000"
+    p1, c1, t1 = extract_token_usage(out1)
+    assert p1 == 120000
+    assert c1 == 30000
+    assert t1 == 150000
+
+    # 2. JSON structured output
+    out2 = '{"prompt_tokens": 5000, "completion_tokens": 1000, "total_tokens": 6000}'
+    p2, c2, t2 = extract_token_usage(out2)
+    assert p2 == 5000
+    assert c2 == 1000
+    assert t2 == 6000
+
+    # 3. Consumed tokens phrase
+    out3 = "Task completed successfully. Consumed 120,000 tokens during processing."
+    p3, c3, t3 = extract_token_usage(out3)
+    assert t3 == 120000
+    assert p3 + c3 == 120000
+
+    # 4. Fallback character-length estimation (~4 chars per token)
+    prompt4 = "a" * 400
+    out4 = "b" * 200
+    p4, c4, t4 = extract_token_usage(out4, prompt=prompt4)
+    assert p4 == 100
+    assert c4 == 50
+    assert t4 == 150
+
+    # 5. Empty inputs
+    assert extract_token_usage("") == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_harness_records_token_usage_event_after_execution(tmp_path: Path, monkeypatch):
+    """
+    Asserts token extraction + StateManager.record_token_usage_event is called after execution.
+    """
+    from orchestrator.config import HarnessConfig
+    from orchestrator.db import StateManager
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    cfg = HarnessConfig(binary="antigravity", args=["-p", "{prompt}"])
+    adapter = AsyncHarnessAdapter(
+        name="antigravity",
+        config=cfg,
+        state_manager=state_manager,
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=55,
+    )
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        return 0, "All tests passed.\nPrompt tokens: 100,000\nCompletion tokens: 20,000\nTotal tokens: 120,000"
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+
+    log_file = tmp_path / "harness_token.log"
+    exit_code = await adapter.execute(
+        prompt="Implement issue #55",
+        cwd=tmp_path,
+        log_file=log_file,
+        model="gemini-3.7-flash",
+    )
+
+    assert exit_code == 0
+
+    # Verify token usage event recorded in StateManager
+    events = await state_manager.get_window_events("antigravity", window_hours=1.0)
+    assert len(events) == 1
+    assert events[0]["harness_name"] == "antigravity"
+    assert events[0]["model_name"] == "gemini-3.7-flash"
+    assert events[0]["project_name"] == "graph-engineering"
+    assert events[0]["node_name"] == "devtest"
+    assert events[0]["issue_number"] == 55
+    assert events[0]["prompt_tokens"] == 100000
+    assert events[0]["completion_tokens"] == 20000
+    assert events[0]["total_tokens"] == 120000
+
+
+@pytest.mark.asyncio
+async def test_harness_token_recording_sqlite_resilience(tmp_path: Path, monkeypatch):
+    """
+    Asserts database write failure during token usage recording does not crash execution.
+    """
+    from unittest.mock import AsyncMock
+    from orchestrator.config import HarnessConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    failing_sm = AsyncMock()
+    failing_sm.record_token_usage_event.side_effect = RuntimeError("Database Locked")
+
+    cfg = HarnessConfig(binary="antigravity", args=["-p", "{prompt}"])
+    adapter = AsyncHarnessAdapter(
+        name="antigravity",
+        config=cfg,
+        state_manager=failing_sm,
+        project_name="proj",
+        node_name="devtest",
+        issue_number=1,
+    )
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        return 0, "Total tokens: 50,000"
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+
+    log_file = tmp_path / "test.log"
+    exit_code = await adapter.execute("prompt", tmp_path, log_file)
+    assert exit_code == 0
+
+
+
 
