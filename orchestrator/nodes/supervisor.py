@@ -409,6 +409,40 @@ async def check_repository_anomalies(
                         "details": f"Issue #{issue_num} has been open for {age_hours:.1f}h (> 12h SLA). Escalating to PO review.",
                     })
 
+    # Sync all scanned issues and PRs into SDLC Blackboard memory
+    sdlc_items: List[Dict[str, Any]] = []
+    for issue in open_issues:
+        issue_labels = [l.get("name") for l in issue.get("labels", []) if isinstance(l, dict)]
+        sdlc_items.append({
+            "issue_number": issue.get("number"),
+            "title": issue.get("title", ""),
+            "state": "OPEN",
+            "labels": issue_labels,
+            "updated_at": parse_iso_timestamp(issue.get("updatedAt", "")) if issue.get("updatedAt") else time.time(),
+        })
+    for pr in prs:
+        pr_labels = [l.get("name") for l in pr.get("labels", []) if isinstance(l, dict)]
+        sdlc_items.append({
+            "issue_number": pr.get("number"),
+            "title": pr.get("title", ""),
+            "state": "OPEN",
+            "labels": pr_labels,
+            "linked_pr": pr.get("number"),
+            "updated_at": parse_iso_timestamp(pr.get("updatedAt", "")) if pr.get("updatedAt") else time.time(),
+        })
+    if sdlc_items:
+        await state_manager.sync_project_sdlc_items(project.name, sdlc_items)
+
+    # Persist all detected anomalies to Blackboard memory
+    for anomaly in anomalies:
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="supervisor",
+            error_type=anomaly.get("type", "ANOMALY"),
+            error_message=anomaly.get("details", ""),
+            issue_number=anomaly.get("issue_id") or anomaly.get("pr_number"),
+        )
+
     return anomalies
 
 

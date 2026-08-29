@@ -139,6 +139,12 @@ async def run_bau_node(
             node_type="bau",
             error_message=f"BAU Harness exited with code {exit_code}. See logs: {log_file.name}",
         )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="bau",
+            error_type="HARNESS_ERROR",
+            error_message=f"BAU Harness exited with code {exit_code}. See logs: {log_file.name}",
+        )
         await state_manager.release_lock("global", project.repo, "bau")
         return False, f"BAU execution failed (exit code {exit_code})."
 

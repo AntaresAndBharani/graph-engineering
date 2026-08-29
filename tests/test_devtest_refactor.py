@@ -57,6 +57,8 @@ async def test_devtest_remediates_needs_refactor_pr(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(devtest, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "verify_git_safety", mock_verify_safety)
 
     config = GlobalConfig(

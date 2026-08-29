@@ -22,26 +22,31 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
 │ alpha           AntaresAndBharani/alpha       DevTest       Active   14:52:10       Issue #27      │
 │ crosstraining   AntaresAndBharani/crosstrain  Idle          Active   14:52:10       None           │
 │ zebra           AntaresAndBharani/zebra       Idle          Paused   14:52:10       None           │
-├────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ 14:52:08 [INFO] [orchestrator] Starting Orchestrator Daemon (Poll Interval: 300s)                  │
-│ 14:52:09 [INFO] [orchestrator] Synchronizing repository workflow labels...                         │
-│ 14:52:10 [INFO] [orchestrator] [alpha] DevTest: Starting TDD cycle for issue #27                  │
-└────────────────────────────────────────────────────────────────────────────────── Q: Quit  R: Refresh ┘
+├──────────────────────────────────────────────────┬─────────────────────────────────────────────────┤
+│ Active SDLC Items (alpha)                        │ [ Logs ]  Alerts (24h)                          │
+│ ID    Title                   Status   PR        │ 14:52:08 [INFO] Daemon started                  │
+│ #27   feat(ui): dashboard     dev      #32       │ 14:52:10 [INFO] [alpha] DevTest: Starting TDD   │
+└──────────────────────────────────────────────────┴─────────────────────────────── Q: Quit  R: Refresh ┘
 ```
 
 ### Key UI Capabilities:
-1. **Alphabetically Sorted Projects DataTable**:
+1. **Alphabetically Sorted Projects DataTable (Top Pane)**:
    - Displays real-time status across all configured repositories: `[Project Name | Repository | Active Node | Status | Last Updated | Locks/Anomalies]`.
    - Projects are automatically sorted in alphabetical order.
    - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
-2. **Filtered & Bounded Log Stream (`RichLog`)**:
+2. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
+   - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite.
+   - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`) and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
+3. **Reactive Project Selection**:
+   - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.
+4. **Filtered & Bounded Log Stream (`RichLog`)**:
    - Captures core root `orchestrator` daemon events via `TextualLogHandler`.
    - Backed by a bounded `collections.deque(maxlen=1000)` buffer to prevent memory growth or UI freezes.
    - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
-3. **Native Async Concurrency**:
+5. **Native Async Concurrency**:
    - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
    - Per-project worker loops execute concurrently in the same loop via `asyncio.gather()` / `asyncio.TaskGroup` with zero cross-thread SQLite collisions.
-4. **Graceful Teardown & Resource Cleanup**:
+6. **Graceful Teardown & Resource Cleanup**:
    - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
    - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.
 

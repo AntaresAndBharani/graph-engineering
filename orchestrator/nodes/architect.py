@@ -239,6 +239,18 @@ async def _review_pr_architecture(
     pr_number = target_pr["number"]
     pr_title = target_pr.get("title", "")
 
+    # Sync PR into SDLC Blackboard memory
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": pr_number,
+            "title": pr_title,
+            "state": "OPEN",
+            "labels": [review_trigger],
+            "linked_pr": pr_number,
+        }],
+    )
+
     harness_name = node_cfg.harness or "claude"
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
@@ -306,6 +318,13 @@ async def _review_pr_architecture(
     if exit_code == 0:
         return True, f"Architect completed architectural review on PR #{pr_number}."
     else:
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="architect",
+            error_type="HARNESS_ERROR",
+            error_message=f"Architect review on PR #{pr_number} failed (exit code {exit_code}).",
+            issue_number=pr_number,
+        )
         return False, f"Architect review on PR #{pr_number} failed (exit code {exit_code})."
 
 
@@ -393,6 +412,17 @@ async def _triage_story(
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 
+    # Sync issue into SDLC Blackboard memory
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": issue_id,
+            "title": issue_title,
+            "state": "OPEN",
+            "labels": [trigger],
+        }],
+    )
+
     harness_name = node_cfg.harness or "claude"
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
@@ -453,6 +483,13 @@ async def _triage_story(
             node_type="architect",
             error_message=f"Harness exited with code {exit_code}. See logs: {log_file.name}",
         )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="architect",
+            error_type="HARNESS_ERROR",
+            error_message=f"Harness exited with code {exit_code}. See logs: {log_file.name}",
+            issue_number=issue_id,
+        )
         if shutil.which("gh"):
             p1 = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(issue_id),
@@ -496,14 +533,41 @@ async def _triage_story(
                 pass
 
         if is_closed:
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": issue_id,
+                    "title": issue_title,
+                    "state": "CLOSED",
+                    "labels": current_labels,
+                }],
+            )
             await state_manager.release_lock(issue_id, project.repo, "architect")
             return True, f"Architect node verified issue #{issue_id} was already satisfied and closed it."
 
         if linked_count > 0 or processed_label in current_labels:
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": issue_id,
+                    "title": issue_title,
+                    "state": "OPEN",
+                    "labels": [processed_label],
+                }],
+            )
             await state_manager.release_lock(issue_id, project.repo, "architect")
             return True, f"Architect node triaged and decomposed issue #{issue_id} into {linked_count} linked subtask(s) ('{output_label}')."
 
         if trigger not in current_labels:
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": issue_id,
+                    "title": issue_title,
+                    "state": "OPEN",
+                    "labels": current_labels,
+                }],
+            )
             await state_manager.release_lock(issue_id, project.repo, "architect")
             labels_str = ", ".join(current_labels) or "no labels"
             return True, f"Architect node classified and transitioned issue #{issue_id} to [{labels_str}]."
@@ -513,6 +577,13 @@ async def _triage_story(
             repo=project.repo,
             node_type="architect",
             error_message="Architect node finished without classifying the issue or creating subtasks.",
+        )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="architect",
+            error_type="UNCLASSIFIED_ESCALATION",
+            error_message="Architect node finished without classifying the issue or creating subtasks.",
+            issue_number=issue_id,
         )
         p_edit = await asyncio.create_subprocess_exec(
             "gh", "issue", "edit", str(issue_id),
