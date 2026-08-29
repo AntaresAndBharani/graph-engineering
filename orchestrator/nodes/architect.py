@@ -178,11 +178,16 @@ async def _sync_architecture_plane(
     model = node_cfg.research_model or "gemini-3.7-flash-high"
     effort = node_cfg.research_effort
 
-    console.print(f"  [{project.name}:architect-research] [bold cyan]⚡ Running Architecture Modernization & Best-Practice Sync[/bold cyan] ({harness_name}/{model})")
+    console.print(f"\n  [bold cyan]🏛️ [{project.name}:architect][/bold cyan] [bold white]Living Architecture Plane Synchronization[/bold white]")
+    console.print(f"  [dim]• Target: {project.repo} | Scope: Repository Architecture Standards ('.graph/architecture.md')[/dim]")
+    console.print(f"  [dim]• Harness: {harness_name} ({model}) | Frequency: Weekly (7-day SLA)[/dim]")
 
     prompt = (
         f"You are the Principal Systems Architect operating in non-interactive batch mode.\n"
         f"Perform an authoritative Architecture Analysis, Best-Practice Modernization, and Living Documentation Update for repository '{project.repo}'.\n\n"
+        f"CRITICAL RULES:\n"
+        f"- This task is strictly an architectural inspection and documentation update for '.graph/architecture.md'.\n"
+        f"- Do NOT run heavy project test suites (such as gradle test/lint or test scripts) or modify production application source code.\n\n"
         f"OPERATIONAL STEPS:\n"
         f"1. Inspect the codebase structure, build files (e.g. build.gradle.kts, package.json, Cargo.toml, pyproject.toml), design patterns, and package conventions in this workspace.\n"
         f"2. Search the web for current industry best practices, modern framework standards, clean architecture principles, and idiomatic patterns for this specific technology stack.\n"
@@ -203,7 +208,7 @@ async def _sync_architecture_plane(
         log_file=log_file,
         model=model,
         effort=effort,
-        console_prefix=f"[{project.name}:architect-research]",
+        console_prefix=f"[{project.name}:architect-plane]",
     )
 
     await state_manager.release_lock("architecture_sync", project.repo, "architect_research")
@@ -255,7 +260,9 @@ async def _review_pr_architecture(
         issue_id=f"pr_{pr_number}",
     )
 
-    console.print(f"  [{project.name}:architect-review] [bold magenta]🔍 Reviewing PR #{pr_number} ('{pr_title}') against architecture standards[/bold magenta]")
+    console.print(f"\n  [bold magenta]🔍 [{project.name}:architect][/bold magenta] [bold white]Architectural Review on Pull Request #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
+    console.print(f"  [dim]• Target: {project.repo} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+    console.print(f"  [dim]• Scope: Clean Architecture Contracts & Domain Boundaries against '.graph/architecture.md'[/dim]")
 
     prompt = (
         f"You are the Principal Architect operating in non-interactive batch mode.\n"
@@ -371,8 +378,9 @@ async def _triage_story(
         f"     - Post a comment on the parent issue listing all created subtask numbers.\n"
     )
 
-    console.print(f"  [{project.name}:architect] [bold magenta]⚡ Starting Architect evaluation on Issue #{issue_id}[/bold magenta] ('{issue_title}')")
-    console.print(f"  [{project.name}:architect] [dim]Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+    console.print(f"\n  [bold magenta]⚡ [{project.name}:architect][/bold magenta] [bold white]Evaluating User Story #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
+    console.print(f"  [dim]• Target: {project.repo} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+    console.print(f"  [dim]• Scope: Issue Classification, 3-Amigos Triage & INVEST Subtask Decomposition[/dim]")
 
     exit_code = await adapter.execute(
         prompt=prompt,

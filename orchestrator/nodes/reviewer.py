@@ -126,7 +126,8 @@ async def run_reviewer_node(
         if not lock_acquired:
             continue
 
-        console.print(f"  [{project.name}:reviewer] [bold green]🔍 Evaluating PR #{pr_number}[/bold green] ('{pr_title}')")
+        console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]Evaluating PR #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
+        console.print(f"  [dim]• Target: {project.repo} | Status: Remote CI Quality Gate & Auto-Merge[/dim]")
 
         # 3. Check Merge Conflicts
         if mergeable == "CONFLICTING":

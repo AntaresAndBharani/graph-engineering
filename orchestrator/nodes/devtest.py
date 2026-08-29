@@ -100,8 +100,9 @@ async def run_devtest_node(
     # 4. Pre-Flight Cleanup: wipe aborted AI artifacts and ensure clean workspace
     from rich.console import Console
     console = Console()
-    console.print(f"  [{project.name}:devtest] [bold blue]⚡ Starting DevTest on Issue #{issue_id}[/bold blue] ('{issue_title}')")
-    console.print(f"  [{project.name}:devtest] [dim]Harness: {harness_name} ({node_cfg.model or 'default'}) | Branch: {branch_prefix}{issue_id}[/dim]")
+    console.print(f"\n  [bold blue]⚡ [{project.name}:devtest][/bold blue] [bold white]Implementing Subtask #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
+    console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_prefix}{issue_id} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+    console.print(f"  [dim]• Scope: 3-Amigos TDD Development, Test Verification & PR Creation[/dim]")
 
     try:
         await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
