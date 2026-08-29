@@ -57,6 +57,15 @@ class StateManager:
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS project_states (
+                    project_name TEXT PRIMARY KEY,
+                    is_paused INTEGER DEFAULT 0,
+                    updated_at REAL NOT NULL
+                );
+                """
+            )
             await db.commit()
 
     async def register_daemon(self, pid: int) -> None:
@@ -398,3 +407,58 @@ class StateManager:
                 (node_type, repo, now),
             )
             await db.commit()
+
+    async def pause_project(self, project_name: str) -> None:
+        """Sets a project to paused state in SQLite database."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO project_states (project_name, is_paused, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(project_name) DO UPDATE SET is_paused = 1, updated_at = excluded.updated_at
+                """,
+                (project_name, now),
+            )
+            await db.commit()
+
+    async def resume_project(self, project_name: str) -> None:
+        """Sets a project to active (resumed) state in SQLite database."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO project_states (project_name, is_paused, updated_at)
+                VALUES (?, 0, ?)
+                ON CONFLICT(project_name) DO UPDATE SET is_paused = 0, updated_at = excluded.updated_at
+                """,
+                (project_name, now),
+            )
+            await db.commit()
+
+    async def is_project_paused(self, project_name: str) -> bool:
+        """Checks if a project has been paused by the user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "SELECT is_paused FROM project_states WHERE project_name = ?",
+                (project_name,),
+            )
+            row = await cursor.fetchone()
+            return bool(row[0]) if row else False
+
+    async def get_paused_projects(self) -> set[str]:
+        """Returns a set of all currently paused project names."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "SELECT project_name FROM project_states WHERE is_paused = 1"
+            )
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}

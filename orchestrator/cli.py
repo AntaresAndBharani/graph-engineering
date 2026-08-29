@@ -96,6 +96,11 @@ async def run_project_cycle(
     if await state_manager.is_stop_requested():
         return False
 
+    if await state_manager.is_project_paused(project.name):
+        if not silent_idle:
+            console.print(f"  [{project.name}] [bold yellow]⏸️ Project is paused by user. Skipping.[/bold yellow]")
+        return False
+
     pipeline_work_done = False
     prefix = f"[{project.name}]"
 
@@ -356,11 +361,19 @@ def list_command(
     ),
 ):
     """Displays a formatted table of all registered repositories and harness assignments."""
+    asyncio.run(_list_projects(config_path))
+
+
+async def _list_projects(config_path: Optional[Path]) -> None:
     try:
         config = load_config(config_path)
     except Exception as e:
         console.print(f"[bold red]Configuration Error:[/bold red] {e}")
         raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+    paused_projects = await state_manager.get_paused_projects()
 
     table = Table(title="Managed Project Repositories", header_style="bold cyan")
     table.add_column("Name", style="bold white")
@@ -375,7 +388,12 @@ def list_command(
         dev_cfg = p.nodes.get("devtest")
         arch_str = f"{arch_cfg.harness}" if arch_cfg else "claude"
         dev_str = f"{dev_cfg.harness}" if dev_cfg else "antigravity"
-        status = "[green]Enabled[/green]" if p.enabled else "[dim red]Disabled[/dim red]"
+        if not p.enabled:
+            status = "[dim red]Disabled (config)[/dim red]"
+        elif p.name in paused_projects:
+            status = "[bold yellow]⏸️ Paused (CLI)[/bold yellow]"
+        else:
+            status = "[bold green]● Active[/bold green]"
 
         table.add_row(p.name, p.repo, str(p.local_path), arch_str, dev_str, status)
 
@@ -738,8 +756,86 @@ def logs_command(
             sys.stdout.flush()
 
 
+@app.command("pause")
+def pause_command(
+    project_name: str = typer.Argument(
+        ...,
+        help="Name of the project to pause.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Pauses scanning and development cycle for a specific project."""
+    asyncio.run(_pause_project(project_name, config_path))
+
+
+async def _pause_project(project_name: str, config_path: Optional[Path]) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    matching = [p for p in config.projects if p.name == project_name]
+    if not matching:
+        console.print(f"[bold red]Error:[/bold red] Project '{project_name}' is not registered in configuration.")
+        raise typer.Exit(code=1)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+    await state_manager.pause_project(project_name)
+    console.print(f"[bold yellow]⏸️ Project '{project_name}' is now PAUSED.[/bold yellow]")
+    console.print("[dim]The orchestrator daemon will skip scanning and development for this project until resumed.[/dim]")
+
+
+@app.command("resume")
+def resume_command(
+    project_name: str = typer.Argument(
+        ...,
+        help="Name of the project to resume.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Resumes scanning and development cycle for a paused project."""
+    asyncio.run(_resume_project(project_name, config_path))
+
+
+async def _resume_project(project_name: str, config_path: Optional[Path]) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    matching = [p for p in config.projects if p.name == project_name]
+    if not matching:
+        console.print(f"[bold red]Error:[/bold red] Project '{project_name}' is not registered in configuration.")
+        raise typer.Exit(code=1)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+    await state_manager.resume_project(project_name)
+    console.print(f"[bold green]▶️ Project '{project_name}' is now RESUMED (Active).[/bold green]")
+    console.print("[dim]The orchestrator daemon will resume scanning and development for this project.[/dim]")
+
+
 @app.command("stop")
 def stop_command(
+    project_name: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Target a specific registered project to pause instead of halting the global daemon.",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -753,8 +849,11 @@ def stop_command(
         help="Path to custom config.yaml file.",
     ),
 ):
-    """Gracefully halts the running background daemon and stops all active agents."""
-    asyncio.run(_stop_daemon(force, config_path))
+    """Gracefully halts the running background daemon or pauses a specific project."""
+    if project_name:
+        asyncio.run(_pause_project(project_name, config_path))
+    else:
+        asyncio.run(_stop_daemon(force, config_path))
 
 
 async def _stop_daemon(force: bool, config_path: Optional[Path]) -> None:
