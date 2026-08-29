@@ -1,0 +1,143 @@
+﻿# CLI & Terminal Dashboard Specification (`docs/node-cli.md`)
+
+**Package**: `orchestrator.cli` / `orchestrator.ui`  
+**Command Entry Point**: `orchestrator`  
+**Architecture Layer**: Presentation & UI Adapters (Layer 4)
+
+---
+
+## 🏛️ Overview
+
+The `graph-orchestrator` CLI serves as the developer control plane and daemon runner for the multi-agent software engineering graph. It provides single-pass commands, multi-project status inspection, PO-proxy supervision, and a continuous background watch daemon equipped with a modern **Textual Terminal User Interface (TUI)** observability dashboard.
+
+---
+
+## 🖥️ Textual TUI Observability Dashboard
+
+When running `orchestrator watch` in an interactive terminal, the daemon launches a read-only, non-blocking TUI powered by `textual` and `rich`.
+
+```text
+┌──────────────────────────────────────── Graph Orchestrator ────────────────────────────────────────┐
+│ Project Name    Repository                    Active Node   Status   Last Updated   Locks/Anomalies│
+│ alpha           AntaresAndBharani/alpha       DevTest       Active   14:52:10       Issue #27      │
+│ crosstraining   AntaresAndBharani/crosstrain  Idle          Active   14:52:10       None           │
+│ zebra           AntaresAndBharani/zebra       Idle          Paused   14:52:10       None           │
+├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 14:52:08 [INFO] [orchestrator] Starting Orchestrator Daemon (Poll Interval: 300s)                  │
+│ 14:52:09 [INFO] [orchestrator] Synchronizing repository workflow labels...                         │
+│ 14:52:10 [INFO] [orchestrator] [alpha] DevTest: Starting TDD cycle for issue #27                  │
+└────────────────────────────────────────────────────────────────────────────────── Q: Quit  R: Refresh ┘
+```
+
+### Key UI Capabilities:
+1. **Alphabetically Sorted Projects DataTable**:
+   - Displays real-time status across all configured repositories: `[Project Name | Repository | Active Node | Status | Last Updated | Locks/Anomalies]`.
+   - Projects are automatically sorted in alphabetical order.
+   - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
+2. **Filtered & Bounded Log Stream (`RichLog`)**:
+   - Captures core root `orchestrator` daemon events via `TextualLogHandler`.
+   - Backed by a bounded `collections.deque(maxlen=1000)` buffer to prevent memory growth or UI freezes.
+   - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
+3. **Native Async Concurrency**:
+   - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
+   - Per-project worker loops execute concurrently in the same loop via `asyncio.gather()` / `asyncio.TaskGroup` with zero cross-thread SQLite collisions.
+4. **Graceful Teardown & Resource Cleanup**:
+   - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
+   - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.
+
+---
+
+## 🛠️ CLI Commands & Options
+
+### `orchestrator watch`
+Starts the continuous background polling daemon.
+
+```bash
+orchestrator watch [OPTIONS]
+```
+
+**Options**:
+- `-i, --interval INTEGER`: Polling interval in seconds (overrides `poll_interval_seconds` in `config.yaml`).
+- `-c, --config PATH`: Path to custom `config.yaml` file.
+- `--dashboard / --no-dashboard`: Enable or disable the interactive Textual TUI dashboard (default: `--dashboard`).
+- `--headless`: Run in headless mode (alias for `--no-dashboard`).
+
+**Headless Fallback & CI/CD Auto-Detection**:
+- When standard output is not an interactive terminal (`sys.stdout.isatty() is False`), or when `--no-dashboard` / `--headless` is specified, the Textual TUI does not initialize.
+- Headless execution runs the standard asynchronous polling loop emitting formatted logs directly to `stdout`.
+- The presentation UI module `orchestrator.ui.dashboard` is loaded lazily and is never imported in headless mode.
+
+---
+
+### `orchestrator run`
+Executes an immediate single evaluation pass across registered projects.
+
+```bash
+orchestrator run [-p PROJECT] [-n NODE] [-c CONFIG]
+```
+
+---
+
+### `orchestrator list`
+Displays a formatted Rich table of all registered repositories, assigned harnesses, and status.
+
+```bash
+orchestrator list [-c CONFIG]
+```
+
+---
+
+### `orchestrator doctor`
+Performs system health inspection across dependencies (`git`, `gh`, `claude`, `agy`, `devin`), database connectivity, and repository paths.
+
+```bash
+orchestrator doctor
+```
+
+---
+
+### `orchestrator init` / `orchestrator labels`
+Initializes SQLite database and provisions/synchronizes all managed workflow labels on GitHub.
+
+```bash
+orchestrator init [-p PROJECT] [-c CONFIG]
+orchestrator labels [-p PROJECT] [-c CONFIG]
+```
+
+---
+
+### `orchestrator pause` / `orchestrator resume`
+Dynamically pauses or resumes polling and node execution for a specific project.
+
+```bash
+orchestrator pause <project_name>
+orchestrator resume <project_name>
+```
+
+---
+
+### `orchestrator stop`
+Signals a safe graceful stop to the running background daemon without killing active jobs ungracefully.
+
+```bash
+orchestrator stop
+```
+
+---
+
+### `orchestrator reload`
+Signals the running daemon to dynamically hot-reload configuration and in-memory Python modules without restarting the process.
+
+```bash
+orchestrator reload
+```
+
+---
+
+### `orchestrator supervisor`
+Commands for PO-proxy Supervisor evaluation, inspection, and blackboard tracking.
+
+```bash
+orchestrator supervisor evaluate <issue_number> -p <project_name> [--dry-run]
+orchestrator supervisor status -p <project_name>
+```

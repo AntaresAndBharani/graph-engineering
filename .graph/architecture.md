@@ -69,7 +69,7 @@ flowchart TD
 |---|---|---|---|
 | **Runtime & Language** | Python | `>=3.11` | Modern `asyncio` primitives, `TaskGroup`, exception groups, enhanced type hinting (`typing.Self`, union `|`), and high-performance execution. |
 | **Build & Packaging** | Hatchling | PEP 517 / PEP 621 | Modern declarative metadata in `pyproject.toml`, reproducible wheel distribution, zero legacy setup scripts. |
-| **CLI & Terminal UX** | Typer + Rich | `typer>=0.12.0`, `rich>=13.7.0` | Declarative command routing with type annotations, formatted terminal diagnostics, live progress rendering, and ANSI-stripped output streaming. |
+| **CLI & Terminal UX** | Typer + Rich + Textual | `typer>=0.12.0`, `rich>=13.7.0`, `textual>=0.50.0` | Declarative command routing with type annotations, interactive TUI observability dashboard (`DashboardApp`), bounded log streaming (`TextualLogHandler`), formatted terminal diagnostics, live progress rendering, and ANSI-stripped output streaming. |
 | **Configuration & Validation** | Pydantic v2 | `pydantic>=2.6.0` | Rust-backed schema validation, cross-platform path resolution (`~`, `$HOME`, `%USERPROFILE%`), strict runtime validation. |
 | **Persistence & State Engine** | aiosqlite (SQLite WAL) | `aiosqlite>=0.20.0` | Asynchronous file-based persistence, Write-Ahead Logging (WAL) concurrency, deterministic TTL distributed locking, and Artifact Blackboard store. |
 | **Process & Subprocess Lifecycle** | psutil | `psutil>=5.9.0` | Cross-platform recursive process tree inspection, child process termination, and graceful shutdown without zombie processes. |
@@ -87,6 +87,7 @@ The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports a
 graph TD
     subgraph Layer 4: Presentation & UI Adapters
         CLI_Commands["Typer CLI Commands (`orchestrator/cli.py`)"]
+        TUI_Dashboard["Textual TUI Observability Dashboard (`orchestrator/ui/dashboard.py`)"]
         Rich_Formatters["Rich Terminal Formatters, Tables & Live Views"]
     end
 
@@ -122,7 +123,7 @@ graph TD
 1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`)**:
    - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
    - Strictly isolated from concrete execution logic, database calls, and network I/O.
-   - Provides pure path normalization and environment resolution functions (`resolve_path`).
+   - Provides pure path normalization, environment resolution functions (`resolve_path`), and bounded log streaming (`TextualLogHandler`).
 
 2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
@@ -138,10 +139,10 @@ graph TD
      - `node-reviewer`: Remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
      - `node-bau`: Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
 
-4. **Presentation & CLI Layer (`orchestrator/cli.py`)**:
-   - Pure UI adapter handling command-line arguments, options, terminal dashboards, and signal handling.
-   - Commands: `run`, `watch`, `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `reload`, `artifact`, `artifacts`.
-   - Coordinates parallel workers across projects and handles graceful daemon shutdown and live reloading.
+4. **Presentation & CLI Layer (`orchestrator/cli.py`, `orchestrator/ui/dashboard.py`)**:
+   - Pure UI adapter handling command-line arguments, options (`--dashboard/--no-dashboard`, `--headless`), terminal dashboards (`DashboardApp`), and signal handling.
+   - Commands: `run`, `watch` (with interactive Textual TUI dashboard and headless fallback), `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `reload`, `artifact`, `artifacts`, `supervisor`.
+   - Coordinates parallel workers across projects and handles graceful daemon shutdown, live reloading, and non-blocking TUI observability.
 
 ---
 
@@ -157,6 +158,7 @@ graph-engineering/
 │   │   └── 000000-prreviewprotocol.md # Anti-Gravity Blackboard PR protocol spec
 │   ├── e2e-testing-recommendations.md # E2E testing architecture recommendations
 │   ├── local-cli-pipeline.md        # Comprehensive pipeline manual and architecture guide
+│   ├── node-cli.md                  # CLI & Terminal Dashboard specification
 │   ├── node-supervisor.md           # Node 0 specification
 │   ├── node-architect.md            # Node 1 specification
 │   ├── node-devtest.md              # Node 2 specification
@@ -169,9 +171,12 @@ graph-engineering/
 │   ├── db.py                        # Asynchronous SQLite state, distributed lock & blackboard manager
 │   ├── harness.py                   # Pluggable AI CLI adapter (Claude, Antigravity, Devin)
 │   ├── housekeeping.py              # GitHub label provisioning and taxonomy synchronization
-│   ├── logging.py                   # Unified file and console logging with ANSI sanitization
+│   ├── logging.py                   # Unified file and console logging with ANSI sanitization & TextualLogHandler
 │   ├── poller.py                    # Zero-token GitHub CLI/GraphQL query abstraction
 │   ├── reloader.py                  # Hot-reloading watcher and module re-importer
+│   ├── ui/                          # Presentation & TUI dashboard package
+│   │   ├── __init__.py              # Subpackage exports
+│   │   └── dashboard.py             # DashboardApp Textual TUI with DataTable & RichLog
 │   └── nodes/                       # Autonomous pipeline node handlers
 │       ├── __init__.py              # Subpackage exports
 │       ├── architect.py             # Living architecture & story decomposition node
@@ -185,6 +190,7 @@ graph-engineering/
 │   ├── test_architect_governance.py # Architect SLA and zero-token tests
 │   ├── test_cli.py                  # CLI commands and UI diagnostics tests
 │   ├── test_config.py               # Configuration loading and path expansion tests
+│   ├── test_dashboard.py            # Textual dashboard, log handler, and UI tests
 │   ├── test_db.py                   # State manager, TTL, and Blackboard tests
 │   ├── test_harness.py              # Subprocess harness execution and timeout tests
 │   ├── test_logging.py              # Log rotation and ANSI strip tests
@@ -192,6 +198,7 @@ graph-engineering/
 │   ├── test_project_pause.py        # Per-project pause/resume lifecycle tests
 │   ├── test_reloader.py             # Hot reloading and source watcher tests
 │   ├── test_stop.py                 # Graceful daemon shutdown tests
+│   ├── test_supervisor_po.py        # Supervisor PO-proxy evaluation tests
 │   └── __init__.py                  # Test package root
 ├── pyproject.toml                   # PEP 517/PEP 621 build specification (Hatchling)
 ├── CHANGELOG.md                     # Keep a Changelog historical log

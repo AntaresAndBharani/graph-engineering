@@ -306,12 +306,34 @@ def watch_command(
         "-c",
         help="Path to custom config.yaml file.",
     ),
+    dashboard: bool = typer.Option(
+        True,
+        "--dashboard/--no-dashboard",
+        help="Enable or disable the interactive Textual TUI dashboard.",
+    ),
+    headless: bool = typer.Option(
+        False,
+        "--headless",
+        help="Run in headless mode (disables TUI dashboard).",
+    ),
 ):
     """Starts the continuous background polling daemon with a live terminal dashboard."""
-    asyncio.run(_watch_daemon(interval, config_path))
+    is_interactive = sys.stdout.isatty() and dashboard and not headless
+    if not is_interactive:
+        asyncio.run(_watch_daemon_headless(interval, config_path))
+    else:
+        asyncio.run(_watch_daemon_tui(interval, config_path))
 
 
 async def _watch_daemon(
+    interval_override: Optional[int],
+    config_path: Optional[Path],
+) -> None:
+    """Standard headless daemon entry point (backwards compatibility)."""
+    await _watch_daemon_headless(interval_override, config_path)
+
+
+async def _watch_daemon_headless(
     interval_override: Optional[int],
     config_path: Optional[Path],
 ) -> None:
@@ -370,6 +392,75 @@ async def _watch_daemon(
             w.cancel()
         console.print("[yellow]Daemon stopped by user.[/yellow]")
     finally:
+        AsyncHarnessAdapter.terminate_all_active()
+        await state_manager.unregister_daemon()
+
+
+async def _watch_daemon_tui(
+    interval_override: Optional[int],
+    config_path: Optional[Path],
+) -> None:
+    from orchestrator.logging import TextualLogHandler
+    from orchestrator.ui.dashboard import DashboardApp
+
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    textual_handler = TextualLogHandler(maxlen=1000)
+    logger = setup_logger(
+        config.settings.resolved_log_dir,
+        config.settings.log_level,
+        textual_handler=textual_handler,
+    )
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    import os
+    daemon_pid = os.getpid()
+    await state_manager.register_daemon(daemon_pid)
+    await state_manager.clear_reload_request()
+
+    watcher = SourceWatcher(config_path=config_path, watch_source=True)
+    interval = interval_override or config.settings.poll_interval_seconds
+    enabled_projects = [p for p in config.projects if p.enabled]
+
+    # Startup label synchronization
+    await sync_all_projects_labels(config.projects, config.managed_labels)
+
+    app_instance = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        log_handler=textual_handler,
+    )
+
+    if not enabled_projects:
+        try:
+            await app_instance.run_async()
+        finally:
+            await app_instance.teardown()
+            await state_manager.unregister_daemon()
+        return
+
+    workers = [
+        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path, watcher=watcher))
+        for p in enabled_projects
+    ]
+    tui_task = asyncio.create_task(app_instance.run_async())
+
+    try:
+        done, pending = await asyncio.wait([tui_task, *workers], return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    except asyncio.CancelledError:
+        for w in workers:
+            w.cancel()
+        tui_task.cancel()
+    finally:
+        await app_instance.teardown()
         AsyncHarnessAdapter.terminate_all_active()
         await state_manager.unregister_daemon()
 

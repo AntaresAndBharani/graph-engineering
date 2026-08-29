@@ -6,10 +6,59 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Optional
+from collections import deque
+from typing import Callable, Deque, List, Optional, Union
 from rich.logging import RichHandler
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+class TextualLogHandler(logging.Handler):
+    """
+    Bounded log handler designed for the Textual TUI dashboard.
+    Captures core root orchestrator events into a bounded deque buffer (default maxlen=1000)
+    while dropping/filtering verbose per-node agent harness traces (which are isolated in per-node log files).
+    """
+
+    def __init__(
+        self,
+        maxlen: int = 1000,
+        callback: Optional[Callable[[logging.LogRecord, str], None]] = None,
+    ):
+        super().__init__()
+        self.buffer: Deque[logging.LogRecord] = deque(maxlen=maxlen)
+        self.callback = callback
+        self.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+
+    @property
+    def records(self) -> List[logging.LogRecord]:
+        return list(self.buffer)
+
+    def is_node_trace(self, record: logging.LogRecord) -> bool:
+        """
+        Determines if a log record originates from a per-node agent harness trace
+        that should be filtered out from the dashboard log stream.
+        """
+        if getattr(record, "node_trace", False) or getattr(record, "is_node_trace", False) or getattr(record, "is_harness_trace", False):
+            return True
+        if getattr(record, "category", "") in ("node_trace", "harness_trace"):
+            return True
+        if record.name.startswith("orchestrator.node_trace") or record.name.startswith("orchestrator.harness_trace"):
+            return True
+        if getattr(record, "trace", False):
+            return True
+        return False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.is_node_trace(record):
+                return
+            self.buffer.append(record)
+            if self.callback:
+                formatted = self.format(record)
+                self.callback(record, formatted)
+        except Exception:
+            self.handleError(record)
 
 
 def strip_ansi(text: str) -> str:
@@ -61,9 +110,14 @@ def rotate_logs(log_dir: Path, max_age_days: int = 30, max_size_mb: int = 50) ->
                 pass
 
 
-def setup_logger(log_dir: Optional[Path] = None, log_level: str = "INFO") -> logging.Logger:
+def setup_logger(
+    log_dir: Optional[Path] = None,
+    log_level: str = "INFO",
+    textual_handler: Optional[TextualLogHandler] = None,
+) -> logging.Logger:
     """
     Configures root logger with RichHandler and orchestrator.log file handler.
+    Optionally attaches a TextualLogHandler for the TUI dashboard.
     """
     logger = logging.getLogger("orchestrator")
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
@@ -91,5 +145,10 @@ def setup_logger(log_dir: Optional[Path] = None, log_level: str = "INFO") -> log
             )
             file_handler.setFormatter(file_formatter)
             logger.addHandler(file_handler)
+
+    if textual_handler:
+        # Avoid duplicate textual handler
+        if textual_handler not in logger.handlers:
+            logger.addHandler(textual_handler)
 
     return logger
