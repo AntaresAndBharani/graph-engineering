@@ -304,6 +304,68 @@ async def _review_pr_architecture(
         return False, f"Architect review on PR #{pr_number} failed (exit code {exit_code})."
 
 
+def build_triage_prompt(
+    project: ProjectConfig,
+    issue_id: int,
+    issue_title: str,
+    trigger: str,
+    output_label: str,
+    processed_label: str,
+    po_record: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Constructs the triage and decomposition prompt for the Architect harness.
+    Incorporates pre-approved Gherkin Acceptance Criteria from the Blackboard when available.
+    """
+    context_note = ""
+    if project.context_files:
+        context_note = f"Read the project context files in your workspace: {', '.join(project.context_files)}."
+
+    po_ac_context = ""
+    decomposition_instruction = (
+        f"     - Create new subtask issues: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+    )
+
+    if po_record and po_record.get("status") == "PO_APPROVED" and po_record.get("gherkin_ac"):
+        gherkin_ac = str(po_record["gherkin_ac"]).strip()
+        po_ac_context = (
+            f"\nPRE-APPROVED ACCEPTANCE CRITERIA (from PO Blackboard):\n"
+            f"The Product Owner proxy has already evaluated and approved the following Gherkin Acceptance Criteria for this issue:\n"
+            f"```gherkin\n{gherkin_ac}\n```\n"
+            f"CRITICAL: Do NOT re-derive acceptance criteria from scratch. Incorporate and decompose directly from these pre-approved Gherkin criteria into subtasks.\n"
+        )
+        decomposition_instruction = (
+            f"     - Create new subtask issues using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+        )
+
+    prompt = (
+        f"You are the Principal Architect operating autonomously in non-interactive batch mode.\n"
+        f"Perform Triage, Classification, and Architectural Decomposition for GitHub Issue #{issue_id} ('{issue_title}'). {context_note}\n"
+        f"{po_ac_context}\n"
+        f"CRITICAL OPERATIONAL RULES:\n"
+        f"1. You are fully autonomous. Do NOT ask questions in chat or wait for human confirmation. Perform all required actions immediately using GitHub CLI (`gh`).\n"
+        f"2. CLASSIFY AND ROUTE THE ISSUE ACCORDING TO ITS NATURE:\n"
+        f"   - **Case 1: ALREADY IMPLEMENTED ON MAIN**: If this issue's acceptance criteria are already satisfied, close it using:\n"
+        f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
+        f"   - **Case 2: STANDALONE BUG / DIRECT SUBTASK** (Small, self-contained, does not need subtask breakdown): Route directly to development by labeling it '{output_label}' and removing '{trigger}':\n"
+        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{output_label}'`\n"
+        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
+        f"   - **Case 3: TECH DEBT OR NON-BLOCKING REFACTOR**: Route to daily BAU maintenance by labeling it 'tech-debt' and removing '{trigger}':\n"
+        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'tech-debt'`\n"
+        f"   - **Case 4: MINOR ENHANCEMENT / FEATURE REQUEST**: Route to daily BAU maintenance by labeling it 'enhancement' and removing '{trigger}':\n"
+        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'enhancement'`\n"
+        f"   - **Case 5: AMBIGUOUS / INSUFFICIENT INFO**: If requirements are unclear or need product decisions, escalate to PO by labeling 'needs-po-review' and removing '{trigger}':\n"
+        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'needs-po-review'`\n"
+        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Requirements are ambiguous. Flagging for PO review with questions: <clarification questions>'`\n"
+        f"   - **Case 6: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable subtasks following 3-amigos and INVEST principles:\n"
+        f"{decomposition_instruction}"
+        f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
+        f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
+        f"     - Post a comment on the parent issue listing all created subtask numbers.\n"
+    )
+    return prompt
+
+
 async def _triage_story(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -349,33 +411,17 @@ async def _triage_story(
 
     adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
 
-    context_note = ""
-    if project.context_files:
-        context_note = f"Read the project context files in your workspace: {', '.join(project.context_files)}."
+    # Ingest pre-approved Gherkin AC from Blackboard if available
+    po_record = await state_manager.get_po_tracking(project.repo, issue_id)
 
-    prompt = (
-        f"You are the Principal Architect operating autonomously in non-interactive batch mode.\n"
-        f"Perform Triage, Classification, and Architectural Decomposition for GitHub Issue #{issue_id} ('{issue_title}'). {context_note}\n\n"
-        f"CRITICAL OPERATIONAL RULES:\n"
-        f"1. You are fully autonomous. Do NOT ask questions in chat or wait for human confirmation. Perform all required actions immediately using GitHub CLI (`gh`).\n"
-        f"2. CLASSIFY AND ROUTE THE ISSUE ACCORDING TO ITS NATURE:\n"
-        f"   - **Case 1: ALREADY IMPLEMENTED ON MAIN**: If this issue's acceptance criteria are already satisfied, close it using:\n"
-        f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
-        f"   - **Case 2: STANDALONE BUG / DIRECT SUBTASK** (Small, self-contained, does not need subtask breakdown): Route directly to development by labeling it '{output_label}' and removing '{trigger}':\n"
-        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{output_label}'`\n"
-        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
-        f"   - **Case 3: TECH DEBT OR NON-BLOCKING REFACTOR**: Route to daily BAU maintenance by labeling it 'tech-debt' and removing '{trigger}':\n"
-        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'tech-debt'`\n"
-        f"   - **Case 4: MINOR ENHANCEMENT / FEATURE REQUEST**: Route to daily BAU maintenance by labeling it 'enhancement' and removing '{trigger}':\n"
-        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'enhancement'`\n"
-        f"   - **Case 5: AMBIGUOUS / INSUFFICIENT INFO**: If requirements are unclear or need product decisions, escalate to PO by labeling 'needs-po-review' and removing '{trigger}':\n"
-        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label 'needs-po-review'`\n"
-        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Requirements are ambiguous. Flagging for PO review with questions: <clarification questions>'`\n"
-        f"   - **Case 6: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable subtasks following 3-amigos and INVEST principles:\n"
-        f"     - Create new subtask issues: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
-        f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
-        f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
-        f"     - Post a comment on the parent issue listing all created subtask numbers.\n"
+    prompt = build_triage_prompt(
+        project=project,
+        issue_id=issue_id,
+        issue_title=issue_title,
+        trigger=trigger,
+        output_label=output_label,
+        processed_label=processed_label,
+        po_record=po_record,
     )
 
     console.print(f"\n  [bold magenta]⚡ [{project.name}:architect][/bold magenta] [bold white]Evaluating User Story #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
