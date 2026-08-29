@@ -216,6 +216,22 @@ async def run_reviewer_node(
         if not prs:
             return False, f"No PRs labeled '{trigger}'. Idle (0 tokens)."
 
+    # Sync candidate PRs into SDLC Blackboard memory
+    if prs:
+        await state_manager.sync_project_sdlc_items(
+            project.name,
+            [
+                {
+                    "issue_number": pr["number"],
+                    "title": pr.get("title", ""),
+                    "state": "OPEN",
+                    "labels": [trigger],
+                    "linked_pr": pr["number"],
+                }
+                for pr in prs
+            ],
+        )
+
     from rich.console import Console
     console = Console()
 
@@ -276,6 +292,7 @@ async def run_reviewer_node(
                 comment=f"Code approved for PR #{pr_number} ('{pr_title}'), but branch '{branch_name}' has git merge conflicts against origin/main.",
             )
 
+            res_msg = "Conflicting files detected."
             if branch_name:
                 resolved, res_msg = await resolve_pr_merge_conflicts(
                     project, config, pr_number, branch_name, node_cfg
@@ -295,6 +312,14 @@ async def run_reviewer_node(
                     continue
                 else:
                     console.print(f"  [{project.name}:reviewer] [bold red]✗ Conflict resolution failed: {res_msg}[/bold red]")
+
+            await state_manager.record_anomaly_event(
+                project_name=project.name,
+                node_name="reviewer",
+                error_type="MERGE_CONFLICT",
+                error_message=f"PR #{pr_number} has unresolved merge conflicts: {res_msg}",
+                issue_number=pr_number,
+            )
 
             if shutil.which("gh"):
                 p1 = await asyncio.create_subprocess_exec(
@@ -326,6 +351,13 @@ async def run_reviewer_node(
             continue
 
         if ci_status == "FAIL":
+            await state_manager.record_anomaly_event(
+                project_name=project.name,
+                node_name="reviewer",
+                error_type="CI_FAILURE",
+                error_message=f"PR #{pr_number} CI checks failed ({ci_details}).",
+                issue_number=pr_number,
+            )
             if shutil.which("gh"):
                 p1 = await asyncio.create_subprocess_exec(
                     "gh", "pr", "edit", str(pr_number),
@@ -382,6 +414,16 @@ async def run_reviewer_node(
             if p_merge.returncode == 0:
                 merged_prs.append(pr_number)
                 await state_manager.delete_pr_artifact(project.repo, pr_number)
+                await state_manager.sync_project_sdlc_items(
+                    project.name,
+                    [{
+                        "issue_number": pr_number,
+                        "title": target_pr.get("title", ""),
+                        "state": "MERGED",
+                        "labels": ["merged"],
+                        "linked_pr": pr_number,
+                    }],
+                )
                 console.print(f"  [{project.name}:reviewer] [bold green]✓ Successfully auto-merged PR #{pr_number} into main[/bold green]")
             else:
                 console.print(f"  [{project.name}:reviewer] [bold yellow]Could not merge PR #{pr_number}[/bold yellow]")

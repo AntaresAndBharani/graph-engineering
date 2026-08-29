@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import pytest
 from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
@@ -399,6 +400,185 @@ async def test_supervisor_po_evaluation_hash_skip_gate(tmp_path: Path):
     res = await evaluate_supervisor_issue(project, issue, config, state_manager, dry_run=False, force=False)
     assert res.skipped is True
     assert "hash unchanged" in res.details.lower()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_blackboard_producer_wiring(tmp_path: Path, monkeypatch):
+    """Verifies that Supervisor node syncs SDLC items and records detected anomalies into StateManager."""
+    from orchestrator import poller
+    from orchestrator.nodes.supervisor import check_repository_anomalies
+
+    project = ProjectConfig(name="proj-alpha", repo="org/proj-alpha", local_path=str(tmp_path))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    mock_issues = [
+        {"number": 101, "title": "feat: auth", "labels": [{"name": "needs-triage"}], "createdAt": "2026-08-29T10:00:00Z"},
+        {"number": 102, "title": "bug: typo", "labels": [], "createdAt": "2026-08-20T10:00:00Z"},  # unclassified & stale
+    ]
+    mock_prs = [
+        {"number": 201, "title": "feat: login", "labels": [{"name": "needs-architect-review"}], "mergeable": "CONFLICTING"},
+    ]
+
+    async def mock_fetch_issues(*a, **kw):
+        return mock_issues
+
+    async def mock_fetch_prs(*a, **kw):
+        return mock_prs
+
+    monkeypatch.setattr(poller, "fetch_all_open_issues", mock_fetch_issues)
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+
+    anomalies = await check_repository_anomalies(project, state_manager)
+    assert len(anomalies) > 0
+
+    # Verify SDLC items synced to Blackboard
+    sdlc_items = await state_manager.get_sdlc_items("proj-alpha")
+    item_ids = [item["issue_number"] for item in sdlc_items]
+    assert 101 in item_ids
+    assert 102 in item_ids
+    assert 201 in item_ids
+
+    # Verify Anomaly events recorded to Blackboard
+    recorded_anomalies = await state_manager.get_recent_anomalies("proj-alpha")
+    assert len(recorded_anomalies) > 0
+    types = {a["error_type"] for a in recorded_anomalies}
+    assert "MERGE_CONFLICT" in types or "UNCLASSIFIED_ISSUE" in types
+
+
+@pytest.mark.asyncio
+async def test_architect_blackboard_producer_wiring(tmp_path: Path, monkeypatch):
+    """Verifies that Architect node syncs SDLC items on triage and records anomaly events on harness failure."""
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    project = ProjectConfig(
+        name="arch-proj",
+        repo="org/arch-proj",
+        local_path=str(tmp_path),
+        nodes={"architect": NodeConfig(enabled=True, harness="claude")},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    config = GlobalConfig()
+
+    # Precondition: arch plane synced
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Arch\n", encoding="utf-8")
+    await state_manager.record_node_run("architect_research", project.repo)
+
+    mock_issues = [{"number": 55, "title": "Epic: Payments"}]
+
+    async def mock_fetch_issues(*a, **kw):
+        return mock_issues
+
+    async def mock_fetch_prs(*a, **kw):
+        return []
+
+    async def mock_exec_fail(*a, **kw):
+        return 1
+
+    monkeypatch.setattr("orchestrator.nodes.architect.fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr("orchestrator.nodes.architect.fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_exec_fail)
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+
+    ran, msg = await run_architect_node(project, config, state_manager)
+    assert ran is False
+
+    # Verify SDLC item was registered before execution
+    sdlc_items = await state_manager.get_sdlc_items("arch-proj")
+    assert len(sdlc_items) == 1
+    assert sdlc_items[0]["issue_number"] == 55
+
+    # Verify anomaly event recorded
+    anomalies = await state_manager.get_recent_anomalies("arch-proj")
+    assert len(anomalies) == 1
+    assert anomalies[0]["node_name"] == "architect"
+    assert anomalies[0]["error_type"] == "HARNESS_ERROR"
+    assert anomalies[0]["issue_number"] == 55
+
+
+@pytest.mark.asyncio
+async def test_devtest_blackboard_producer_wiring(tmp_path: Path, monkeypatch):
+    """Verifies that DevTest node records anomaly events when safety or execution fails."""
+    from orchestrator.nodes.devtest import run_devtest_node
+
+    project = ProjectConfig(
+        name="dev-proj",
+        repo="org/dev-proj",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    config = GlobalConfig()
+
+    mock_issues = [{"number": 88, "title": "feat: worker"}]
+
+    async def mock_fetch_issues(*a, **kw):
+        return mock_issues
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", mock_fetch_issues)
+
+    # Safety check fails (not a valid git dir)
+    ran, msg = await run_devtest_node(project, config, state_manager)
+    assert ran is False
+
+    # Verify SDLC item synced and safety anomaly recorded
+    sdlc_items = await state_manager.get_sdlc_items("dev-proj")
+    assert len(sdlc_items) == 1
+    assert sdlc_items[0]["issue_number"] == 88
+
+    anomalies = await state_manager.get_recent_anomalies("dev-proj")
+    assert len(anomalies) == 1
+    assert anomalies[0]["node_name"] == "devtest"
+    assert anomalies[0]["error_type"] == "SAFETY_ERROR"
+    assert anomalies[0]["issue_number"] == 88
+
+
+@pytest.mark.asyncio
+async def test_reviewer_blackboard_producer_wiring(tmp_path: Path, monkeypatch):
+    """Verifies that Reviewer node syncs PR SDLC items and records CI failure anomaly."""
+    from orchestrator.nodes.reviewer import run_reviewer_node
+
+    project = ProjectConfig(
+        name="rev-proj",
+        repo="org/rev-proj",
+        local_path=str(tmp_path),
+        nodes={"reviewer": NodeConfig(enabled=True, harness="claude")},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    config = GlobalConfig()
+
+    mock_prs = [{"number": 77, "title": "feat: api", "state": "OPEN", "mergeable": "CLEAN", "headRefName": "feat/77"}]
+
+    async def mock_fetch_prs(*a, **kw):
+        return mock_prs
+
+    async def mock_ci_fail(*a, **kw):
+        return "FAIL", "Lint error"
+
+    monkeypatch.setattr("orchestrator.nodes.reviewer.fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr("orchestrator.nodes.reviewer.check_pr_ci_status", mock_ci_fail)
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+
+    ran, msg = await run_reviewer_node(project, config, state_manager)
+    assert ran is False
+
+    # Verify PR synced to SDLC items
+    sdlc_items = await state_manager.get_sdlc_items("rev-proj")
+    assert len(sdlc_items) == 1
+    assert sdlc_items[0]["issue_number"] == 77
+
+    # Verify CI_FAILURE anomaly recorded
+    anomalies = await state_manager.get_recent_anomalies("rev-proj")
+    assert len(anomalies) == 1
+    assert anomalies[0]["node_name"] == "reviewer"
+    assert anomalies[0]["error_type"] == "CI_FAILURE"
+    assert anomalies[0]["issue_number"] == 77
+
 
 
 

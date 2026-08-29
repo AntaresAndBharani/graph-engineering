@@ -70,9 +70,27 @@ async def run_devtest_node(
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 
+    # Sync picked-up issue into SDLC Blackboard memory
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": issue_id,
+            "title": issue_title,
+            "state": "OPEN",
+            "labels": [trigger],
+        }],
+    )
+
     # 2. Destructive Git Safety Check
     is_safe, safety_msg = await verify_git_safety(project.local_path, project.repo)
     if not is_safe:
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="devtest",
+            error_type="SAFETY_ERROR",
+            error_message=safety_msg,
+            issue_number=issue_id,
+        )
         return False, safety_msg
 
     # 3. Acquire State Lock
@@ -119,6 +137,13 @@ async def run_devtest_node(
             repo=project.repo,
             node_type="devtest",
             error_message=f"Pre-flight git reset failed: {e}",
+        )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="devtest",
+            error_type="PREFLIGHT_ERROR",
+            error_message=f"Pre-flight git reset failed: {e}",
+            issue_number=issue_id,
         )
         return False, f"Pre-flight reset failed: {e}"
 
@@ -184,6 +209,13 @@ async def run_devtest_node(
             repo=project.repo,
             node_type="devtest",
             error_message=f"Harness exited with code {exit_code}. See logs: {log_file.name}",
+        )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="devtest",
+            error_type="HARNESS_ERROR",
+            error_message=f"Harness exited with code {exit_code}. See logs: {log_file.name}",
+            issue_number=issue_id,
         )
         if shutil.which("gh"):
             p1 = await asyncio.create_subprocess_exec(
@@ -257,6 +289,17 @@ async def run_devtest_node(
             )
             await p_issue_edit.wait()
 
+        await state_manager.sync_project_sdlc_items(
+            project.name,
+            [{
+                "issue_number": issue_id,
+                "title": issue_title,
+                "state": "IN_PROGRESS",
+                "labels": ["dev-implemented"],
+                "linked_pr": pr_num,
+            }],
+        )
+
         await state_manager.release_lock(issue_id, project.repo, "devtest")
         return True, f"DevTest node implemented issue #{issue_id} and opened/updated PR #{pr_num} ('{effective_output_label}')."
 
@@ -273,6 +316,13 @@ async def run_devtest_node(
             repo=project.repo,
             node_type="devtest",
             error_message="Model finished but left 0 git changes and no PR was created.",
+        )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="devtest",
+            error_type="ZERO_DIFF_ERROR",
+            error_message="Model finished but left 0 git changes and no PR was created.",
+            issue_number=issue_id,
         )
         return False, f"DevTest finished with 0 file changes for issue #{issue_id}."
 
@@ -310,7 +360,24 @@ async def run_devtest_node(
             node_type="devtest",
             error_message=f"Git / PR creation failed: {e}",
         )
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="devtest",
+            error_type="GIT_ERROR",
+            error_message=f"Git / PR creation failed: {e}",
+            issue_number=issue_id,
+        )
         return False, f"Git / PR creation failed: {e}"
+
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": issue_id,
+            "title": issue_title,
+            "state": "IN_PROGRESS",
+            "labels": ["dev-implemented"],
+        }],
+    )
 
     await state_manager.release_lock(issue_id, project.repo, "devtest")
     return True, f"DevTest node implemented issue #{issue_id} and opened PR with label '{output_label}'."
