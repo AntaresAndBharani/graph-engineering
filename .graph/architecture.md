@@ -18,18 +18,18 @@ The architecture is governed by **Zero-Token Idle Gating**: all repository inspe
 flowchart TD
     subgraph Control Plane ["Autonomous Control Plane (graph-orchestrator)"]
         CLI["Typer / Rich CLI Adapter (`orchestrator/cli.py`)"]
-        Core["Worker Engine & Scheduler"]
+        Core["Worker Engine & Async Scheduler"]
         State[("SQLite WAL State Manager (`orchestrator/db.py`)")]
         Reloader["SourceWatcher & Hot Reloader (`orchestrator/reloader.py`)"]
         Adapter["AsyncHarnessAdapter (`orchestrator/harness.py`)"]
     end
 
     subgraph Governance & Pipeline Nodes ["Autonomous Pipeline Nodes (`orchestrator/nodes/*`)"]
-        N0["Node 0: Supervisor (Watchdog, SLA Audit & Recovery)"]
-        N1["Node 1: Architect (Living Arch & INVEST Decomposition)"]
+        N0["Node 0: Supervisor (Watchdog, SLA Audit & Anomaly Recovery)"]
+        N1["Node 1: Architect (Living Arch Plane & INVEST Decomposition)"]
         N2["Node 2: 3-Amigos DevTest (TDD Implementation & PR Creation)"]
-        N3["Node 3: Reviewer Gatekeeper (CI Verification & Auto-Merge)"]
-        N4["Node 4: BAU Maintenance (Technical Debt Consolidation)"]
+        N3["Node 3: Reviewer Gatekeeper (CI Quality Gate & Auto-Merge)"]
+        N4["Node 4: BAU Maintenance (Technical Debt Consolidation Sweep)"]
     end
 
     subgraph Blackboard Layer ["Decoupled Artifact Blackboard"]
@@ -51,18 +51,30 @@ flowchart TD
     N2 & N3 <--> BB
 ```
 
+### 5-Node Graph Pipeline
+
+| Node | Name | Primary Responsibility | Trigger Condition | Harness / Model Tier |
+|---|---|---|---|---|
+| **Node 0** | **Supervisor** (`supervisor.py`) | Consistency watchdog, 12h issue SLA audit, unclassified issue detection, and dead-lock self-healing. | Scheduled interval (`supervisor_interval_seconds`, default 1h) | Zero-token deterministic audit (CLI/GraphQL) |
+| **Node 1** | **Architect** (`architect.py`) | Living architecture sync (7-day SLA), INVEST story decomposition, subtask linking, and PR architectural reviews. | Label `needs-triage` or Weekly SLA trigger | Pluggable Research Harness (`antigravity`/`gemini-3.7-flash-high`) / Primary (`claude-sonnet-5`) |
+| **Node 2** | **3-Amigos DevTest** (`devtest.py`) | Pre-flight git safety check, TDD test suite generation, clean implementation, and autonomous PR opening. | Label `ready-for-dev` | Primary Implementation Harness (`antigravity` / `claude`) |
+| **Node 3** | **Reviewer Gatekeeper** (`reviewer.py`) | Remote CI quality gate verification (100% green required), autonomous merge conflict resolution, and squash auto-merge. | Label `architect-approved` / `needs-architect-review` | Fast Conflict Harness (`antigravity`/`gemini-3.7-flash-low`) + Deterministic `gh` |
+| **Node 4** | **BAU Maintenance** (`bau.py`) | Daily 24h maintenance sweep consolidating `tech-debt` and `enhancement` tickets into structured User Stories. | Daily interval (`bau_interval_seconds`, default 24h) | Cost-effective synthesis (`antigravity`/`gemini-3.7-flash-low`) |
+
+---
+
 ### Technology Stack Matrix
 
 | Layer / Concern | Technology | Version / Standard | Architectural Rationale |
 |---|---|---|---|
-| **Runtime & Language** | Python | `>=3.11` | Modern `asyncio` primitives, `TaskGroup`, exception groups, enhanced type hinting (`typing.Self`, union `|`), and performance enhancements. |
-| **Build & Packaging** | Hatchling | PEP 517 / PEP 621 | Modern declarative metadata in `pyproject.toml`, reproducible wheel distribution, zero setup legacy scripts. |
+| **Runtime & Language** | Python | `>=3.11` | Modern `asyncio` primitives, `TaskGroup`, exception groups, enhanced type hinting (`typing.Self`, union `|`), and high-performance execution. |
+| **Build & Packaging** | Hatchling | PEP 517 / PEP 621 | Modern declarative metadata in `pyproject.toml`, reproducible wheel distribution, zero legacy setup scripts. |
 | **CLI & Terminal UX** | Typer + Rich | `typer>=0.12.0`, `rich>=13.7.0` | Declarative command routing with type annotations, formatted terminal diagnostics, live progress rendering, and ANSI-stripped output streaming. |
-| **Configuration & Validation** | Pydantic v2 | `pydantic>=2.6.0` | Rust-backed schema validation, cross-platform path resolution (`~`, `$HOME`, `%USERPROFILE%`), strict typing. |
+| **Configuration & Validation** | Pydantic v2 | `pydantic>=2.6.0` | Rust-backed schema validation, cross-platform path resolution (`~`, `$HOME`, `%USERPROFILE%`), strict runtime validation. |
 | **Persistence & State Engine** | aiosqlite (SQLite WAL) | `aiosqlite>=0.20.0` | Asynchronous file-based persistence, Write-Ahead Logging (WAL) concurrency, deterministic TTL distributed locking, and Artifact Blackboard store. |
 | **Process & Subprocess Lifecycle** | psutil | `psutil>=5.9.0` | Cross-platform recursive process tree inspection, child process termination, and graceful shutdown without zombie processes. |
 | **Dynamic Runtime Reloading** | importlib + mtime scanner | Standard Library | Hot reloading of configuration and in-memory Python modules without stopping the running daemon. |
-| **Environment & Secrets** | python-dotenv + PyYAML | `pyyaml>=6.0.1`, `dotenv>=1.0.0` | Secure environment injection and human-readable hierarchical configuration. |
+| **Environment & Secrets** | python-dotenv + PyYAML | `pyyaml>=6.0.1`, `python-dotenv>=1.0.0` | Secure environment variable injection and human-readable hierarchical configuration. |
 | **Testing & Quality Assurance** | pytest + pytest-asyncio | `pytest>=8.0.0`, `pytest-asyncio>=0.23.0` | Asynchronous unit, mock, and integration test coverage with zero-token assertions. |
 
 ---
@@ -75,7 +87,7 @@ The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports a
 graph TD
     subgraph Layer 4: Presentation & UI Adapters
         CLI_Commands["Typer CLI Commands (`orchestrator/cli.py`)"]
-        Rich_Formatters["Rich Terminal Formatters, Tables & Panels"]
+        Rich_Formatters["Rich Terminal Formatters, Tables & Live Views"]
     end
 
     subgraph Layer 3: Application Nodes & Use Cases
@@ -108,27 +120,28 @@ graph TD
 ### Separation of Concerns
 
 1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`)**:
-   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`).
-   - Strictly isolated from concrete execution logic and network I/O.
+   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
+   - Strictly isolated from concrete execution logic, database calls, and network I/O.
    - Provides pure path normalization and environment resolution functions (`resolve_path`).
 
 2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
    - Implements asynchronous process execution, process tree lifecycle, and ANSI-sanitized log streaming (`AsyncHarnessAdapter`).
-   - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_open_prs`, `sync_repository_labels`).
+   - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_all_open_issues`, `fetch_open_prs`, `sync_repository_labels`).
    - Manages dynamic file modification inspection (`SourceWatcher`).
 
 3. **Application Pipeline Nodes Layer (`orchestrator/nodes/*`)**:
    - Houses the discrete workflow engines representing each stage of the engineering lifecycle:
      - `node-supervisor`: Watchdog auditing, 12-hour SLA tracking, and conflict self-healing.
-     - `node-architect`: Story triage, INVEST decomposition, and living architecture synchronization.
-     - `node-devtest`: Pre-flight workspace validation, test-driven implementation, and pull request generation.
-     - `node-reviewer`: Remote CI quality gate verification (100% green requirement), merge conflict resolution, and auto-merge execution.
+     - `node-architect`: Story triage, INVEST decomposition, living architecture plane synchronization, and PR architectural reviews.
+     - `node-devtest`: Pre-flight workspace validation, destructive git safety verification, test-driven implementation, Blackboard conflict resolution, and pull request generation.
+     - `node-reviewer`: Remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
      - `node-bau`: Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
 
 4. **Presentation & CLI Layer (`orchestrator/cli.py`)**:
    - Pure UI adapter handling command-line arguments, options, terminal dashboards, and signal handling.
-   - Coordinates parallel workers across projects and handles graceful daemon shutdown and live reloading (`watch`, `run`, `pause`, `resume`, `stop`, `reload`, `init`, `doctor`, `pr`).
+   - Commands: `run`, `watch`, `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `reload`, `artifact`, `artifacts`.
+   - Coordinates parallel workers across projects and handles graceful daemon shutdown and live reloading.
 
 ---
 
@@ -136,53 +149,61 @@ graph TD
 
 ```text
 graph-engineering/
-├── .github/                      # GitHub Actions CI workflows, issue templates
-├── docs/                         # Node and pipeline documentation specifications
-│   ├── draft-requisites/         # Architectural epics and requisites specifications
-│   ├── node-supervisor.md        # Node 0 specification
-│   ├── node-architect.md         # Node 1 specification
-│   ├── node-devtest.md           # Node 2 specification
-│   ├── node-reviewer.md          # Node 3 specification
-│   └── node-bau.md               # Node 4 specification
-├── orchestrator/                 # Primary Python package root
-│   ├── __init__.py               # Package metadata and __version__
-│   ├── cli.py                    # Typer CLI application entry point and daemon runner
-│   ├── config.py                 # Pydantic v2 schemas and path resolution utilities
-│   ├── db.py                     # Asynchronous SQLite state, distributed lock & blackboard manager
-│   ├── harness.py                # Pluggable AI CLI adapter (Claude, Antigravity, Devin)
-│   ├── housekeeping.py           # GitHub label provisioning and taxonomy synchronization
-│   ├── logging.py                # Unified file and console logging with ANSI sanitization
-│   ├── poller.py                 # Zero-token GitHub CLI/GraphQL query abstraction
-│   ├── reloader.py               # Hot-reloading watcher and module re-importer
-│   └── nodes/                    # Autonomous pipeline node handlers
-│       ├── __init__.py           # Subpackage exports
-│       ├── architect.py          # Living architecture & story decomposition node
-│       ├── bau.py                # Business-as-usual tech debt consolidation node
-│       ├── devtest.py            # 3-Amigos development and testing node
-│       ├── reviewer.py           # Reviewer quality gatekeeper and auto-merge node
-│       └── supervisor.py         # Watchdog consistency supervisor node
-├── templates/                    # Reference templates and starter configurations
-│   └── config.example.yaml       # Master orchestrator configuration template (v2)
-├── tests/                        # Comprehensive automated test suite
+├── .github/                         # GitHub Actions CI workflows, issue templates
+├── .graph/                          # Living architecture plane standards
+│   └── architecture.md              # Living Architectural Standards (Weekly Synchronized)
+├── docs/                            # Node and pipeline documentation specifications
+│   ├── draft-requisites/            # Architectural epics and requisites specifications
+│   │   └── 000000-prreviewprotocol.md # Anti-Gravity Blackboard PR protocol spec
+│   ├── e2e-testing-recommendations.md # E2E testing architecture recommendations
+│   ├── local-cli-pipeline.md        # Comprehensive pipeline manual and architecture guide
+│   ├── node-supervisor.md           # Node 0 specification
+│   ├── node-architect.md            # Node 1 specification
+│   ├── node-devtest.md              # Node 2 specification
+│   ├── node-reviewer.md             # Node 3 specification
+│   └── node-bau.md                  # Node 4 specification
+├── orchestrator/                    # Primary Python package root
+│   ├── __init__.py                  # Package metadata and __version__
+│   ├── cli.py                       # Typer CLI application entry point and daemon runner
+│   ├── config.py                    # Pydantic v2 schemas and path resolution utilities
+│   ├── db.py                        # Asynchronous SQLite state, distributed lock & blackboard manager
+│   ├── harness.py                   # Pluggable AI CLI adapter (Claude, Antigravity, Devin)
+│   ├── housekeeping.py              # GitHub label provisioning and taxonomy synchronization
+│   ├── logging.py                   # Unified file and console logging with ANSI sanitization
+│   ├── poller.py                    # Zero-token GitHub CLI/GraphQL query abstraction
+│   ├── reloader.py                  # Hot-reloading watcher and module re-importer
+│   └── nodes/                       # Autonomous pipeline node handlers
+│       ├── __init__.py              # Subpackage exports
+│       ├── architect.py             # Living architecture & story decomposition node
+│       ├── bau.py                   # Business-as-usual tech debt consolidation node
+│       ├── devtest.py               # 3-Amigos development and testing node
+│       ├── reviewer.py              # Reviewer quality gatekeeper and auto-merge node
+│       └── supervisor.py            # Watchdog consistency supervisor node
+├── templates/                       # Reference templates and starter configurations
+│   └── config.example.yaml          # Master orchestrator configuration template (v2)
+├── tests/                           # Comprehensive automated test suite
 │   ├── test_architect_governance.py # Architect SLA and zero-token tests
-│   ├── test_cli.py               # CLI commands and UI diagnostics tests
-│   ├── test_config.py            # Configuration loading and path expansion tests
-│   ├── test_db.py                # State manager, TTL, and Blackboard tests
-│   ├── test_harness.py           # Subprocess harness execution and timeout tests
-│   ├── test_logging.py           # Log rotation and ANSI strip tests
-│   ├── test_nodes.py             # Node workflow execution and boundary tests
-│   ├── test_project_pause.py     # Per-project pause/resume lifecycle tests
-│   ├── test_reloader.py          # Hot reloading and source watcher tests
-│   └── test_stop.py              # Graceful daemon shutdown tests
-├── pyproject.toml                # PEP 517/PEP 621 build specification (Hatchling)
-├── CHANGELOG.md                  # Keep a Changelog historical log
-└── README.md                     # System overview and quickstart guide
+│   ├── test_cli.py                  # CLI commands and UI diagnostics tests
+│   ├── test_config.py               # Configuration loading and path expansion tests
+│   ├── test_db.py                   # State manager, TTL, and Blackboard tests
+│   ├── test_harness.py              # Subprocess harness execution and timeout tests
+│   ├── test_logging.py              # Log rotation and ANSI strip tests
+│   ├── test_nodes.py                # Node workflow execution and boundary tests
+│   ├── test_project_pause.py        # Per-project pause/resume lifecycle tests
+│   ├── test_reloader.py             # Hot reloading and source watcher tests
+│   ├── test_stop.py                 # Graceful daemon shutdown tests
+│   └── __init__.py                  # Test package root
+├── pyproject.toml                   # PEP 517/PEP 621 build specification (Hatchling)
+├── CHANGELOG.md                     # Keep a Changelog historical log
+└── README.md                        # System overview and quickstart guide
 ```
 
 ### Module Responsibilities & Conventions
+
 - **One Domain Per Node**: Every node in `orchestrator/nodes/` must expose a clear public entry point: `run_<nodename>_node(project, config, state_manager) -> tuple[bool, str]`.
 - **Zero-Token Pre-Gating**: Node entry functions must check deterministic conditions (labels, SLAs, schedule intervals) before performing any state locking or subprocess spawning.
 - **Pure Function Extraction**: Business logic (e.g. anomaly detection, git URL parsing, timestamp parsing) must be separated into pure helper functions to ensure 100% testability with unit mocks.
+- **Explicit Typing**: All functions must have complete type annotations (`from __future__ import annotations`).
 
 ---
 
@@ -207,7 +228,7 @@ sequenceDiagram
     Reviewer->>Poller: Set label 'ready-for-dev' (or 'status:merge-conflict')
     Poller->>DevTest: Pick up PR for conflict resolution
     DevTest->>Blackboard: get_pr_artifact(PR) -> 'APPROVED_WITH_CONFLICT'
-    DevTest->>DevTest: Fast-path: git merge main & push (Skip rewrite)
+    DevTest->>DevTest: Fast-path: git merge main & push (Skip logic rewrite)
     DevTest->>Poller: Set label 'architect-approved'
     Poller->>Reviewer: Quality Gate 100% Green
     Reviewer->>Poller: gh pr merge --squash
@@ -233,6 +254,23 @@ exit_code = await adapter.execute(
 - **Write-Ahead Logging (WAL)**: SQLite runs in WAL mode (`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`) ensuring concurrent non-blocking reads and serialized atomic writes across async workers.
 - **TTL Lock Protection**: Every task execution is bounded by a Time-To-Live (TTL). If a daemon crashes or an agent hangs, subsequent worker cycles automatically detect expired locks, transition their state to `FAILED`, and recover execution safely.
 - **Inter-Process Communication (IPC) via DB**: Graceful daemon shutdown (`orchestrator stop`) sets a `stop_requested` flag in SQLite, allowing active workers to finish their current atomic unit without starting new nodes.
+- **Per-Project Pause & Resume**: Individual project pipelines can be toggled (`orchestrator pause -p <name>` / `orchestrator resume -p <name>`) persisted across runs in the `project_states` table.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle : 0-Token Poller Gating
+    Idle --> Running : Lock Acquired (TTL = 30m)
+    Running --> Success : Harness Exit 0
+    Success --> Released : Release Lock & Update Router
+    Running --> Failed : Harness Exit != 0 / Error
+    Running --> Expired : Crash / Hang (Now > expires_at)
+    Expired --> Recovered : cleanup_expired_locks()
+    Failed --> Retried : Retry count < limit
+    Failed --> Flagged : Set 'orchestration-failed'
+    Released --> [*]
+    Flagged --> [*]
+    Recovered --> [*]
+```
 
 ### 4. Dynamic Hot Reloading Runtime (`SourceWatcher` & `hot_reload_runtime`)
 The daemon monitors both `config.yaml` and internal Python source files (`orchestrator/**/*.py`) for file modification events. When changes are detected, `hot_reload_runtime()` topologically reloads modules in `sys.modules` without terminating running worker loops.
@@ -245,14 +283,21 @@ flowchart LR
     FreshConfig --> ActiveWorkers["Active Daemon Workers continue with Updated Code"]
 ```
 
-### 5. Dependency Injection via Composition Root
-Configuration is loaded once via `load_config()` and passed explicitly down the call hierarchy (`config`, `project`, `state_manager`). Modules do not rely on global mutable state or singletons.
+### 5. Autonomous Git Merge Conflict Resolution Pattern
+The Reviewer node implements a two-tier conflict resolution strategy:
+1. **Clean Auto-Merge**: Executes `git merge origin/main` in a safe subshell. If clean, pushes immediately to origin.
+2. **AI-Assisted Resolution**: If conflict markers exist (`<<<<<<< HEAD`), launches a specialized cost-effective harness (`antigravity` / `gemini-3.7-flash-low`) to reconcile diffs, verify absence of conflict markers, commit, and push.
+3. **Blackboard Fallback**: Updates `pr_artifacts` with `APPROVED_WITH_CONFLICT` or flags `needs-po-review` if unresolvable.
+
+### 6. Dependency Injection via Composition Root
+Configuration is loaded once via `load_config()` at the presentation entry point (`cli.py`) and passed explicitly down the call hierarchy (`config`, `project`, `state_manager`). Modules never rely on global mutable singletons.
 
 ---
 
 ## 🚫 Architectural Constraints & Anti-Patterns
 
 ### Strict Constraints
+
 1. **Zero LLM Token Waste on Idle**:
    - Never call an AI harness to check if work needs to be done.
    - Always verify GitHub issues, PRs, and branch states via local CLI (`gh`, `git`) first.
@@ -265,6 +310,10 @@ Configuration is loaded once via `load_config()` and passed explicitly down the 
    - AI CLI subprocess output contains rich terminal ANSI escape codes. All stdout streams written to disk or parsed for structured JSON must pass through `strip_ansi()` to avoid corruption and log bloat.
 5. **No Orphaned Subprocesses**:
    - When a harness execution times out or is cancelled, `_kill_process_tree()` must recursively terminate the parent process and all child processes using `psutil`.
+6. **Idempotent Label Provisioning**:
+   - Label synchronization via `sync_repository_labels` must use `gh label create --force` to prevent duplicate or conflicting label definitions.
+7. **Non-Blocking SQLite Access**:
+   - Always configure SQLite with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` to prevent database locks across asynchronous coroutines.
 
 ### Anti-Patterns to Avoid
 
@@ -276,6 +325,7 @@ Configuration is loaded once via `load_config()` and passed explicitly down the 
 | **Blind Git Operations** | Modifying working trees without verifying remote origin identity. | Remote origin URL verification in `verify_git_safety`. |
 | **Tight Polling on Background Tasks** | Polling subprocess status in a tight loop. | Async line-by-line stream reading (`await process.stdout.readline()`). |
 | **Tightly Coupled State Machines** | Hardcoding sequential transitions between nodes. | Decoupled Router (GitHub Labels) + Blackboard (SQLite). |
+| **Hardcoded Platform Paths** | Using raw `/home/...` or `C:\...` strings. | Cross-platform normalization via `resolve_path()` supporting `~`, `$HOME`, `%USERPROFILE%`. |
 
 ---
 
