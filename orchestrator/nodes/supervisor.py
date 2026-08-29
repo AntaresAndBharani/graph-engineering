@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -12,6 +13,8 @@ import shutil
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
@@ -139,6 +142,8 @@ async def evaluate_supervisor_issue(
     if not force and not dry_run:
         existing = await state_manager.get_po_tracking(project.repo, issue_num)
         if existing and existing.get("body_hash") == body_hash and existing.get("status") == "NEEDS_HUMAN_CLARIFICATION":
+            skip_msg = f"[DEBUG] [supervisor] Issue #{issue_num} hash unchanged. Skipping PO evaluation."
+            logger.debug(skip_msg)
             return POEvaluationResult(
                 issue_number=issue_num,
                 repo=project.repo,
@@ -149,7 +154,7 @@ async def evaluate_supervisor_issue(
                 gaps=existing.get("blockers"),
                 gherkin_ac=existing.get("gherkin_ac"),
                 skipped=True,
-                details=f"[DEBUG] [supervisor] Issue #{issue_num} hash unchanged. Skipping PO evaluation.",
+                details=skip_msg,
             )
 
     # 2. Prepare PO Evaluation Prompt
