@@ -251,3 +251,55 @@ projects:
     assert "PO_APPROVED" in res_table.stdout
 
 
+def test_cli_watch_headless_fallback(tmp_path: Path, monkeypatch):
+    """Asserts watch_command with dashboard disabled never imports orchestrator.ui.dashboard."""
+    import sys
+    # Ensure orchestrator.ui.dashboard is not imported beforehand
+    sys.modules.pop("orchestrator.ui.dashboard", None)
+    sys.modules.pop("orchestrator.ui", None)
+
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "{posix_path}"
+        """,
+        encoding="utf-8",
+    )
+
+    called_headless = []
+
+    async def mock_headless(interval, config_path):
+        called_headless.append(True)
+
+    monkeypatch.setattr("orchestrator.cli._watch_daemon_headless", mock_headless)
+
+    # Invoke watch with --no-dashboard
+    result = runner.invoke(app, ["watch", "--no-dashboard", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert len(called_headless) == 1
+    assert "orchestrator.ui.dashboard" not in sys.modules
+
+
+def test_cli_watch_headless_flag(tmp_path: Path, monkeypatch):
+    """Asserts --headless flag invokes headless mode."""
+    called_headless = []
+
+    async def mock_headless(interval, config_path):
+        called_headless.append(True)
+
+    monkeypatch.setattr("orchestrator.cli._watch_daemon_headless", mock_headless)
+
+    result = runner.invoke(app, ["watch", "--headless"])
+    assert result.exit_code == 0
+    assert len(called_headless) == 1
+
+
+

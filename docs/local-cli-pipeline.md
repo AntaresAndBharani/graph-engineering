@@ -171,10 +171,18 @@ orchestrator run --project crosstrainingapp --node bau --force
 ```
 
 ### 5. Continuous Autonomous Daemon (`watch`)
-Start the multi-agent orchestration daemon:
+Start the multi-agent orchestration daemon with an interactive Textual TUI dashboard (or in headless mode):
 ```bash
+# Start with interactive Textual TUI dashboard
 orchestrator watch
+
+# Start in headless mode (CI/CD fallback or linear log stream)
+orchestrator watch --no-dashboard
+# or
+orchestrator watch --headless
 ```
+
+The interactive TUI dashboard renders an alphabetically sorted project health table and a bounded real-time orchestrator log stream. In headless environments (`stdout` not a TTY or `--no-dashboard`), it gracefully falls back to structured linear stdout logging with zero TUI overhead.
 
 ---
 
