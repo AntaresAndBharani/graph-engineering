@@ -22,7 +22,12 @@ from orchestrator.nodes.architect import run_architect_node
 from orchestrator.nodes.bau import run_bau_node
 from orchestrator.nodes.devtest import run_devtest_node
 from orchestrator.nodes.reviewer import run_reviewer_node
-from orchestrator.nodes.supervisor import run_supervisor_node
+from orchestrator.nodes.supervisor import (
+    POEvaluationResult,
+    evaluate_supervisor_issue,
+    run_supervisor_node,
+)
+from orchestrator import poller
 from orchestrator.reloader import SourceWatcher, hot_reload_runtime
 
 if sys.platform == "win32":
@@ -43,6 +48,12 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+supervisor_app = typer.Typer(
+    name="supervisor",
+    help="PO-proxy Supervisor inspection, status, and evaluation commands.",
+    no_args_is_help=True,
+)
+app.add_typer(supervisor_app, name="supervisor")
 console = Console(legacy_windows=False)
 
 
@@ -1051,6 +1062,198 @@ async def _list_artifacts(project_name: Optional[str], config_path: Optional[Pat
             art.get("node_name", ""),
             art.get("status", ""),
             art.get("comment", "")[:60] + ("..." if len(art.get("comment", "")) > 60 else ""),
+            updated_str,
+        )
+
+    console.print(table)
+
+
+# =========================================================================
+# Supervisor PO-Proxy CLI Subcommands
+# =========================================================================
+
+@supervisor_app.command("evaluate")
+def supervisor_evaluate_command(
+    issue_id: int = typer.Argument(
+        ...,
+        help="GitHub Issue number to evaluate.",
+    ),
+    project_name: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Target a specific registered project by name.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Render evaluation verdict, gaps, and Gherkin AC without mutating GitHub.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Evaluates an issue's readiness via PO-proxy Supervisor, generating Gherkin AC."""
+    asyncio.run(_run_supervisor_evaluate(issue_id, project_name, dry_run, config_path))
+
+
+async def _run_supervisor_evaluate(
+    issue_id: int,
+    project_name: Optional[str],
+    dry_run: bool,
+    config_path: Optional[Path],
+) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    target_project: Optional[ProjectConfig] = None
+    if project_name:
+        matching = [p for p in config.projects if p.name == project_name]
+        if not matching:
+            console.print(f"[bold red]Error:[/bold red] Project '{project_name}' not found in configuration.")
+            raise typer.Exit(code=1)
+        target_project = matching[0]
+    elif len(config.projects) == 1:
+        target_project = config.projects[0]
+    else:
+        enabled = [p for p in config.projects if p.enabled]
+        if len(enabled) == 1:
+            target_project = enabled[0]
+        else:
+            console.print("[bold red]Error:[/bold red] Multiple projects configured. Please specify `-p/--project`.")
+            raise typer.Exit(code=1)
+
+    # Fetch the issue
+    issue = await poller.fetch_issue_by_number(target_project.repo, issue_id)
+    if not issue:
+        # Fallback dictionary for testing / offline
+        issue = {
+            "number": issue_id,
+            "title": f"Issue #{issue_id}",
+            "body": "",
+            "labels": [],
+        }
+
+    # Execute PO Evaluation
+    result = await evaluate_supervisor_issue(
+        project=target_project,
+        issue=issue,
+        config=config,
+        state_manager=state_manager,
+        dry_run=dry_run,
+        force=True,
+    )
+
+    verdict_style = "bold green" if result.verdict == "PO_APPROVED" else "bold yellow"
+    mode_text = "[bold cyan]DRY-RUN (No GitHub mutations emitted)[/bold cyan]" if dry_run else "[bold green]LIVE (GitHub Updated)[/bold green]"
+
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("Field", style="bold white", width=22)
+    table.add_column("Value", style="cyan")
+
+    table.add_row("Issue #:", f"#{result.issue_number}")
+    table.add_row("Title:", result.title)
+    table.add_row("Repository:", target_project.repo)
+    table.add_row("Execution Mode:", mode_text)
+    table.add_row("Body Hash (SHA-256):", f"[dim]{result.body_hash}[/dim]")
+    table.add_row("Readiness Verdict:", f"[{verdict_style}]{result.verdict}[/{verdict_style}]")
+
+    if result.gaps:
+        table.add_row("Detected Gaps / Blockers:", f"[yellow]{result.gaps}[/yellow]")
+    else:
+        table.add_row("Detected Gaps:", "[green]None (Complete functional requirements)[/green]")
+
+    console.print(Panel(
+        table,
+        title=f"PO-Proxy Supervisor Evaluation: Issue #{result.issue_number}",
+        border_style="green" if result.verdict == "PO_APPROVED" else "yellow",
+    ))
+
+    if result.gherkin_ac:
+        console.print(Panel(
+            result.gherkin_ac,
+            title="[bold green]Generated Gherkin Acceptance Criteria[/bold green]",
+            border_style="green",
+        ))
+
+
+@supervisor_app.command("status")
+def supervisor_status_command(
+    project_name: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Target a specific registered project by name.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Displays tracked issues from the po_tracking Blackboard table."""
+    asyncio.run(_run_supervisor_status(project_name, config_path))
+
+
+async def _run_supervisor_status(
+    project_name: Optional[str],
+    config_path: Optional[Path],
+) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    target_repo: Optional[str] = None
+    if project_name:
+        matching = [p for p in config.projects if p.name == project_name]
+        if matching:
+            target_repo = matching[0].repo
+        else:
+            console.print(f"[bold red]Error:[/bold red] Project '{project_name}' not found in configuration.")
+            raise typer.Exit(code=1)
+    elif len(config.projects) == 1:
+        target_repo = config.projects[0].repo
+
+    records = await state_manager.list_po_trackings(repo=target_repo)
+    if not records:
+        console.print("[dim]No issues currently tracked in po_tracking Blackboard.[/dim]")
+        return
+
+    table = Table(title="PO-Proxy Blackboard Tracking (po_tracking)", header_style="bold cyan")
+    table.add_column("Issue #", style="bold white")
+    table.add_column("Repository", style="magenta")
+    table.add_column("Status", style="bold")
+    table.add_column("Hash", style="dim")
+    table.add_column("Blockers / Gaps", style="dim")
+    table.add_column("Updated", style="dim")
+
+    for rec in records:
+        updated_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("updated_at", 0)))
+        status_style = "bold green" if rec.get("status") == "PO_APPROVED" else "bold yellow"
+        blockers_preview = (rec.get("blockers") or "None")[:40]
+        hash_preview = (rec.get("body_hash") or "")[:8] + "..."
+
+        table.add_row(
+            str(rec.get("issue_number")),
+            rec.get("repo", ""),
+            f"[{status_style}]{rec.get('status', '')}[/{status_style}]",
+            hash_preview,
+            blockers_preview,
             updated_str,
         )
 

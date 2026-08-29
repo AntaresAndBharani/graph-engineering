@@ -53,6 +53,42 @@ async def fetch_issues_with_label(
         return []
 
 
+async def fetch_issue_by_number(
+    repo: str,
+    issue_number: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetches a specific issue by its number from GitHub using gh CLI.
+    Consumes 0 LLM tokens.
+    """
+    if not shutil.which("gh"):
+        return None
+
+    cmd = [
+        "gh",
+        "issue",
+        "view",
+        str(issue_number),
+        "--repo",
+        repo,
+        "--json",
+        "number,title,body,labels,createdAt,updatedAt,url",
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0 or not stdout:
+            return None
+        return json.loads(stdout.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
 async def fetch_all_open_issues(
     repo: str,
     limit: int = 100,

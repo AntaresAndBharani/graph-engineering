@@ -79,6 +79,20 @@ class StateManager:
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS po_tracking (
+                    repo TEXT NOT NULL,
+                    issue_number INTEGER NOT NULL,
+                    body_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    gherkin_ac TEXT,
+                    blockers TEXT,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (repo, issue_number)
+                );
+                """
+            )
             await db.commit()
 
     async def register_daemon(self, pid: int) -> None:
@@ -565,6 +579,103 @@ class StateManager:
                     """
                     SELECT repo, pr_number, node_name, status, comment, updated_at
                     FROM pr_artifacts
+                    ORDER BY updated_at DESC
+                    """
+                )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Blackboard Pattern: PO Tracking (Product Owner Proxy Issue Evaluation)
+    # =========================================================================
+
+    async def upsert_po_tracking(
+        self,
+        repo: str,
+        issue_number: int,
+        body_hash: str,
+        status: str,
+        gherkin_ac: Optional[str] = None,
+        blockers: Optional[str] = None,
+    ) -> None:
+        """
+        Stores or updates a PO tracking record in the Blackboard database.
+        Idempotent operation (INSERT OR REPLACE).
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO po_tracking (repo, issue_number, body_hash, status, gherkin_ac, blockers, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo, issue_number) DO UPDATE SET
+                    body_hash = excluded.body_hash,
+                    status = excluded.status,
+                    gherkin_ac = excluded.gherkin_ac,
+                    blockers = excluded.blockers,
+                    updated_at = excluded.updated_at
+                """,
+                (repo, issue_number, body_hash, status, gherkin_ac, blockers, now),
+            )
+            await db.commit()
+
+    async def get_po_tracking(self, repo: str, issue_number: int) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves a PO tracking record by repository and issue number.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT repo, issue_number, body_hash, status, gherkin_ac, blockers, updated_at
+                FROM po_tracking
+                WHERE repo = ? AND issue_number = ?
+                """,
+                (repo, issue_number),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def delete_po_tracking(self, repo: str, issue_number: int) -> None:
+        """
+        Removes a PO tracking record from the Blackboard database.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "DELETE FROM po_tracking WHERE repo = ? AND issue_number = ?",
+                (repo, issue_number),
+            )
+            await db.commit()
+
+    async def list_po_trackings(self, repo: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Lists all PO tracking records from the Blackboard, optionally filtered by repo.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            if repo:
+                cursor = await db.execute(
+                    """
+                    SELECT repo, issue_number, body_hash, status, gherkin_ac, blockers, updated_at
+                    FROM po_tracking
+                    WHERE repo = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (repo,),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT repo, issue_number, body_hash, status, gherkin_ac, blockers, updated_at
+                    FROM po_tracking
                     ORDER BY updated_at DESC
                     """
                 )
