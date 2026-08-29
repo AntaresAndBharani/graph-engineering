@@ -223,3 +223,29 @@ async def test_po_tracking_schema_columns_and_composite_pk(tmp_path: Path):
         assert col_map["body_hash"]["pk"] == 0, "body_hash must not be primary key"
 
 
+@pytest.mark.asyncio
+async def test_cleanup_orphaned_running_jobs(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Create an unexpired RUNNING lock (simulating an interrupted process)
+    await manager.acquire_lock("300", "my-org/repo", "architect", ttl_minutes=30)
+    jobs_before = await manager.get_active_jobs()
+    assert len(jobs_before) == 1
+    assert jobs_before[0]["status"] == "RUNNING"
+
+    # Startup reclamation
+    reclaimed = await manager.cleanup_orphaned_running_jobs()
+    assert reclaimed == 1
+
+    jobs_after = await manager.get_active_jobs()
+    assert len(jobs_after) == 1
+    assert jobs_after[0]["status"] == "FAILED"
+    assert "Orphaned lock" in jobs_after[0]["error_message"]
+
+    # Now acquire_lock should succeed immediately
+    acquired = await manager.acquire_lock("300", "my-org/repo", "architect", ttl_minutes=30)
+    assert acquired is True
+
+

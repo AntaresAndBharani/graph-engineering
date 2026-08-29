@@ -4,7 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 import shutil
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 import psutil
 
 from orchestrator.config import HarnessConfig
@@ -18,6 +18,17 @@ _console = Console()
 
 class AsyncHarnessAdapter:
     _active_processes: set[asyncio.subprocess.Process] = set()
+    _stream_listeners: set[Callable[[str], None]] = set()
+
+    @classmethod
+    def register_stream_listener(cls, listener: Callable[[str], None]) -> None:
+        """Registers a callback to receive live real-time output stream lines."""
+        cls._stream_listeners.add(listener)
+
+    @classmethod
+    def unregister_stream_listener(cls, listener: Callable[[str], None]) -> None:
+        """Unregisters a stream listener callback."""
+        cls._stream_listeners.discard(listener)
 
     def __init__(self, name: str, config: HarnessConfig):
         self.name = name
@@ -135,11 +146,17 @@ class AsyncHarnessAdapter:
                         f.write(cleaned)
                         f.flush()
 
-                        # Live real-time console streaming
+                        # Live real-time console & TUI streaming
                         if console_prefix and cleaned.strip():
                             for subline in cleaned.splitlines():
                                 if subline.strip():
-                                    _console.print(f"  [dim cyan]{console_prefix}[/dim cyan] [dim]{subline}[/dim]")
+                                    formatted_line = f"  [dim cyan]{console_prefix}[/dim cyan] [dim]{subline}[/dim]"
+                                    _console.print(formatted_line)
+                                    for listener in list(AsyncHarnessAdapter._stream_listeners):
+                                        try:
+                                            listener(formatted_line)
+                                        except Exception:
+                                            pass
 
             await asyncio.wait_for(stream_output(), timeout=self.timeout_seconds)
             await process.wait()

@@ -98,6 +98,8 @@ class StateManager:
     async def register_daemon(self, pid: int) -> None:
         """Registers the active daemon process ID and clears any stop requests."""
         now = time.time()
+        # Clean any orphaned RUNNING locks left by prior dead processes
+        await self.cleanup_orphaned_running_jobs()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA busy_timeout=5000;")
@@ -357,6 +359,25 @@ class StateManager:
             )
             row = await cursor.fetchone()
             return row[0] if row else 1
+
+    async def cleanup_orphaned_running_jobs(self) -> int:
+        """
+        Reclaims any RUNNING locks left behind by dead, interrupted, or prior daemon processes.
+        Transitions their status to FAILED to prevent 30-minute deadlock freezes.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                UPDATE active_jobs
+                SET status = 'FAILED', error_message = 'Orphaned lock reclaimed on startup'
+                WHERE status = 'RUNNING'
+                """
+            )
+            count = cursor.rowcount
+            await db.commit()
+            return count if count > 0 else 0
 
     async def cleanup_expired_locks(self) -> int:
         """Identifies expired RUNNING locks and updates them to FAILED."""
