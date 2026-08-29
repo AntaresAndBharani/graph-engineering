@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
+from orchestrator.harness import AsyncHarnessAdapter
+from orchestrator.logging import get_project_log_path
 from orchestrator.poller import fetch_open_prs
 
 
@@ -77,6 +79,111 @@ async def sync_pr_branch_with_main(repo: str, pr_number: int) -> bool:
         return False
 
 
+async def resolve_pr_merge_conflicts(
+    project: ProjectConfig,
+    config: GlobalConfig,
+    pr_number: int,
+    branch_name: str,
+    node_cfg: NodeConfig,
+) -> tuple[bool, str]:
+    """
+    Autonomously resolves git merge conflicts on a PR branch against origin/main.
+    1. Checks out the PR branch and pulls latest main.
+    2. If conflicts occur, uses AI harness to analyze and resolve conflict markers cleanly.
+    3. Commits and pushes the resolved branch to origin.
+    """
+    from rich.console import Console
+    console = Console()
+    console.print(f"  [{project.name}:reviewer] [bold yellow]⚠️ Merge conflicts detected on PR #{pr_number} ({branch_name}). Launching Autonomous Conflict Resolver...[/bold yellow]")
+
+    # 1. Pre-flight clean and branch checkout
+    try:
+        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "fetch", "origin", "main", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "pull", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+    except Exception as e:
+        return False, f"Failed pre-flight checkout for {branch_name}: {e}"
+
+    # 2. Try git merge origin/main
+    proc_merge = await asyncio.create_subprocess_exec(
+        "git", "merge", "origin/main",
+        cwd=str(project.local_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_m, stderr_m = await proc_merge.communicate()
+    if proc_merge.returncode == 0:
+        # Merged cleanly without conflicts! Push immediately.
+        proc_push = await asyncio.create_subprocess_exec(
+            "git", "push", "origin", branch_name,
+            cwd=str(project.local_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc_push.wait()
+        return True, f"Cleanly merged {branch_name} with origin/main and pushed."
+
+    # 3. Conflict markers present; invoke AI harness to resolve conflicts cleanly
+    harness_name = node_cfg.harness or "claude"
+    harness_cfg = config.harnesses.get(harness_name)
+    if not harness_cfg:
+        harness_name = "antigravity"
+        harness_cfg = config.harnesses.get(harness_name)
+
+    if not harness_cfg:
+        await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        return False, "No AI harness configured for conflict resolution."
+
+    log_file = get_project_log_path(
+        config.settings.resolved_log_dir,
+        project.name,
+        "reviewer",
+        issue_id=f"conflict_pr_{pr_number}",
+    )
+
+    prompt = (
+        f"You are the Autonomous Conflict Resolution Engineer operating in non-interactive batch mode.\n"
+        f"PR #{pr_number} on branch '{branch_name}' has git merge conflicts against 'origin/main' in repository '{project.repo}'.\n\n"
+        f"OPERATIONAL MISSION:\n"
+        f"1. Run `git status` to identify all files with merge conflicts (both modified).\n"
+        f"2. Inspect each conflicting file and conflict markers (<<<<<<< HEAD ... ======= ... >>>>>>>).\n"
+        f"3. Intelligently merge the changes, keeping both the new functionality from the feature branch and the latest updates from main.\n"
+        f"4. Verify that all conflict markers are completely removed.\n"
+        f"5. Stage the resolved files: `git add .`\n"
+        f"6. Commit the merge: `git commit -m 'chore(merge): resolve merge conflicts with main for PR #{pr_number}'`\n"
+        f"7. Push to origin: `git push origin {branch_name}`\n"
+    )
+
+    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    exit_code = await adapter.execute(
+        prompt=prompt,
+        cwd=project.local_path,
+        log_file=log_file,
+        model=node_cfg.model,
+        effort=node_cfg.effort,
+        console_prefix=f"[{project.name}:conflict-resolver]",
+    )
+
+    if exit_code != 0:
+        await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        return False, f"AI conflict resolution failed (exit code {exit_code})."
+
+    # Verify if merge was committed and workspace is clean
+    p_status = await asyncio.create_subprocess_exec("git", "status", "--porcelain", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout_st, _ = await p_status.communicate()
+    if p_status.returncode == 0 and not stdout_st.strip():
+        # Ensure branch is pushed
+        p_push = await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await p_push.wait()
+        return True, f"Autonomous Conflict Resolver resolved conflicts on PR #{pr_number} and pushed {branch_name}."
+    else:
+        await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        return False, "Conflict resolution ended with uncommitted changes."
+
+
 async def run_reviewer_node(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -115,6 +222,7 @@ async def run_reviewer_node(
         pr_number = target_pr["number"]
         pr_title = target_pr.get("title", "")
         mergeable = target_pr.get("mergeable", "UNKNOWN")
+        branch_name = target_pr.get("headRefName", "")
 
         # 2. Acquire State Lock
         lock_acquired = await state_manager.acquire_lock(
@@ -129,8 +237,21 @@ async def run_reviewer_node(
         console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]Evaluating PR #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
         console.print(f"  [dim]• Target: {project.repo} | Status: Remote CI Quality Gate & Auto-Merge[/dim]")
 
-        # 3. Check Merge Conflicts
+        # 3. Check & Resolve Merge Conflicts Autonomously
         if mergeable == "CONFLICTING":
+            if branch_name:
+                resolved, res_msg = await resolve_pr_merge_conflicts(
+                    project, config, pr_number, branch_name, node_cfg
+                )
+                if resolved:
+                    console.print(f"  [{project.name}:reviewer] [bold green]✓ {res_msg}[/bold green]")
+                    # PR is now updated on GitHub; remote CI will trigger. Release lock and wait for CI.
+                    await state_manager.release_lock(pr_number, project.repo, "reviewer")
+                    pending_prs.append(pr_number)
+                    continue
+                else:
+                    console.print(f"  [{project.name}:reviewer] [bold red]✗ Conflict resolution failed: {res_msg}[/bold red]")
+
             if shutil.which("gh"):
                 p1 = await asyncio.create_subprocess_exec(
                     "gh", "pr", "edit", str(pr_number),
@@ -144,7 +265,7 @@ async def run_reviewer_node(
                 p2 = await asyncio.create_subprocess_exec(
                     "gh", "pr", "comment", str(pr_number),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts against `main`. Flagging for PO review (`needs-po-review`).",
+                    "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts that could not be autonomously resolved. Flagging for PO review (`needs-po-review`).",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

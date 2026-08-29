@@ -191,3 +191,42 @@ async def test_reviewer_multi_pr_batch_evaluation(tmp_path: Path, monkeypatch):
     # With auto_merge=False, PRs are evaluated and reported without error
     assert isinstance(ran, bool)
 
+
+@pytest.mark.asyncio
+async def test_reviewer_autonomous_conflict_resolution_attempt(tmp_path: Path, monkeypatch):
+    from orchestrator import poller
+    from orchestrator.nodes.reviewer import run_reviewer_node
+
+    mock_prs = [
+        {"number": 437, "title": "Conflicting PR", "labels": [{"name": "architect-approved"}], "mergeable": "CONFLICTING", "headRefName": "feat/issue-430"},
+    ]
+
+    async def mock_fetch_open_prs(*args, **kwargs):
+        return mock_prs
+
+    import orchestrator.nodes.reviewer as rev_mod
+    monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch_open_prs)
+    async def mock_resolve(*args, **kwargs):
+        return True, "Mock resolved conflicts and pushed branch"
+
+    monkeypatch.setattr(rev_mod, "resolve_pr_merge_conflicts", mock_resolve)
+
+    project = ProjectConfig(
+        name="test",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        nodes={
+            "reviewer": NodeConfig(
+                enabled=True,
+                harness="claude",
+            )
+        },
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    ran, msg = await run_reviewer_node(project, GlobalConfig(), state_manager)
+    assert ran is False
+    assert "waiting for remote CI checks" in msg
+
+
