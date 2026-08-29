@@ -44,7 +44,13 @@ async def test_run_project_cycle_skips_paused_project(tmp_path: Path):
         },
     )
 
-    ran = await run_project_cycle(project, GlobalConfig(), state_manager)
+    # Precondition: architecture plane is already synced
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Architecture Standards\n", encoding="utf-8")
+    await state_manager.record_node_run("architect_research", project.repo)
+
+    ran = await run_project_cycle(project, GlobalConfig(), state_manager, silent_idle=True)
     assert isinstance(ran, bool)
 
     await state_manager.pause_project("paused-proj")

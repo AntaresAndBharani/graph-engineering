@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Added **SHA-256 Hash Tracking & Zero-Token Skip Gating (`orchestrator/nodes/supervisor.py`)**: Computes deterministic SHA-256 digests over `(title + "\n" + body)` for issues evaluated by the Supervisor PO-Proxy, short-circuiting unchanged issues in `NEEDS_HUMAN_CLARIFICATION` state without LLM harness invocations (Issue #11).
+- Added comprehensive unit and integration test suite (`tests/test_supervisor_po.py`) covering all Gherkin Given/When/Then scenarios for hash-based skipping, changed issue re-evaluation, approved issue bypass, and zero-token assertion verification.
 - Added **Supervisor PO-Proxy CLI Inspection & Evaluation (`orchestrator supervisor evaluate` & `orchestrator supervisor status`)**: Exposes interactive and dry-run (`--dry-run`) evaluation commands for issues labeled `needs-po-review` with Gherkin acceptance criteria generation, SHA-256 hash gating, and persistent `po_tracking` Blackboard status reporting.
 - Added **Decoupled Blackboard `po_tracking` Table (`orchestrator/db.py`)**: Persistent SQLite WAL table and helper methods (`upsert_po_tracking`, `get_po_tracking`, `delete_po_tracking`, `list_po_trackings`) for cross-node PO readiness context.
 - Implemented the **Decoupled, Agnostic Multi-Agent Orchestrator CLI (`graph-orchestrator`)** in Python (`pyproject.toml`, `orchestrator/`), decoupling workflow execution and state from target application repositories.
