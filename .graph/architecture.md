@@ -47,9 +47,8 @@ flowchart TD
     Core --> N0 & N1 & N2 & N3 & N4
     N0 & N1 & N2 & N3 & N4 --> Adapter
     N0 & N1 & N2 & N3 & N4 <--> GH
-    N0 <--> BB
+    N0 & N1 & N2 & N3 <--> BB
     N2 & N3 <--> LocalGit
-    N2 & N3 <--> BB
 ```
 
 ### 5-Node Graph Pipeline
@@ -215,6 +214,7 @@ To prevent brittle multi-agent state machines and communication loss between asy
 - **Routing vs. State**: GitHub Labels act as the event-driven *Router* (`poller.py`), while SQLite acts as the *Blackboard* (`pr_artifacts`, `po_tracking`).
 - **Context Sharing (PRs)**: When `ReviewerNode` evaluates a PR that has passing code reviews but git merge conflicts, it writes an `APPROVED_WITH_CONFLICT` decision artifact to the blackboard. `DevTestNode` reads the blackboard and performs pure conflict resolution without repeating code reviews.
 - **PO Issue Tracking & Hash Gating (`po_tracking`)**: When `SupervisorNode` evaluates an issue labeled `needs-po-review`, it records its SHA-256 body hash, readiness status (`PO_APPROVED` or `NEEDS_HUMAN_CLARIFICATION`), generated Gherkin AC, and detected blockers. Subsequent cycles use the stored hash to short-circuit unchanged issues with zero LLM tokens.
+- **Architect Triage Context Ingestion (`po_tracking`)**: When `ArchitectNode` evaluates an issue labeled `needs-triage`, it queries `get_po_tracking(repo, issue_number)` on the Blackboard. If a pre-approved Gherkin Acceptance Criteria artifact (`PO_APPROVED`) is found, it is injected directly into the triage prompt context, bypassing redundant requirement re-derivation and ensuring end-to-end alignment with the Product Owner's intent.
 
 ```mermaid
 sequenceDiagram
