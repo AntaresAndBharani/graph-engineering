@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Added **Automated Gherkin Acceptance Criteria Enrichment & Promotion (`orchestrator/nodes/supervisor.py`)**: Implemented automated functional requirement evaluation via `gemini-3.7-flash-low`, Gherkin Given/When/Then Acceptance Criteria generation and issue body enrichment, label promotion from `needs-po-review` to `needs-triage`, human clarification loop guarding with structured feedback comments, and `PO_APPROVED` status synchronization on the SQLite WAL Blackboard (`po_tracking`).
+- Added comprehensive unit and integration test coverage (`tests/test_supervisor_po.py`) verifying Given/When/Then acceptance criteria, model configuration, label transitions, and zero-token hash skip gating.
 - Added **Supervisor PO-Proxy CLI Inspection & Evaluation (`orchestrator supervisor evaluate` & `orchestrator supervisor status`)**: Exposes interactive and dry-run (`--dry-run`) evaluation commands for issues labeled `needs-po-review` with Gherkin acceptance criteria generation, SHA-256 hash gating, and persistent `po_tracking` Blackboard status reporting.
 - Added **Decoupled Blackboard `po_tracking` Table (`orchestrator/db.py`)**: Persistent SQLite WAL table and helper methods (`upsert_po_tracking`, `get_po_tracking`, `delete_po_tracking`, `list_po_trackings`) for cross-node PO readiness context.
 - Implemented the **Decoupled, Agnostic Multi-Agent Orchestrator CLI (`graph-orchestrator`)** in Python (`pyproject.toml`, `orchestrator/`), decoupling workflow execution and state from target application repositories.
