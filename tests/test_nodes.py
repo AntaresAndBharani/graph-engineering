@@ -207,6 +207,10 @@ async def test_reviewer_autonomous_conflict_resolution_attempt(tmp_path: Path, m
 
     import orchestrator.nodes.reviewer as rev_mod
     monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch_open_prs)
+    async def mock_ci_pass(*args, **kwargs):
+        return "PASS", "100% green"
+
+    monkeypatch.setattr(rev_mod, "check_pr_ci_status", mock_ci_pass)
     async def mock_resolve(*args, **kwargs):
         return True, "Mock resolved conflicts and pushed branch"
 
@@ -306,6 +310,10 @@ async def test_reviewer_ac4_blackboard_conflict_artifact(tmp_path: Path, monkeyp
         return mock_prs
 
     monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch)
+    async def mock_ci_pass(*a, **kw):
+        return "PASS", "100% green"
+
+    monkeypatch.setattr(rev_mod, "check_pr_ci_status", mock_ci_pass)
 
     async def mock_resolve(*a, **kw):
         return True, "Resolved cleanly"
@@ -578,6 +586,60 @@ async def test_reviewer_blackboard_producer_wiring(tmp_path: Path, monkeypatch):
     assert anomalies[0]["node_name"] == "reviewer"
     assert anomalies[0]["error_type"] == "CI_FAILURE"
     assert anomalies[0]["issue_number"] == 77
+
+
+@pytest.mark.asyncio
+async def test_reviewer_resolves_conflict_and_merges_immediately(tmp_path: Path, monkeypatch):
+    """Verifies that Reviewer node resolves conflicts and merges immediately if auto_merge is enabled."""
+    from orchestrator.nodes.reviewer import run_reviewer_node
+    import orchestrator.nodes.reviewer as rev_mod
+
+    project = ProjectConfig(
+        name="merge-proj",
+        repo="org/merge-proj",
+        local_path=str(tmp_path),
+        nodes={"reviewer": NodeConfig(enabled=True, harness="claude", auto_merge_approved=True)},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    config = GlobalConfig()
+
+    mock_prs = [{"number": 99, "title": "feat: conflict resolved", "state": "OPEN", "mergeable": "CONFLICTING", "headRefName": "feat/99"}]
+
+    async def mock_fetch_prs(*a, **kw):
+        return mock_prs
+
+    async def mock_ci_pass(*a, **kw):
+        return "PASS", "100% green"
+
+    async def mock_resolve(*a, **kw):
+        return True, "Conflicts resolved cleanly"
+
+    class MockProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+        async def communicate(self):
+            return b"", b""
+
+    async def mock_subprocess_exec(*cmd, **kw):
+        return MockProc()
+
+    monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(rev_mod, "check_pr_ci_status", mock_ci_pass)
+    monkeypatch.setattr(rev_mod, "resolve_pr_merge_conflicts", mock_resolve)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+
+    ran, msg = await run_reviewer_node(project, config, state_manager)
+    assert ran is True
+    assert "auto-merged 1 approved PR(s) into main: #99" in msg
+
+    # Verify SDLC item was marked MERGED
+    sdlc_items = await state_manager.get_sdlc_items("merge-proj")
+    assert len(sdlc_items) == 1
+    assert sdlc_items[0]["state"] == "MERGED"
+
 
 
 

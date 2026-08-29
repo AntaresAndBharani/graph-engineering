@@ -188,6 +188,21 @@ async def resolve_pr_merge_conflicts(
     p_status = await asyncio.create_subprocess_exec("git", "status", "--porcelain", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout_st, _ = await p_status.communicate()
     if p_status.returncode == 0 and not stdout_st.strip():
+        # Run local test suite to guarantee resolved code does not introduce regressions
+        test_cmd = project.test_command or "pytest -v"
+        console.print(f"  [{project.name}:conflict-resolver] [dim]Running test suite verification ({test_cmd})...[/dim]")
+        proc_test = await asyncio.create_subprocess_shell(
+            test_cmd,
+            cwd=str(project.local_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_t, stderr_t = await proc_test.communicate()
+        if proc_test.returncode != 0:
+            console.print(f"  [{project.name}:conflict-resolver] [bold red]✗ Tests failed after conflict resolution.[/bold red]")
+            await (await asyncio.create_subprocess_exec("git", "reset", "--hard", "HEAD~1", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+            return False, f"Tests failed after conflict resolution: {stderr_t.decode('utf-8', errors='replace')[:200]}"
+
         # Ensure branch is pushed
         p_push = await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await p_push.wait()
@@ -282,83 +297,16 @@ async def run_reviewer_node(
         console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]Evaluating PR #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
         console.print(f"  [dim]• Target: {project.repo} | Status: Remote CI Quality Gate & Auto-Merge[/dim]")
 
-        # AC 3: Async Deferral when GitHub is calculating mergeability
-        if mergeable in (None, "UNKNOWN"):
-            console.print(f"  [{project.name}:reviewer] [dim]PR #{pr_number} mergeability is computing (UNKNOWN/None). Deferring cleanly (0 tokens).[/dim]")
-            await state_manager.release_lock(pr_number, project.repo, "reviewer")
-            pending_prs.append(pr_number)
-            continue
-
-        # AC 4: Check & Resolve Merge Conflicts Autonomously with Blackboard Persistence
-        if mergeable == "CONFLICTING":
-            # Record review decision on the Blackboard
-            await state_manager.upsert_pr_artifact(
-                repo=project.repo,
-                pr_number=pr_number,
-                node_name="reviewer",
-                status="APPROVED_WITH_CONFLICT",
-                comment=f"Code approved for PR #{pr_number} ('{pr_title}'), but branch '{branch_name}' has git merge conflicts against origin/main.",
-            )
-
-            res_msg = "Conflicting files detected."
-            if branch_name:
-                resolved, res_msg = await resolve_pr_merge_conflicts(
-                    project, config, pr_number, branch_name, node_cfg, state_manager=state_manager
-                )
-                if resolved:
-                    console.print(f"  [{project.name}:reviewer] [bold green]✓ {res_msg}[/bold green]")
-                    await state_manager.upsert_pr_artifact(
-                        repo=project.repo,
-                        pr_number=pr_number,
-                        node_name="reviewer",
-                        status="CONFLICT_RESOLVED",
-                        comment=f"Autonomous conflict resolver resolved conflicts on '{branch_name}'.",
-                    )
-                    # PR is now updated on GitHub; remote CI will trigger. Release lock and wait for CI.
-                    await state_manager.release_lock(pr_number, project.repo, "reviewer")
-                    pending_prs.append(pr_number)
-                    continue
-                else:
-                    console.print(f"  [{project.name}:reviewer] [bold red]✗ Conflict resolution failed: {res_msg}[/bold red]")
-
-            await state_manager.record_anomaly_event(
-                project_name=project.name,
-                node_name="reviewer",
-                error_type="MERGE_CONFLICT",
-                error_message=f"PR #{pr_number} has unresolved merge conflicts: {res_msg}",
-                issue_number=pr_number,
-            )
-
-            if shutil.which("gh"):
-                p1 = await asyncio.create_subprocess_exec(
-                    "gh", "pr", "edit", str(pr_number),
-                    "--repo", project.repo,
-                    "--remove-label", trigger,
-                    "--add-label", "needs-po-review",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await p1.wait()
-                p2 = await asyncio.create_subprocess_exec(
-                    "gh", "pr", "comment", str(pr_number),
-                    "--repo", project.repo,
-                    "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts that could not be autonomously resolved. Flagging for PO review (`needs-po-review`).",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await p2.wait()
-            await state_manager.release_lock(pr_number, project.repo, "reviewer")
-            conflict_prs.append(pr_number)
-            continue
-
-        # 4. Check Remote CI Checks Status (0 Tokens)
+        # 3. Check Remote CI Checks Status (0 Tokens)
         ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
         if ci_status == "PENDING":
+            console.print(f"  [{project.name}:reviewer] [dim]PR #{pr_number} CI checks pending ({ci_details}). Deferring cleanly (0 tokens).[/dim]")
             await state_manager.release_lock(pr_number, project.repo, "reviewer")
             pending_prs.append(pr_number)
             continue
 
         if ci_status == "FAIL":
+            console.print(f"  [{project.name}:reviewer] [bold red]✗ PR #{pr_number} CI checks failed: {ci_details}[/bold red]")
             await state_manager.record_anomaly_event(
                 project_name=project.name,
                 node_name="reviewer",
@@ -371,7 +319,7 @@ async def run_reviewer_node(
                     "gh", "pr", "edit", str(pr_number),
                     "--repo", project.repo,
                     "--remove-label", trigger,
-                    "--add-label", "needs-po-review",
+                    "--add-label", "needs-refactor",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -379,7 +327,7 @@ async def run_reviewer_node(
                 p2 = await asyncio.create_subprocess_exec(
                     "gh", "pr", "comment", str(pr_number),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Reviewer Node**: PR #{pr_number} CI checks failed ({ci_details}). Flagging for review (`needs-po-review`).",
+                    "--body", f"🤖 **Reviewer Node**: Remote CI checks failed ({ci_details}). Flagging for DevTest remediation (`needs-refactor`).",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -388,7 +336,107 @@ async def run_reviewer_node(
             conflict_prs.append(pr_number)
             continue
 
-        # 5. Deterministic Approval & Auto-Merge
+        # 4. Check & Resolve Merge Conflicts Autonomously with Blackboard Persistence
+        if mergeable in (None, "UNKNOWN"):
+            console.print(f"  [{project.name}:reviewer] [dim]PR #{pr_number} mergeability is computing (UNKNOWN/None). Deferring cleanly (0 tokens).[/dim]")
+            await state_manager.release_lock(pr_number, project.repo, "reviewer")
+            pending_prs.append(pr_number)
+            continue
+
+        if mergeable == "CONFLICTING":
+            # Record review decision on the Blackboard
+            await state_manager.upsert_pr_artifact(
+                repo=project.repo,
+                pr_number=pr_number,
+                node_name="reviewer",
+                status="APPROVED_WITH_CONFLICT",
+                comment=f"Code approved for PR #{pr_number} ('{pr_title}'), but branch '{branch_name}' has git merge conflicts against origin/main.",
+            )
+
+            res_msg = "Conflicting files detected."
+            resolved = False
+            if branch_name:
+                resolved, res_msg = await resolve_pr_merge_conflicts(
+                    project, config, pr_number, branch_name, node_cfg, state_manager=state_manager
+                )
+
+            if resolved:
+                console.print(f"  [{project.name}:reviewer] [bold green]✓ {res_msg}[/bold green]")
+                await state_manager.upsert_pr_artifact(
+                    repo=project.repo,
+                    pr_number=pr_number,
+                    node_name="reviewer",
+                    status="CONFLICT_RESOLVED",
+                    comment=f"Autonomous conflict resolver resolved conflicts on '{branch_name}'.",
+                )
+
+                # If auto-merge enabled, attempt immediate merge
+                if auto_merge and shutil.which("gh"):
+                    p_merge = await asyncio.create_subprocess_exec(
+                        "gh", "pr", "merge", str(pr_number),
+                        "--repo", project.repo,
+                        "--squash",
+                        "--delete-branch",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await p_merge.wait()
+
+                    if p_merge.returncode == 0:
+                        merged_prs.append(pr_number)
+                        await state_manager.delete_pr_artifact(project.repo, pr_number)
+                        await state_manager.sync_project_sdlc_items(
+                            project.name,
+                            [{
+                                "issue_number": pr_number,
+                                "title": target_pr.get("title", ""),
+                                "state": "MERGED",
+                                "labels": ["merged"],
+                                "linked_pr": pr_number,
+                            }],
+                        )
+                        console.print(f"  [{project.name}:reviewer] [bold green]✓ Successfully resolved conflicts and auto-merged PR #{pr_number} into main[/bold green]")
+                        await state_manager.release_lock(pr_number, project.repo, "reviewer")
+                        continue
+                    else:
+                        console.print(f"  [{project.name}:reviewer] [dim]PR #{pr_number} conflicts resolved & pushed; waiting for remote CI before merge.[/dim]")
+
+                await state_manager.release_lock(pr_number, project.repo, "reviewer")
+                pending_prs.append(pr_number)
+                continue
+            else:
+                console.print(f"  [{project.name}:reviewer] [bold red]✗ Conflict resolution failed: {res_msg}[/bold red]")
+                await state_manager.record_anomaly_event(
+                    project_name=project.name,
+                    node_name="reviewer",
+                    error_type="MERGE_CONFLICT",
+                    error_message=f"PR #{pr_number} has unresolved merge conflicts: {res_msg}",
+                    issue_number=pr_number,
+                )
+
+                if shutil.which("gh"):
+                    p1 = await asyncio.create_subprocess_exec(
+                        "gh", "pr", "edit", str(pr_number),
+                        "--repo", project.repo,
+                        "--remove-label", trigger,
+                        "--add-label", "needs-refactor",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await p1.wait()
+                    p2 = await asyncio.create_subprocess_exec(
+                        "gh", "pr", "comment", str(pr_number),
+                        "--repo", project.repo,
+                        "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts that could not be autonomously resolved ({res_msg}). Flagging for DevTest remediation (`needs-refactor`).",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await p2.wait()
+                await state_manager.release_lock(pr_number, project.repo, "reviewer")
+                conflict_prs.append(pr_number)
+                continue
+
+        # 5. Deterministic Approval & Auto-Merge (For clean, non-conflicting PRs)
         if auto_merge and shutil.which("gh"):
             p_comment = await asyncio.create_subprocess_exec(
                 "gh", "pr", "comment", str(pr_number),
