@@ -276,7 +276,7 @@ async def test_dashboard_manual_refresh_action(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_dashboard_teardown_and_quit(tmp_path: Path, monkeypatch):
-    """Asserts action_quit performs clean resource cleanup and daemon unregistration."""
+    """Asserts action_quit performs clean resource cleanup and daemon unregistration when idle."""
     config = GlobalConfig(
         projects=[
             ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
@@ -286,23 +286,86 @@ async def test_dashboard_teardown_and_quit(tmp_path: Path, monkeypatch):
     await state_manager.init_db()
     await state_manager.register_daemon(12345)
 
-    terminated = []
-
-    def mock_terminate_all():
-        terminated.append(True)
-        return 1
-
-    monkeypatch.setattr(AsyncHarnessAdapter, "terminate_all_active", mock_terminate_all)
-
     app = DashboardApp(config=config, state_manager=state_manager)
     async with app.run_test() as pilot:
         await pilot.press("q")
 
-    assert len(terminated) == 1
     # Verify daemon PID was unregistered
     info = await state_manager.get_daemon_info()
     assert info.get("status") == "STOPPED"
     assert "pid" not in info
+
+
+@pytest.mark.asyncio
+async def test_dashboard_graceful_drain_mode(tmp_path: Path, monkeypatch):
+    """Asserts that pressing 'q' when jobs are active enters draining mode and requests stop."""
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.register_daemon(12345)
+    await state_manager.acquire_lock(issue_id=10, repo="org/alpha", node_type="devtest")
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "has_active_processes", lambda: True)
+
+    waited = []
+    async def mock_wait_all(timeout=30.0):
+        waited.append(True)
+        return True
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "wait_all_active", mock_wait_all)
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.press("q")
+        assert app.is_draining is True
+        assert "DRAINING" in app.sub_title
+        assert await state_manager.is_stop_requested() is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_double_press_force_quit(tmp_path: Path, monkeypatch):
+    """Asserts that pressing 'q' twice triggers immediate force quit and terminates subprocesses."""
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.register_daemon(12345)
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "has_active_processes", lambda: True)
+
+    async def mock_wait_all(timeout=30.0):
+        try:
+            await asyncio.sleep(10.0)
+            return True
+        except asyncio.CancelledError:
+            return False
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "wait_all_active", mock_wait_all)
+
+    terminated = []
+    def mock_terminate():
+        terminated.append(True)
+        return 1
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "terminate_all_active", mock_terminate)
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        # First Q -> enters draining mode
+        await pilot.press("q")
+        assert app.is_draining is True
+        assert len(terminated) == 0
+
+        # Second Q -> triggers force quit
+        await pilot.press("q")
+        assert len(terminated) == 1
 
 
 @pytest.mark.asyncio
