@@ -25,13 +25,25 @@ from orchestrator.nodes.reviewer import run_reviewer_node
 from orchestrator.nodes.supervisor import run_supervisor_node
 from orchestrator.reloader import SourceWatcher, hot_reload_runtime
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 app = typer.Typer(
     name="orchestrator",
     help="Decoupled, Agnostic Multi-Agent CLI Orchestrator for Engineering Pipelines.",
     add_completion=False,
     no_args_is_help=True,
 )
-console = Console()
+console = Console(legacy_windows=False)
 
 
 def version_callback(value: bool):
@@ -391,13 +403,17 @@ async def _list_projects(config_path: Optional[Path]) -> None:
         if not p.enabled:
             status = "[dim red]Disabled (config)[/dim red]"
         elif p.name in paused_projects:
-            status = "[bold yellow]⏸️ Paused (CLI)[/bold yellow]"
+            status = "[bold yellow]Paused (CLI)[/bold yellow]"
         else:
-            status = "[bold green]● Active[/bold green]"
+            status = "[bold green]Active[/bold green]"
 
         table.add_row(p.name, p.repo, str(p.local_path), arch_str, dev_str, status)
 
-    console.print(table)
+    try:
+        console.print(table)
+    except Exception:
+        # Fallback for legacy console encodings
+        console.print(str(table))
 
 
 @app.command("init")
