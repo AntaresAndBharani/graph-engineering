@@ -31,6 +31,7 @@ from orchestrator.nodes.supervisor import (
     run_supervisor_node,
 )
 from orchestrator import poller
+from orchestrator.quota import QuotaCheckResult, QuotaManager
 from orchestrator.reloader import SourceWatcher, hot_reload_runtime
 
 if sys.platform == "win32":
@@ -57,6 +58,12 @@ supervisor_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(supervisor_app, name="supervisor")
+quota_app = typer.Typer(
+    name="quota",
+    help="Harness token quota, velocity, and runway visibility commands.",
+    no_args_is_help=True,
+)
+app.add_typer(quota_app, name="quota")
 console = Console(legacy_windows=False)
 
 
@@ -101,9 +108,15 @@ def run_command(
         "-c",
         help="Path to custom config.yaml file.",
     ),
+    issue_number: Optional[int] = typer.Option(
+        None,
+        "--issue",
+        "-i",
+        help="Target a specific issue number for one-shot execution.",
+    ),
 ):
     """Executes a single evaluation pass across registered projects."""
-    asyncio.run(_run_single_pass(project_name, node_name, config_path))
+    asyncio.run(_run_single_pass(project_name, node_name, config_path, issue_number))
 
 
 async def run_project_cycle(
@@ -199,6 +212,7 @@ async def _run_single_pass(
     project_name: Optional[str],
     node_name: Optional[str],
     config_path: Optional[Path],
+    issue_number: Optional[int] = None,
 ) -> None:
     try:
         config = load_config(config_path)
@@ -226,6 +240,30 @@ async def _run_single_pass(
     if not targets:
         console.print("[dim]No enabled projects configured. Run 'orchestrator list' to view registered projects.[/dim]")
         return
+
+    # Pre-flight quota runway validation
+    quota_manager = QuotaManager(config, state_manager)
+    for p in targets:
+        if node_name:
+            check_nodes = [node_name]
+        elif issue_number is not None:
+            check_nodes = ["devtest"]
+        else:
+            check_nodes = ["supervisor", "architect", "devtest", "reviewer", "bau"]
+
+        for n in check_nodes:
+            harness_name = quota_manager.resolve_harness_for_node(p, n)
+            res = await quota_manager.check_harness_capacity(harness_name)
+            if not res.allowed:
+                console.print(
+                    f"[bold red]Pre-flight Quota Gate Failed:[/bold red] Target harness '{harness_name}' lacks required "
+                    f"{config.quota.buffer_minutes}-minute token runway (Required: {res.required:,}, Remaining: {res.remaining:,})."
+                )
+                console.print(
+                    f"  Quota Deficit: [bold red]{res.deficit:,} tokens[/bold red] | "
+                    f"Replenishment: [bold yellow]Ready in {res.formatted_eta}[/bold yellow]."
+                )
+                raise typer.Exit(code=2)
 
     # Execute target projects in parallel
     tasks = [
@@ -1356,6 +1394,87 @@ async def _run_supervisor_status(
             hash_preview,
             blockers_preview,
             updated_str,
+        )
+
+    console.print(table)
+
+
+@quota_app.command("status")
+def quota_status_command(
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+    harness_filter: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help="Filter status output to a specific harness.",
+    ),
+):
+    """Displays formatted breakdown of harness window limits, rolling usage, velocity, and replenishments."""
+    asyncio.run(_run_quota_status(config_path, harness_filter))
+
+
+async def _run_quota_status(
+    config_path: Optional[Path],
+    harness_filter: Optional[str],
+) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+    quota_manager = QuotaManager(config, state_manager)
+
+    harnesses = list(config.quota.harnesses.keys())
+    if harness_filter:
+        if harness_filter not in config.quota.harnesses:
+            console.print(f"[bold red]Error:[/bold red] Harness '{harness_filter}' not found in quota configuration.")
+            raise typer.Exit(code=1)
+        harnesses = [harness_filter]
+
+    table = Table(title="Harness Token Quota & Capacity Status", header_style="bold cyan")
+    table.add_column("Harness", style="bold white", no_wrap=True)
+    table.add_column("Status", style="bold")
+    table.add_column("Window", justify="right")
+    table.add_column("Rolling Usage / Limit", justify="right")
+    table.add_column("Burn Velocity", justify="right")
+    table.add_column("Project Distribution", style="dim")
+    table.add_column("Node Distribution", style="dim")
+    table.add_column("Replenishment / ETA", justify="left")
+
+    for h_name in sorted(harnesses):
+        res = await quota_manager.check_harness_capacity(h_name)
+        breakdown = await quota_manager.get_informative_breakdown(h_name)
+
+        status_str = "[bold green]OK[/bold green]" if res.allowed else "[bold red]THROTTLED[/bold red]"
+        pct_used = (res.used / res.limit) * 100 if res.limit > 0 else 0.0
+        usage_str = f"{res.used:,} / {res.limit:,} ({pct_used:.1f}%)"
+        velocity_str = f"{res.velocity:,.0f} tok/h"
+
+        proj_parts = [f"{p}: {pct:.1f}%" for p, pct in breakdown.get("by_project", {}).items()]
+        proj_str = ", ".join(proj_parts) if proj_parts else "None"
+
+        node_parts = [f"{n}: {pct:.1f}%" for n, pct in breakdown.get("by_node", {}).items()]
+        node_str = ", ".join(node_parts) if node_parts else "None"
+
+        eta_str = f"Ready in {res.formatted_eta}" if not res.allowed else "[dim]Ready[/dim]"
+
+        table.add_row(
+            h_name,
+            status_str,
+            f"{res.window_hours:.1f}h",
+            usage_str,
+            velocity_str,
+            proj_str,
+            node_str,
+            eta_str,
         )
 
     console.print(table)
