@@ -96,3 +96,34 @@ def test_project_config_default_context_files(tmp_path: Path):
     assert ".graph/testing-standards.md" in proj.context_files
     assert ".graph/git-workflow.md" in proj.context_files
 
+
+def test_load_config_with_harness_retry(tmp_path: Path):
+    yaml_file = tmp_path / "retry_config.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+harnesses:
+  custom_harness:
+    binary: "custom"
+    retry:
+      max_retries: 5
+      initial_delay_seconds: 2.0
+      backoff_factor: 3.0
+      max_delay_seconds: 30.0
+      retryable_patterns:
+        - "503"
+        - "custom_rate_limit"
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert "custom_harness" in loaded.harnesses
+    custom_retry = loaded.harnesses["custom_harness"].retry
+    assert custom_retry.max_retries == 5
+    assert custom_retry.initial_delay_seconds == 2.0
+    assert custom_retry.backoff_factor == 3.0
+    assert custom_retry.max_delay_seconds == 30.0
+    assert "custom_rate_limit" in custom_retry.retryable_patterns
+
+

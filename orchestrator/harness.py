@@ -1,19 +1,54 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+import logging
 import os
 from pathlib import Path
+import random
 import shutil
 from typing import Callable, Dict, List, Optional
 import psutil
 
-from orchestrator.config import HarnessConfig
-from orchestrator.logging import strip_ansi
-
-
 from rich.console import Console
 
+from orchestrator.config import HarnessConfig, HarnessRetryConfig
+from orchestrator.logging import strip_ansi
+
+_logger = logging.getLogger(__name__)
 _console = Console()
+
+
+def is_retryable_error(output: str, retryable_patterns: list[str]) -> bool:
+    """Checks if output contains any configured transient/retryable error pattern."""
+    if not output or not retryable_patterns:
+        return False
+    lower_output = output.lower()
+    return any(pattern.lower() in lower_output for pattern in retryable_patterns)
+
+
+def get_matched_retryable_pattern(output: str, retryable_patterns: list[str]) -> Optional[str]:
+    """Returns the first matched transient error pattern found in output."""
+    if not output or not retryable_patterns:
+        return None
+    lower_output = output.lower()
+    for pattern in retryable_patterns:
+        if pattern.lower() in lower_output:
+            return pattern
+    return None
+
+
+def calculate_backoff_delay(attempt: int, config: HarnessRetryConfig) -> float:
+    """
+    Calculates exponential backoff delay with randomized jitter:
+    delay = min(max_delay, initial_delay * (backoff_factor ** attempt)) * (0.8 + 0.4 * random())
+    """
+    base_delay = min(
+        config.max_delay_seconds,
+        config.initial_delay_seconds * (config.backoff_factor ** attempt),
+    )
+    jitter = 0.8 + 0.4 * random.random()
+    return base_delay * jitter
 
 
 class AsyncHarnessAdapter:
@@ -33,6 +68,7 @@ class AsyncHarnessAdapter:
     def __init__(self, name: str, config: HarnessConfig):
         self.name = name
         self.config = config
+        self.retry_config = config.retry
         self.binary = config.binary
         self.args_template = config.args
         self.model_flag = config.model_flag
@@ -40,6 +76,31 @@ class AsyncHarnessAdapter:
         self.timeout_seconds = config.timeout_minutes * 60
         self.retry_limit = config.retry_on_failure
         self.env_vars = config.env_vars
+
+    @classmethod
+    def has_active_processes(cls) -> bool:
+        """Returns True if any harness subprocess is currently executing."""
+        return len(cls._active_processes) > 0
+
+    @classmethod
+    def get_active_process_count(cls) -> int:
+        """Returns the count of currently executing harness subprocesses."""
+        return len(cls._active_processes)
+
+    @classmethod
+    async def wait_all_active(cls, timeout: float = 30.0) -> bool:
+        """
+        Asynchronously waits for all active harness subprocesses to finish.
+        Returns True if all finished within timeout, False if timeout elapsed.
+        """
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        while len(cls._active_processes) > 0:
+            elapsed = loop.time() - start
+            if elapsed >= timeout:
+                return False
+            await asyncio.sleep(0.5)
+        return True
 
     @classmethod
     def terminate_all_active(cls) -> int:
@@ -92,34 +153,20 @@ class AsyncHarnessAdapter:
 
         return env
 
-    async def execute(
+    async def _execute_once(
         self,
-        prompt: str,
+        cmd: List[str],
         cwd: Path,
+        env: Dict[str, str],
         log_file: Path,
-        model: Optional[str] = None,
-        effort: Optional[str] = None,
-        extra_env: Optional[Dict[str, str]] = None,
         console_prefix: Optional[str] = None,
-    ) -> int:
+    ) -> tuple[int, str]:
         """
-        Executes the CLI harness asynchronously in the project directory.
-        Streams stdout/stderr with ANSI stripping to log_file and live to console if console_prefix is provided.
-        Gracefully kills process tree on timeout.
+        Runs a single subprocess attempt, streaming stdout/stderr to disk and console,
+        and returns (exit_code, captured_output).
         """
-        if not self.is_available():
-            err_msg = f"[ERROR] Binary '{self.binary}' for harness '{self.name}' not found in PATH."
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"\n{err_msg}\n")
-            if console_prefix:
-                _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
-            return 127
-
-        cmd = self.build_command(prompt, model=model, effort=effort)
-        env = self.build_env(extra_env)
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-
         process: Optional[asyncio.subprocess.Process] = None
+        captured_chunks: deque[str] = deque(maxlen=1000)
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -143,6 +190,7 @@ class AsyncHarnessAdapter:
                             break
                         decoded = line.decode("utf-8", errors="replace")
                         cleaned = strip_ansi(decoded)
+                        captured_chunks.append(cleaned)
                         f.write(cleaned)
                         f.flush()
 
@@ -160,23 +208,98 @@ class AsyncHarnessAdapter:
 
             await asyncio.wait_for(stream_output(), timeout=self.timeout_seconds)
             await process.wait()
-            return process.returncode if process.returncode is not None else 0
+            returncode = process.returncode if process.returncode is not None else 0
+            return returncode, "".join(captured_chunks)
 
         except asyncio.TimeoutError:
             self._kill_process_tree(process)
+            timeout_msg = f"\n\n[ORCHESTRATOR ERROR] Process timed out after {self.config.timeout_minutes} minutes and was killed.\n"
             with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"\n\n[ORCHESTRATOR ERROR] Process timed out after {self.config.timeout_minutes} minutes and was killed.\n")
-            return 124
+                f.write(timeout_msg)
+            captured_chunks.append(timeout_msg)
+            return 124, "".join(captured_chunks)
 
         except Exception as e:
             if process:
                 self._kill_process_tree(process)
+            error_msg = f"\n\n[ORCHESTRATOR ERROR] Subprocess execution error: {e}\n"
             with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"\n\n[ORCHESTRATOR ERROR] Subprocess execution error: {e}\n")
-            return 1
+                f.write(error_msg)
+            captured_chunks.append(error_msg)
+            return 1, "".join(captured_chunks)
         finally:
             if process:
                 AsyncHarnessAdapter._active_processes.discard(process)
+
+    async def execute(
+        self,
+        prompt: str,
+        cwd: Path,
+        log_file: Path,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        console_prefix: Optional[str] = None,
+    ) -> int:
+        """
+        Executes the CLI harness asynchronously in the project directory with transient error retry engine.
+        Streams stdout/stderr with ANSI stripping to log_file and live to console if console_prefix is provided.
+        Gracefully kills process tree on timeout.
+        """
+        if not self.is_available():
+            err_msg = f"[ERROR] Binary '{self.binary}' for harness '{self.name}' not found in PATH."
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{err_msg}\n")
+            if console_prefix:
+                _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
+            return 127
+
+        cmd = self.build_command(prompt, model=model, effort=effort)
+        env = self.build_env(extra_env)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
+        if returncode == 0:
+            return 0
+
+        retry_cfg = self.retry_config
+        if not is_retryable_error(captured_output, retry_cfg.retryable_patterns) or retry_cfg.max_retries <= 0:
+            return returncode
+
+        for attempt_num in range(1, retry_cfg.max_retries + 1):
+            error_snippet = get_matched_retryable_pattern(captured_output, retry_cfg.retryable_patterns) or "transient error"
+            delay = calculate_backoff_delay(attempt_num - 1, retry_cfg)
+            warn_msg = (
+                f"[WARN] [harness:{self.name}] Transient upstream error detected ({error_snippet}). "
+                f"Retrying attempt {attempt_num}/{retry_cfg.max_retries} in {delay:.1f}s (jitter applied)..."
+            )
+            _logger.warning(warn_msg)
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{warn_msg}\n")
+            if console_prefix:
+                _console.print(f"  [bold yellow]{console_prefix}[/bold yellow] {warn_msg}")
+
+            await asyncio.sleep(delay)
+
+            returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
+            if returncode == 0:
+                return 0
+
+            if not is_retryable_error(captured_output, retry_cfg.retryable_patterns):
+                return returncode
+
+        # Retries exhausted
+        err_msg = (
+            f"[ERROR] [harness:{self.name}] Retries exhausted ({retry_cfg.max_retries}/{retry_cfg.max_retries}). "
+            "Upstream service unavailable."
+        )
+        _logger.error(err_msg)
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{err_msg}\n")
+        if console_prefix:
+            _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
+
+        return returncode
 
     @staticmethod
     def _kill_process_tree(process: Optional[asyncio.subprocess.Process]) -> None:

@@ -62,6 +62,23 @@ harnesses:
     effort_flag: "--effort"           # Claude CLI supports level of effort flag (--effort low|medium|high|max)
     timeout_minutes: 30
     retry_on_failure: 1
+    retry:
+      max_retries: 3
+      initial_delay_seconds: 5.0
+      backoff_factor: 2.0
+      max_delay_seconds: 60.0
+      retryable_patterns:
+        - "503"
+        - "UNAVAILABLE"
+        - "429"
+        - "RESOURCE_EXHAUSTED"
+        - "502"
+        - "504"
+        - "rate limit"
+        - "quota exceeded"
+        - "connection reset"
+        - "server disconnected"
+        - "fetch failed"
 
   antigravity:
     binary: "agy"
@@ -70,6 +87,11 @@ harnesses:
     effort_flag: "--effort"           # Antigravity CLI supports level of effort flag (--effort low|medium|high)
     timeout_minutes: 45
     retry_on_failure: 1
+    retry:
+      max_retries: 3
+      initial_delay_seconds: 5.0
+      backoff_factor: 2.0
+      max_delay_seconds: 60.0
 
   devin:
     binary: "devin"

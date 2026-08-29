@@ -146,3 +146,38 @@ Commands for PO-proxy Supervisor evaluation, inspection, and blackboard tracking
 orchestrator supervisor evaluate <issue_number> -p <project_name> [--dry-run]
 orchestrator supervisor status -p <project_name>
 ```
+
+---
+
+## 🔁 Transient Upstream Error Retry Engine
+
+The `AsyncHarnessAdapter` integrates an in-memory automatic retry engine with exponential backoff and randomized jitter to handle transient upstream API errors (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502/504 Bad Gateway/Timeout, connection resets).
+
+### Configuration (`HarnessRetryConfig`)
+```yaml
+harnesses:
+  claude:
+    binary: "claude"
+    args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
+    retry:
+      max_retries: 3
+      initial_delay_seconds: 5.0
+      backoff_factor: 2.0
+      max_delay_seconds: 60.0
+      retryable_patterns:
+        - "503"
+        - "UNAVAILABLE"
+        - "429"
+        - "RESOURCE_EXHAUSTED"
+        - "502"
+        - "504"
+        - "rate limit"
+        - "quota exceeded"
+        - "connection reset"
+        - "server disconnected"
+        - "fetch failed"
+```
+
+### Exponential Backoff with Jitter Formula
+$$\text{delay} = \min(\text{max\_delay}, \text{initial\_delay} \times \text{backoff\_factor}^{\text{attempt}}) \times (0.8 + 0.4 \times \text{random}())$$
+

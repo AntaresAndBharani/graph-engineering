@@ -8,6 +8,17 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
 
+class HarnessRetryConfig(BaseModel):
+    max_retries: int = Field(default=3, ge=0)
+    initial_delay_seconds: float = Field(default=5.0, ge=0.5)
+    backoff_factor: float = Field(default=2.0, ge=1.0)
+    max_delay_seconds: float = Field(default=60.0, ge=5.0)
+    retryable_patterns: list[str] = Field(default_factory=lambda: [
+        "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "502", "504",
+        "rate limit", "quota exceeded", "connection reset", "server disconnected", "fetch failed"
+    ])
+
+
 class HarnessConfig(BaseModel):
     binary: str
     args: List[str] = Field(default_factory=list)
@@ -16,6 +27,7 @@ class HarnessConfig(BaseModel):
     timeout_minutes: int = 30
     retry_on_failure: int = 1
     env_vars: Dict[str, str] = Field(default_factory=dict)
+    retry: HarnessRetryConfig = Field(default_factory=HarnessRetryConfig)
 
 
 class LabelConfig(BaseModel):

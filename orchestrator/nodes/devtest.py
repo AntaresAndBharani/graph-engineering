@@ -10,7 +10,8 @@ from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
-from orchestrator.poller import fetch_issues_with_label
+from orchestrator import poller
+from orchestrator.poller import fetch_issues_with_label, fetch_open_prs
 
 
 async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool, str]:
@@ -44,6 +45,186 @@ async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool,
     return True, "Safety verified."
 
 
+async def _remediate_refactor_pr(
+    project: ProjectConfig,
+    config: GlobalConfig,
+    state_manager: StateManager,
+    node_cfg: NodeConfig,
+    pr_number: int,
+    pr_title: str,
+    branch_name: str,
+) -> tuple[bool, str]:
+    """
+    Autonomously remediates a PR labeled 'needs-refactor' by ingesting the Architect's
+    code review critique, applying refactorings on the branch, verifying tests, committing,
+    pushing, and relabeling to 'needs-architect-review'.
+    """
+    is_safe, safety_msg = await verify_git_safety(project.local_path, project.repo)
+    if not is_safe:
+        return False, safety_msg
+
+    harness_name = node_cfg.harness or "antigravity"
+    harness_cfg = config.harnesses.get(harness_name)
+    if not harness_cfg:
+        return False, f"Harness '{harness_name}' not found in configuration."
+
+    retry_cfg = getattr(harness_cfg, "retry", None)
+    max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
+    lock_ttl = int(harness_cfg.timeout_minutes * (1 + max_retries) + 5)
+
+    lock_acquired = await state_manager.acquire_lock(
+        issue_id=pr_number,
+        repo=project.repo,
+        node_type="devtest_refactor",
+        ttl_minutes=lock_ttl,
+    )
+    if not lock_acquired:
+        return False, f"PR #{pr_number} is locked by another active refactor run. Skipping."
+
+    log_file = get_project_log_path(
+        config.settings.resolved_log_dir,
+        project.name,
+        "devtest",
+        issue_id=f"pr_{pr_number}_refactor",
+    )
+
+    from rich.console import Console
+    console = Console()
+    console.print(f"\n  [bold yellow]🔧 [{project.name}:devtest][/bold yellow] [bold white]Remediating PR #{pr_number} ('needs-refactor'):[/bold white] [cyan]'{pr_title}'[/cyan]")
+    console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_name} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+    console.print(f"  [dim]• Scope: Autonomous Architectural Review Remediation & Test Verification[/dim]")
+
+    # 1. Fetch Architect review critique from PR comments and reviews
+    architect_critique = ""
+    if shutil.which("gh"):
+        try:
+            proc_view = await asyncio.create_subprocess_exec(
+                "gh", "pr", "view", str(pr_number),
+                "--repo", project.repo,
+                "--json", "reviews,comments,headRefName",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_v, _ = await proc_view.communicate()
+            if proc_view.returncode == 0 and stdout_v:
+                pr_data = json.loads(stdout_v.decode("utf-8", errors="replace"))
+                if not branch_name:
+                    branch_name = pr_data.get("headRefName", "")
+                review_bodies = [r.get("body", "") for r in pr_data.get("reviews", []) if r.get("body")]
+                comment_bodies = [c.get("body", "") for c in pr_data.get("comments", []) if c.get("body")]
+                all_critiques = review_bodies + comment_bodies
+                architect_critiques = [c for c in all_critiques if "Architectural Review" in c or "needs-refactor" in c or "Refactoring Required" in c]
+                if architect_critiques:
+                    architect_critique = "\n\n---\n\n".join(architect_critiques)
+                elif all_critiques:
+                    architect_critique = all_critiques[-1]
+        except Exception as e:
+            architect_critique = f"(Unable to parse PR review comments: {e})"
+
+    if not branch_name:
+        branch_name = f"feat/issue-{pr_number}"
+
+    # 2. Pre-flight checkout of the PR branch
+    try:
+        p1 = await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await p1.wait()
+        p2 = await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await p2.wait()
+        p3 = await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await p3.wait()
+        p4 = await asyncio.create_subprocess_exec("git", "checkout", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await p4.wait()
+        p5 = await asyncio.create_subprocess_exec("git", "pull", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await p5.wait()
+    except Exception as e:
+        await state_manager.fail_job(
+            issue_id=pr_number,
+            repo=project.repo,
+            node_type="devtest_refactor",
+            error_message=f"Pre-flight checkout failed: {e}",
+        )
+        await state_manager.release_lock(pr_number, project.repo, "devtest_refactor")
+        return False, f"Pre-flight checkout failed for PR #{pr_number} ({branch_name}): {e}"
+
+    # 3. Build refactoring prompt
+    prompt = (
+        f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
+        f"Remediate the Architectural Code Review feedback on Pull Request #{pr_number} ('{pr_title}') on branch '{branch_name}'.\n\n"
+        f"🚨 ARCHITECTURAL CODE REVIEW FEEDBACK:\n"
+        f"{architect_critique or 'The Architect requested refactoring to adhere to domain boundaries, dynamic TTL locking, and .graph/architecture.md standards.'}\n\n"
+        f"OPERATIONAL STEPS:\n"
+        f"1. Read .graph/architecture.md and understand the requested architectural changes.\n"
+        f"2. Inspect the current implementation on branch '{branch_name}'.\n"
+        f"3. Refactor the code strictly addressing the Architect's critique while maintaining all existing passing tests.\n"
+        f"4. Run the local unit test suite and confirm that 100% of tests pass.\n"
+        f"5. Commit your changes with a descriptive message: `refactor: address architect code review feedback for PR #{pr_number}`.\n"
+        f"6. Push the updated branch to `origin {branch_name}`.\n"
+    )
+
+    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    try:
+        exit_code = await adapter.execute(
+            prompt=prompt,
+            cwd=project.local_path,
+            log_file=log_file,
+            model=node_cfg.model,
+            effort=node_cfg.effort,
+            console_prefix=f"[{project.name}:devtest-refactor]",
+        )
+    finally:
+        await state_manager.release_lock(pr_number, project.repo, "devtest_refactor")
+
+    if exit_code != 0:
+        await state_manager.fail_job(
+            issue_id=pr_number,
+            repo=project.repo,
+            node_type="devtest_refactor",
+            error_message=f"Refactor harness exited with code {exit_code}. See logs: {log_file.name}",
+        )
+        return False, f"DevTest refactor failed on PR #{pr_number} (exit code {exit_code})."
+
+    # 4. Check git status and push if uncommitted changes remain
+    diff_proc = await asyncio.create_subprocess_exec(
+        "git", "status", "--porcelain",
+        cwd=str(project.local_path),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    diff_out, _ = await diff_proc.communicate()
+    if diff_out.strip():
+        pa = await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(project.local_path))
+        await pa.wait()
+        pc = await asyncio.create_subprocess_exec(
+            "git", "commit", "-m", f"refactor: address architect feedback for PR #{pr_number}",
+            cwd=str(project.local_path),
+        )
+        await pc.wait()
+        pp = await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(project.local_path))
+        await pp.wait()
+
+    # 5. Relabel PR from needs-refactor back to needs-architect-review
+    if shutil.which("gh"):
+        p_edit = await asyncio.create_subprocess_exec(
+            "gh", "pr", "edit", str(pr_number),
+            "--repo", project.repo,
+            "--remove-label", "needs-refactor",
+            "--add-label", "needs-architect-review",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await p_edit.wait()
+
+        p_comment = await asyncio.create_subprocess_exec(
+            "gh", "pr", "comment", str(pr_number),
+            "--repo", project.repo,
+            "--body", f"🤖 **DevTest Refactor Complete**: Architectural review feedback addressed on branch `{branch_name}`. Returning to `needs-architect-review`.",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await p_comment.wait()
+
+    return True, f"DevTest node remediated PR #{pr_number} and transitioned to 'needs-architect-review'."
+
+
 async def run_devtest_node(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -51,11 +232,28 @@ async def run_devtest_node(
 ) -> tuple[bool, str]:
     """
     Executes 3Amigos DevTest Node (Implementation & Verification).
-    Zero-token gating: if no issues labeled 'ready-for-dev', exits with 0 tokens consumed.
+    Zero-token gating: if no issues labeled 'ready-for-dev' and no PRs labeled 'needs-refactor', exits with 0 tokens consumed.
     """
     node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
     if not node_cfg.enabled:
         return False, "DevTest node disabled for project."
+
+    # Phase 1: Remediate PRs with 'needs-refactor'
+    refactor_prs = await fetch_open_prs(project.repo, label="needs-refactor", limit=1)
+    if refactor_prs:
+        target_pr = refactor_prs[0]
+        pr_number = target_pr["number"]
+        pr_title = target_pr.get("title", "")
+        branch_name = target_pr.get("headRefName", "")
+        return await _remediate_refactor_pr(
+            project=project,
+            config=config,
+            state_manager=state_manager,
+            node_cfg=node_cfg,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            branch_name=branch_name,
+        )
 
     trigger = node_cfg.label_trigger or "ready-for-dev"
     output_label = node_cfg.label_output or "needs-architect-review"
@@ -64,7 +262,7 @@ async def run_devtest_node(
     # 1. Deterministic Gating (0 Tokens)
     issues = await fetch_issues_with_label(project.repo, trigger, limit=1)
     if not issues:
-        return False, f"No issues labeled '{trigger}'. Idle (0 tokens)."
+        return False, f"No PRs labeled 'needs-refactor' and no issues labeled '{trigger}'. Idle (0 tokens)."
 
     target_issue = issues[0]
     issue_id = target_issue["number"]
