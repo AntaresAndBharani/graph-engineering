@@ -328,4 +328,78 @@ async def test_reviewer_ac4_blackboard_conflict_artifact(tmp_path: Path, monkeyp
     assert art["status"] in ("APPROVED_WITH_CONFLICT", "CONFLICT_RESOLVED")
 
 
+@pytest.mark.asyncio
+async def test_compute_issue_hash():
+    from orchestrator.nodes.supervisor import compute_issue_hash
+    hash1 = compute_issue_hash("Title A", "Body A")
+    hash2 = compute_issue_hash("Title A", "Body A")
+    hash3 = compute_issue_hash("Title A", "Body B")
+    assert hash1 == hash2
+    assert hash1 != hash3
+    assert len(hash1) == 64
+
+
+@pytest.mark.asyncio
+async def test_parse_po_evaluation_response():
+    from orchestrator.nodes.supervisor import parse_po_evaluation_response
+    sample_approved = """
+VERDICT: PO_APPROVED
+GAPS:
+None
+GHERKIN_AC:
+```gherkin
+Feature: Auth
+  Scenario: Login
+    Given user on login page
+    When user enters valid credentials
+    Then user is logged in
+```
+"""
+    verdict, gaps, gherkin = parse_po_evaluation_response(sample_approved, "Auth")
+    assert verdict == "PO_APPROVED"
+    assert gaps is None
+    assert gherkin is not None
+    assert "Feature: Auth" in gherkin
+
+    sample_clarification = """
+VERDICT: NEEDS_HUMAN_CLARIFICATION
+GAPS:
+1. Missing token expiration strategy.
+2. Unclear error response codes.
+GHERKIN_AC:
+None
+"""
+    v2, g2, gh2 = parse_po_evaluation_response(sample_clarification, "Auth")
+    assert v2 == "NEEDS_HUMAN_CLARIFICATION"
+    assert "Missing token expiration strategy" in (g2 or "")
+
+
+@pytest.mark.asyncio
+async def test_supervisor_po_evaluation_hash_skip_gate(tmp_path: Path):
+    from orchestrator.nodes.supervisor import evaluate_supervisor_issue, compute_issue_hash
+    project = ProjectConfig(name="test", repo="org/repo", local_path=str(tmp_path))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    config = GlobalConfig()
+
+    title = "feat: checkout"
+    body = "Ambiguous checkout requirements."
+    body_hash = compute_issue_hash(title, body)
+
+    # Pre-seed NEEDS_HUMAN_CLARIFICATION in po_tracking
+    await state_manager.upsert_po_tracking(
+        repo=project.repo,
+        issue_number=42,
+        body_hash=body_hash,
+        status="NEEDS_HUMAN_CLARIFICATION",
+        blockers="Missing payment details",
+    )
+
+    issue = {"number": 42, "title": title, "body": body}
+    res = await evaluate_supervisor_issue(project, issue, config, state_manager, dry_run=False, force=False)
+    assert res.skipped is True
+    assert "hash unchanged" in res.details.lower()
+
+
+
 

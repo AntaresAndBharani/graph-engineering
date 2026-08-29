@@ -33,7 +33,7 @@ flowchart TD
     end
 
     subgraph Blackboard Layer ["Decoupled Artifact Blackboard"]
-        BB[("pr_artifacts Blackboard Cache")]
+        BB[("Decoupled Blackboard (pr_artifacts & po_tracking)")]
     end
 
     subgraph Managed Target Repositories ["Managed Application Workspaces"]
@@ -47,6 +47,7 @@ flowchart TD
     Core --> N0 & N1 & N2 & N3 & N4
     N0 & N1 & N2 & N3 & N4 --> Adapter
     N0 & N1 & N2 & N3 & N4 <--> GH
+    N0 <--> BB
     N2 & N3 <--> LocalGit
     N2 & N3 <--> BB
 ```
@@ -55,7 +56,7 @@ flowchart TD
 
 | Node | Name | Primary Responsibility | Trigger Condition | Harness / Model Tier |
 |---|---|---|---|---|
-| **Node 0** | **Supervisor** (`supervisor.py`) | Consistency watchdog, 12h issue SLA audit, unclassified issue detection, and dead-lock self-healing. | Scheduled interval (`supervisor_interval_seconds`, default 1h) | Zero-token deterministic audit (CLI/GraphQL) |
+| **Node 0** | **Supervisor** (`supervisor.py`) | Consistency watchdog, 12h SLA audit, proactive PO-proxy requirement evaluation, SHA-256 hash gating, and anomaly self-healing. | Scheduled interval (default 1h) or Label `needs-po-review` | Fast PO Evaluation (`antigravity`/`gemini-3.7-flash-low`) + Zero-token audit |
 | **Node 1** | **Architect** (`architect.py`) | Living architecture sync (7-day SLA), INVEST story decomposition, subtask linking, and PR architectural reviews. | Label `needs-triage` or Weekly SLA trigger | Pluggable Research Harness (`antigravity`/`gemini-3.7-flash-high`) / Primary (`claude-sonnet-5`) |
 | **Node 2** | **3-Amigos DevTest** (`devtest.py`) | Pre-flight git safety check, TDD test suite generation, clean implementation, and autonomous PR opening. | Label `ready-for-dev` | Primary Implementation Harness (`antigravity` / `claude`) |
 | **Node 3** | **Reviewer Gatekeeper** (`reviewer.py`) | Remote CI quality gate verification (100% green required), autonomous merge conflict resolution, and squash auto-merge. | Label `architect-approved` / `needs-architect-review` | Fast Conflict Harness (`antigravity`/`gemini-3.7-flash-low`) + Deterministic `gh` |
@@ -209,17 +210,18 @@ graph-engineering/
 
 ## 🎨 Design Patterns, State Management & Dependency Injection
 
-### 1. Decoupled Artifact Blackboard Pattern (`pr_artifacts`)
+### 1. Decoupled Artifact Blackboard Pattern (`pr_artifacts` & `po_tracking`)
 To prevent brittle multi-agent state machines and communication loss between asynchronous nodes, the system implements an **Artifact Blackboard** pattern stored in SQLite WAL:
-- **Routing vs. State**: GitHub Labels act as the event-driven *Router* (`poller.py`), while SQLite acts as the *Blackboard* (`pr_artifacts`).
-- **Context Sharing**: When `ReviewerNode` evaluates a PR that has passing code reviews but git merge conflicts, it writes an `APPROVED_WITH_CONFLICT` decision artifact to the blackboard. `DevTestNode` reads the blackboard and performs pure conflict resolution without repeating code reviews.
+- **Routing vs. State**: GitHub Labels act as the event-driven *Router* (`poller.py`), while SQLite acts as the *Blackboard* (`pr_artifacts`, `po_tracking`).
+- **Context Sharing (PRs)**: When `ReviewerNode` evaluates a PR that has passing code reviews but git merge conflicts, it writes an `APPROVED_WITH_CONFLICT` decision artifact to the blackboard. `DevTestNode` reads the blackboard and performs pure conflict resolution without repeating code reviews.
+- **PO Issue Tracking & Hash Gating (`po_tracking`)**: When `SupervisorNode` evaluates an issue labeled `needs-po-review`, it records its SHA-256 body hash, readiness status (`PO_APPROVED` or `NEEDS_HUMAN_CLARIFICATION`), generated Gherkin AC, and detected blockers. Subsequent cycles use the stored hash to short-circuit unchanged issues with zero LLM tokens.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Poller as Poller / GitHub
     participant Reviewer as Reviewer Node (Node 3)
-    participant Blackboard as DB Blackboard (pr_artifacts)
+    participant Blackboard as DB Blackboard (pr_artifacts & po_tracking)
     participant DevTest as DevTest Node (Node 2)
 
     Poller->>Reviewer: PR labeled 'needs-architect-review'
