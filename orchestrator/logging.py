@@ -121,7 +121,7 @@ def setup_logger(
     """
     logger = logging.getLogger("orchestrator")
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    logger.propagate = False
+    logger.propagate = True
 
     if not logger.handlers:
         # Rich console handler

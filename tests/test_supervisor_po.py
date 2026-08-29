@@ -102,7 +102,7 @@ async def test_scenario_unchanged_issue_is_skipped_with_zero_tokens(tmp_path: Pa
     with (
         patch("orchestrator.nodes.supervisor.AsyncHarnessAdapter.execute", mock_harness_execute),
         patch("asyncio.create_subprocess_exec", mock_subprocess_exec),
-        caplog.at_level("DEBUG"),
+        caplog.at_level("DEBUG", logger="orchestrator"),
     ):
         result = await evaluate_supervisor_issue(
             project=project,

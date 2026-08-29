@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 import pytest
@@ -291,6 +292,73 @@ async def test_dashboard_teardown_and_quit(tmp_path: Path, monkeypatch):
 
     assert len(terminated) == 1
     # Verify daemon PID was unregistered
+    info = await state_manager.get_daemon_info()
+    assert info.get("status") == "STOPPED"
+    assert "pid" not in info
+
+
+@pytest.mark.asyncio
+async def test_dashboard_sigint_and_task_cancellation_cleanup(tmp_path: Path, monkeypatch):
+    """Asserts SIGINT/CancelledError during watch daemon triggers worker cancellation and teardown."""
+    from orchestrator.cli import _watch_daemon_tui
+
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "{posix_path}"
+        """,
+        encoding="utf-8",
+    )
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    worker_cancelled = []
+    worker_started = asyncio.Event()
+
+    async def mock_worker_loop(*args, **kwargs):
+        worker_started.set()
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            worker_cancelled.append(True)
+            raise
+
+    terminated_calls = []
+
+    def mock_terminate():
+        terminated_calls.append(True)
+        return 0
+
+    monkeypatch.setattr("orchestrator.cli._project_worker_loop", mock_worker_loop)
+    monkeypatch.setattr("orchestrator.cli.sync_all_projects_labels", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(AsyncHarnessAdapter, "terminate_all_active", mock_terminate)
+
+    # Mock run_async to raise CancelledError (simulating SIGINT)
+    async def mock_run_async(self, *args, **kwargs):
+        await worker_started.wait()
+        raise asyncio.CancelledError()
+
+    from textual.app import App
+    monkeypatch.setattr(App, "run_async", mock_run_async)
+    monkeypatch.setattr(DashboardApp, "run_async", mock_run_async)
+
+    # Run _watch_daemon_tui
+    await _watch_daemon_tui(interval_override=5, config_path=config_file)
+
+    assert len(worker_cancelled) == 1
+    assert len(terminated_calls) >= 1
+
+    # Verify daemon PID was unregistered from state.db
     info = await state_manager.get_daemon_info()
     assert info.get("status") == "STOPPED"
     assert "pid" not in info
