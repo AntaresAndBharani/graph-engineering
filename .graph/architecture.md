@@ -2,7 +2,7 @@
 
 **Repository**: `AntaresAndBharani/graph-engineering`  
 **System**: Graph Orchestrator (`graph-orchestrator`)  
-**Status**: Living Architecture Standard (Weekly Synchronized)  
+**Status**: Living Architecture Standard (Weekly Synchronized & Event-Driven)  
 **Target Runtime**: Python 3.11+ | Linux / macOS / Windows  
 
 ---
@@ -10,64 +10,72 @@
 ## 🏛️ System Overview & Technology Stack
 
 ### System Overview
-`graph-orchestrator` is a decoupled, local-first control-plane daemon engineered to coordinate autonomous multi-agent software engineering pipelines across distributed repositories. It decouples workflow automation, governance, and quality gating from managed application repositories.
+`graph-orchestrator` is a decoupled, local-first control-plane daemon engineered to coordinate autonomous multi-agent software engineering pipelines across distributed repositories. It establishes an intelligent bridge between local developer workspaces, cloud code hosting platforms (GitHub), and pluggable AI CLI execution harnesses (Antigravity, Claude Code, Devin).
 
-The architecture operates on **Zero-Token Idle Gating**: all repository scans, issue polling, pull request validations, and state audits are performed deterministically via local CLI tooling (GitHub CLI `gh`, Git, SQLite) without making speculative LLM calls. External AI CLI harnesses (Antigravity `agy`, Claude Code `claude`, Devin `devin`) are invoked strictly when actionable tasks require deep reasoning, code generation, or structural refactoring.
+The architecture is governed by **Zero-Token Idle Gating**: all repository inspections, issue status checks, label audits, pull request evaluations, and mergeability scans execute deterministically via local CLI tooling (GitHub CLI `gh`, Git, SQLite WAL) with zero token consumption. External AI harnesses are dispatched strictly when actionable tasks require deep reasoning, code implementation, INVEST story decomposition, or semantic conflict resolution.
 
 ```mermaid
 flowchart TD
     subgraph Control Plane ["Autonomous Control Plane (graph-orchestrator)"]
-        CLI["Typer / Rich CLI Adapter"]
+        CLI["Typer / Rich CLI Adapter (`orchestrator/cli.py`)"]
         Core["Worker Engine & Scheduler"]
-        State[("SQLite WAL State Manager")]
-        Adapter["AsyncHarnessAdapter (CLI Bridge)"]
+        State[("SQLite WAL State Manager (`orchestrator/db.py`)")]
+        Reloader["SourceWatcher & Hot Reloader (`orchestrator/reloader.py`)"]
+        Adapter["AsyncHarnessAdapter (`orchestrator/harness.py`)"]
     end
 
-    subgraph Governance & Pipeline Nodes
-        N0["Node 0: Supervisor (Watchdog & SLA)"]
-        N1["Node 1: Architect (Living Arch & Decomposition)"]
-        N2["Node 2: 3-Amigos DevTest (TDD & PR Creation)"]
-        N3["Node 3: Reviewer Gatekeeper (CI & Auto-Merge)"]
-        N4["Node 4: BAU Maintenance (Debt Consolidation)"]
+    subgraph Governance & Pipeline Nodes ["Autonomous Pipeline Nodes (`orchestrator/nodes/*`)"]
+        N0["Node 0: Supervisor (Watchdog, SLA Audit & Recovery)"]
+        N1["Node 1: Architect (Living Arch & INVEST Decomposition)"]
+        N2["Node 2: 3-Amigos DevTest (TDD Implementation & PR Creation)"]
+        N3["Node 3: Reviewer Gatekeeper (CI Verification & Auto-Merge)"]
+        N4["Node 4: BAU Maintenance (Technical Debt Consolidation)"]
     end
 
-    subgraph Managed Application Repositories
-        GH["GitHub Remote (Issues, PRs, CI Actions)"]
-        LocalGit["Local Git Worktrees"]
+    subgraph Blackboard Layer ["Decoupled Artifact Blackboard"]
+        BB[("pr_artifacts Blackboard Cache")]
+    end
+
+    subgraph Managed Target Repositories ["Managed Application Workspaces"]
+        GH["GitHub Remote (GraphQL, REST, Issues, PRs, CI Actions)"]
+        LocalGit["Local Git Worktrees & Working Trees"]
     end
 
     CLI --> Core
     Core <--> State
+    Core <--> Reloader
     Core --> N0 & N1 & N2 & N3 & N4
     N0 & N1 & N2 & N3 & N4 --> Adapter
     N0 & N1 & N2 & N3 & N4 <--> GH
-    N2 <--> LocalGit
+    N2 & N3 <--> LocalGit
+    N2 & N3 <--> BB
 ```
 
 ### Technology Stack Matrix
 
-| Layer / Concern | Technology | Version / Standard | Rationale |
+| Layer / Concern | Technology | Version / Standard | Architectural Rationale |
 |---|---|---|---|
-| **Runtime & Language** | Python | `>=3.11` | Exception groups, TaskGroups, enhanced typing syntax, native performance optimizations. |
-| **Build & Packaging** | Hatchling | PEP 621 / PEP 517 | Standardized modern metadata in `pyproject.toml`, deterministic wheel builds. |
-| **CLI & User Interface** | Typer + Rich | `typer>=0.12.0`, `rich>=13.7.0` | Declarative command routing with type annotations, formatted terminal diagnostics, live ANSI-stripped output streaming. |
-| **Configuration & Schemas** | Pydantic v2 | `pydantic>=2.6.0` | High-performance Rust-backed schema validation, cross-platform path resolution, strict typing. |
-| **State & Concurrency Control** | aiosqlite (SQLite WAL) | `aiosqlite>=0.20.0` | Asynchronous file-based persistence, Write-Ahead Logging (WAL) concurrency, deterministic TTL distributed locking. |
-| **Process Management** | psutil | `psutil>=5.9.0` | Cross-platform process tree inspection, child cleanup, and graceful daemon shutdown. |
-| **Environment & Secrets** | python-dotenv + PyYAML | `pyyaml>=6.0.1`, `dotenv>=1.0.0` | Local environment injection without leaking credentials into source control. |
-| **Testing & Quality** | pytest + pytest-asyncio | `pytest>=8.0.0`, `pytest-asyncio>=0.23.0` | Asynchronous unit, mock, and integration test coverage. |
+| **Runtime & Language** | Python | `>=3.11` | Modern `asyncio` primitives, `TaskGroup`, exception groups, enhanced type hinting (`typing.Self`, union `|`), and performance enhancements. |
+| **Build & Packaging** | Hatchling | PEP 517 / PEP 621 | Modern declarative metadata in `pyproject.toml`, reproducible wheel distribution, zero setup legacy scripts. |
+| **CLI & Terminal UX** | Typer + Rich | `typer>=0.12.0`, `rich>=13.7.0` | Declarative command routing with type annotations, formatted terminal diagnostics, live progress rendering, and ANSI-stripped output streaming. |
+| **Configuration & Validation** | Pydantic v2 | `pydantic>=2.6.0` | Rust-backed schema validation, cross-platform path resolution (`~`, `$HOME`, `%USERPROFILE%`), strict typing. |
+| **Persistence & State Engine** | aiosqlite (SQLite WAL) | `aiosqlite>=0.20.0` | Asynchronous file-based persistence, Write-Ahead Logging (WAL) concurrency, deterministic TTL distributed locking, and Artifact Blackboard store. |
+| **Process & Subprocess Lifecycle** | psutil | `psutil>=5.9.0` | Cross-platform recursive process tree inspection, child process termination, and graceful shutdown without zombie processes. |
+| **Dynamic Runtime Reloading** | importlib + mtime scanner | Standard Library | Hot reloading of configuration and in-memory Python modules without stopping the running daemon. |
+| **Environment & Secrets** | python-dotenv + PyYAML | `pyyaml>=6.0.1`, `dotenv>=1.0.0` | Secure environment injection and human-readable hierarchical configuration. |
+| **Testing & Quality Assurance** | pytest + pytest-asyncio | `pytest>=8.0.0`, `pytest-asyncio>=0.23.0` | Asynchronous unit, mock, and integration test coverage with zero-token assertions. |
 
 ---
 
 ## 🧱 Layer Boundaries & Clean Architecture (Domain, Data, Presentation/UI separation of concerns)
 
-The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports and Adapters)**. The fundamental architectural rule is the **Dependency Rule**: dependencies point strictly inward toward the Domain and Application cores. External infrastructure, databases, and UI CLI commands must never dictate or leak into domain models.
+The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports and Adapters)**. The fundamental architectural invariant is the **Dependency Rule**: dependencies point strictly inward toward Domain and Application cores. External infrastructure, databases, and UI CLI commands must never dictate or leak into domain models.
 
 ```mermaid
 graph TD
     subgraph Layer 4: Presentation & UI Adapters
         CLI_Commands["Typer CLI Commands (`orchestrator/cli.py`)"]
-        Rich_Formatters["Rich Terminal Formatters & Panels"]
+        Rich_Formatters["Rich Terminal Formatters, Tables & Panels"]
     end
 
     subgraph Layer 3: Application Nodes & Use Cases
@@ -80,9 +88,10 @@ graph TD
 
     subgraph Layer 2: Infrastructure & External Adapters
         HarnessAdapter["Harness Adapter (`orchestrator/harness.py`)"]
-        SQLiteManager["State Manager (`orchestrator/db.py`)"]
-        GitHubPoller["GitHub Poller (`orchestrator/poller.py`)"]
+        SQLiteManager["State & Blackboard Manager (`orchestrator/db.py`)"]
+        GitHubPoller["Zero-Token GitHub Poller (`orchestrator/poller.py`)"]
         Housekeeping["Label Provisioner (`orchestrator/housekeeping.py`)"]
+        ReloaderWatcher["Source Watcher (`orchestrator/reloader.py`)"]
     end
 
     subgraph Layer 1: Domain Core & Configuration
@@ -99,26 +108,27 @@ graph TD
 ### Separation of Concerns
 
 1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`)**:
-   - Holds core entity definitions, workflow taxonomy (`managed_labels`), harness definitions, and immutability rules.
+   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`).
    - Strictly isolated from concrete execution logic and network I/O.
    - Provides pure path normalization and environment resolution functions (`resolve_path`).
 
-2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/poller.py`)**:
-   - Manages state persistence via SQLite WAL transactions (`StateManager`).
+2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
+   - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
    - Implements asynchronous process execution, process tree lifecycle, and ANSI-sanitized log streaming (`AsyncHarnessAdapter`).
-   - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_open_prs`).
+   - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_open_prs`, `sync_repository_labels`).
+   - Manages dynamic file modification inspection (`SourceWatcher`).
 
 3. **Application Pipeline Nodes Layer (`orchestrator/nodes/*`)**:
    - Houses the discrete workflow engines representing each stage of the engineering lifecycle:
      - `node-supervisor`: Watchdog auditing, 12-hour SLA tracking, and conflict self-healing.
      - `node-architect`: Story triage, INVEST decomposition, and living architecture synchronization.
      - `node-devtest`: Pre-flight workspace validation, test-driven implementation, and pull request generation.
-     - `node-reviewer`: Remote CI quality gate verification (100% green requirement) and auto-merge execution.
+     - `node-reviewer`: Remote CI quality gate verification (100% green requirement), merge conflict resolution, and auto-merge execution.
      - `node-bau`: Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
 
 4. **Presentation & CLI Layer (`orchestrator/cli.py`)**:
    - Pure UI adapter handling command-line arguments, options, terminal dashboards, and signal handling.
-   - Coordinates parallel workers across projects and handles graceful shutdown (`stop`, `watch`, `run`).
+   - Coordinates parallel workers across projects and handles graceful daemon shutdown and live reloading (`watch`, `run`, `pause`, `resume`, `stop`, `reload`, `init`, `doctor`, `pr`).
 
 ---
 
@@ -128,6 +138,7 @@ graph TD
 graph-engineering/
 ├── .github/                      # GitHub Actions CI workflows, issue templates
 ├── docs/                         # Node and pipeline documentation specifications
+│   ├── draft-requisites/         # Architectural epics and requisites specifications
 │   ├── node-supervisor.md        # Node 0 specification
 │   ├── node-architect.md         # Node 1 specification
 │   ├── node-devtest.md           # Node 2 specification
@@ -137,29 +148,32 @@ graph-engineering/
 │   ├── __init__.py               # Package metadata and __version__
 │   ├── cli.py                    # Typer CLI application entry point and daemon runner
 │   ├── config.py                 # Pydantic v2 schemas and path resolution utilities
-│   ├── db.py                     # Asynchronous SQLite state and distributed lock manager
+│   ├── db.py                     # Asynchronous SQLite state, distributed lock & blackboard manager
 │   ├── harness.py                # Pluggable AI CLI adapter (Claude, Antigravity, Devin)
 │   ├── housekeeping.py           # GitHub label provisioning and taxonomy synchronization
 │   ├── logging.py                # Unified file and console logging with ANSI sanitization
 │   ├── poller.py                 # Zero-token GitHub CLI/GraphQL query abstraction
+│   ├── reloader.py               # Hot-reloading watcher and module re-importer
 │   └── nodes/                    # Autonomous pipeline node handlers
 │       ├── __init__.py           # Subpackage exports
 │       ├── architect.py          # Living architecture & story decomposition node
 │       ├── bau.py                # Business-as-usual tech debt consolidation node
 │       ├── devtest.py            # 3-Amigos development and testing node
-│       ├── reviewer.py           # Remote CI quality gatekeeper and auto-merge node
+│       ├── reviewer.py           # Reviewer quality gatekeeper and auto-merge node
 │       └── supervisor.py         # Watchdog consistency supervisor node
 ├── templates/                    # Reference templates and starter configurations
 │   └── config.example.yaml       # Master orchestrator configuration template (v2)
 ├── tests/                        # Comprehensive automated test suite
-│   ├── test_architect_governance.py
-│   ├── test_cli.py
-│   ├── test_config.py
-│   ├── test_db.py
-│   ├── test_harness.py
-│   ├── test_logging.py
-│   ├── test_nodes.py
-│   └── test_stop.py
+│   ├── test_architect_governance.py # Architect SLA and zero-token tests
+│   ├── test_cli.py               # CLI commands and UI diagnostics tests
+│   ├── test_config.py            # Configuration loading and path expansion tests
+│   ├── test_db.py                # State manager, TTL, and Blackboard tests
+│   ├── test_harness.py           # Subprocess harness execution and timeout tests
+│   ├── test_logging.py           # Log rotation and ANSI strip tests
+│   ├── test_nodes.py             # Node workflow execution and boundary tests
+│   ├── test_project_pause.py     # Per-project pause/resume lifecycle tests
+│   ├── test_reloader.py          # Hot reloading and source watcher tests
+│   └── test_stop.py              # Graceful daemon shutdown tests
 ├── pyproject.toml                # PEP 517/PEP 621 build specification (Hatchling)
 ├── CHANGELOG.md                  # Keep a Changelog historical log
 └── README.md                     # System overview and quickstart guide
@@ -174,7 +188,33 @@ graph-engineering/
 
 ## 🎨 Design Patterns, State Management & Dependency Injection
 
-### 1. Pluggable Adapter Pattern (`AsyncHarnessAdapter`)
+### 1. Decoupled Artifact Blackboard Pattern (`pr_artifacts`)
+To prevent brittle multi-agent state machines and communication loss between asynchronous nodes, the system implements an **Artifact Blackboard** pattern stored in SQLite WAL:
+- **Routing vs. State**: GitHub Labels act as the event-driven *Router* (`poller.py`), while SQLite acts as the *Blackboard* (`pr_artifacts`).
+- **Context Sharing**: When `ReviewerNode` evaluates a PR that has passing code reviews but git merge conflicts, it writes an `APPROVED_WITH_CONFLICT` decision artifact to the blackboard. `DevTestNode` reads the blackboard and performs pure conflict resolution without repeating code reviews.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Poller as Poller / GitHub
+    participant Reviewer as Reviewer Node (Node 3)
+    participant Blackboard as DB Blackboard (pr_artifacts)
+    participant DevTest as DevTest Node (Node 2)
+
+    Poller->>Reviewer: PR labeled 'needs-architect-review'
+    Reviewer->>Reviewer: Code review PASS, but Merge Conflicts detected
+    Reviewer->>Blackboard: upsert_pr_artifact(PR, status='APPROVED_WITH_CONFLICT')
+    Reviewer->>Poller: Set label 'ready-for-dev' (or 'status:merge-conflict')
+    Poller->>DevTest: Pick up PR for conflict resolution
+    DevTest->>Blackboard: get_pr_artifact(PR) -> 'APPROVED_WITH_CONFLICT'
+    DevTest->>DevTest: Fast-path: git merge main & push (Skip rewrite)
+    DevTest->>Poller: Set label 'architect-approved'
+    Poller->>Reviewer: Quality Gate 100% Green
+    Reviewer->>Poller: gh pr merge --squash
+    Reviewer->>Blackboard: delete_pr_artifact(PR)
+```
+
+### 2. Pluggable AI Harness Adapter Pattern (`AsyncHarnessAdapter`)
 All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to a unified interface. The system constructs commands dynamically based on configured flags (`--model`, `--effort`, timeout limits), ensuring that swapping models requires zero code modifications.
 
 ```python
@@ -185,42 +225,32 @@ exit_code = await adapter.execute(
     log_file=log_file,
     model=node_cfg.model,
     effort=node_cfg.effort,
+    console_prefix=f"[{project.name}:{node_name}]",
 )
 ```
 
-### 2. Distributed State Machine & TTL Locking (`StateManager`)
+### 3. Distributed State Machine & TTL Locking (`StateManager`)
 - **Write-Ahead Logging (WAL)**: SQLite runs in WAL mode (`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`) ensuring concurrent non-blocking reads and serialized atomic writes across async workers.
 - **TTL Lock Protection**: Every task execution is bounded by a Time-To-Live (TTL). If a daemon crashes or an agent hangs, subsequent worker cycles automatically detect expired locks, transition their state to `FAILED`, and recover execution safely.
 - **Inter-Process Communication (IPC) via DB**: Graceful daemon shutdown (`orchestrator stop`) sets a `stop_requested` flag in SQLite, allowing active workers to finish their current atomic unit without starting new nodes.
 
+### 4. Dynamic Hot Reloading Runtime (`SourceWatcher` & `hot_reload_runtime`)
+The daemon monitors both `config.yaml` and internal Python source files (`orchestrator/**/*.py`) for file modification events. When changes are detected, `hot_reload_runtime()` topologically reloads modules in `sys.modules` without terminating running worker loops.
+
 ```mermaid
-stateDiagram-v2
-    [*] --> IDLE: Initialize / Start Cycle
-    IDLE --> ZERO_TOKEN_GATE: Poll Local State (gh / git)
-    ZERO_TOKEN_GATE --> IDLE: No actionable tasks (0 tokens)
-    ZERO_TOKEN_GATE --> ACQUIRE_LOCK: Actionable task detected
-    ACQUIRE_LOCK --> IN_PROGRESS: Lock acquired (TTL bounded)
-    ACQUIRE_LOCK --> IDLE: Lock held by active worker
-    IN_PROGRESS --> EXECUTE_HARNESS: Run AI CLI Harness
-    EXECUTE_HARNESS --> RELEASE_LOCK: Harness exit 0 (Success)
-    EXECUTE_HARNESS --> FAIL_JOB: Harness exit != 0 (Failure)
-    RELEASE_LOCK --> TRANSITION_LABEL: Transition GitHub Labels
-    FAIL_JOB --> ESCALATE_PO: Flag needs-po-review / unlock
-    TRANSITION_LABEL --> IDLE: Cycle complete
-    ESCALATE_PO --> IDLE: Cycle complete
+flowchart LR
+    FileModified["File Modification Detected (mtime check)"] --> Reloader["hot_reload_runtime()"]
+    Reloader --> TopoReload["Topological importlib.reload() across sys.modules"]
+    TopoReload --> FreshConfig["fresh_load_config()"]
+    FreshConfig --> ActiveWorkers["Active Daemon Workers continue with Updated Code"]
 ```
 
-### 3. Reactive Chaining with Debounce
-- In daemon mode (`orchestrator watch`), worker loops execute sequentially within a project.
-- **Active Transition**: When a node completes work (e.g., Architect breaks down a story to `ready-for-dev`), `run_project_cycle` returns `True`, triggering an immediate follow-up pass (1-second debounce).
-- **Idle Backoff**: When all nodes report idle, the worker sleeps for the full configured `poll_interval_seconds` (default: 300s).
-
-### 4. Dependency Injection via Composition Root
+### 5. Dependency Injection via Composition Root
 Configuration is loaded once via `load_config()` and passed explicitly down the call hierarchy (`config`, `project`, `state_manager`). Modules do not rely on global mutable state or singletons.
 
 ---
 
-## 🚫 Architectural Constraints & Anti-Patterns (e.g. No circular dependencies, No UI logic in Domain)
+## 🚫 Architectural Constraints & Anti-Patterns
 
 ### Strict Constraints
 1. **Zero LLM Token Waste on Idle**:
@@ -245,6 +275,7 @@ Configuration is loaded once via `load_config()` and passed explicitly down the 
 | **Unbounded Process Execution** | Running CLI subprocesses without timeout guards. | Strict timeout wrapping with `asyncio.wait_for` and `psutil` process tree termination. |
 | **Blind Git Operations** | Modifying working trees without verifying remote origin identity. | Remote origin URL verification in `verify_git_safety`. |
 | **Tight Polling on Background Tasks** | Polling subprocess status in a tight loop. | Async line-by-line stream reading (`await process.stdout.readline()`). |
+| **Tightly Coupled State Machines** | Hardcoding sequential transitions between nodes. | Decoupled Router (GitHub Labels) + Blackboard (SQLite). |
 
 ---
 
