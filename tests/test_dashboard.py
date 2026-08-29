@@ -11,6 +11,7 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
 from orchestrator.ui.dashboard import DashboardApp
+from orchestrator.ui.widgets import AnomalyAlertsWidget, SDLCProgressWidget
 
 
 def test_textual_log_handler_bounded_buffer():
@@ -433,4 +434,224 @@ projects:
     info = await state_manager.get_daemon_info()
     assert info.get("status") == "STOPPED"
     assert "pid" not in info
+
+
+@pytest.mark.asyncio
+async def test_sdlc_progress_widget_renders_items(tmp_path: Path):
+    """
+    Scenario: SDLCProgressWidget renders items for a project
+    Given get_sdlc_items(project_name) returns a list of items
+    When SDLCProgressWidget is given that project_name
+    Then it renders a table with columns [ID | Title | Status/Label | Linked PR]
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    items = [
+        {
+            "issue_number": 42,
+            "title": "feat(core): implement feature",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+            "linked_pr": 105,
+        },
+        {
+            "issue_number": 43,
+            "title": "fix(core): fix bug",
+            "state": "OPEN",
+            "labels": "needs-architect-review",
+            "linked_pr": None,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("project_alpha", items)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="project_alpha")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+        assert widget.TABLE_COLUMNS == ["ID", "Title", "Status/Label", "Linked PR"]
+        column_labels = [str(col.label) for col in widget.columns.values()]
+        assert column_labels == ["ID", "Title", "Status/Label", "Linked PR"]
+
+        assert widget.row_count == 2
+        row0 = widget.get_row_at(0)
+        assert row0[0] == "#42"
+        assert row0[1] == "feat(core): implement feature"
+        assert row0[2] == "ready-for-dev"
+        assert row0[3] == "#105"
+
+        row1 = widget.get_row_at(1)
+        assert row1[0] == "#43"
+        assert row1[1] == "fix(core): fix bug"
+        assert row1[2] == "needs-architect-review"
+        assert row1[3] == "-"
+
+
+@pytest.mark.asyncio
+async def test_sdlc_progress_widget_empty_state(tmp_path: Path):
+    """
+    Scenario: SDLCProgressWidget empty state
+    Given get_sdlc_items(project_name) returns an empty list
+    When SDLCProgressWidget renders
+    Then it displays a clean empty-state row without raising an exception
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="empty_project")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+        assert widget.row_count == 1
+        row = widget.get_row_at(0)
+        assert "No active SDLC items" in str(row[1])
+
+
+@pytest.mark.asyncio
+async def test_sdlc_progress_widget_dynamic_project_update(tmp_path: Path):
+    """Asserts SDLCProgressWidget dynamically updates rows when switching projects."""
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    await state_manager.sync_project_sdlc_items(
+        "p1", [{"issue_number": 1, "title": "P1 Issue", "labels": "ready-for-dev"}]
+    )
+    await state_manager.sync_project_sdlc_items(
+        "p2", [{"issue_number": 2, "title": "P2 Issue", "labels": "architect-approved", "linked_pr": 50}]
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="p1")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+        assert widget.row_count == 1
+        assert widget.get_row_at(0)[0] == "#1"
+
+        # Dynamically switch to p2
+        await widget.update_project("p2")
+        assert widget.row_count == 1
+        assert widget.get_row_at(0)[0] == "#2"
+        assert widget.get_row_at(0)[3] == "#50"
+
+        # Switch to non-existent project
+        await widget.update_project("p3")
+        assert widget.row_count == 1
+        assert "No active SDLC items" in str(widget.get_row_at(0)[1])
+
+
+@pytest.mark.asyncio
+async def test_anomaly_alerts_widget_renders_anomalies(tmp_path: Path):
+    """
+    Scenario: AnomalyAlertsWidget renders 24h anomalies for a project
+    Given get_recent_anomalies(project_name, hours=24.0) returns anomaly rows
+    When AnomalyAlertsWidget is given that project_name
+    Then it renders each anomaly with node_name, error_type, error_message, and a relative/absolute timestamp
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    await state_manager.record_anomaly_event(
+        project_name="project_beta",
+        node_name="devtest",
+        error_type="HarnessTimeout",
+        error_message="Execution exceeded 900s limit",
+        issue_number=33,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield AnomalyAlertsWidget(state_manager=state_manager, project_name="project_beta")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(AnomalyAlertsWidget)
+        assert widget.TABLE_COLUMNS == ["Timestamp", "Node", "Error Type", "Error Message"]
+        column_labels = [str(col.label) for col in widget.columns.values()]
+        assert column_labels == ["Timestamp", "Node", "Error Type", "Error Message"]
+
+        assert widget.row_count == 1
+        row = widget.get_row_at(0)
+        assert row[1] == "devtest"
+        assert row[2] == "HarnessTimeout"
+        assert row[3] == "Execution exceeded 900s limit"
+        assert len(str(row[0])) > 0
+
+
+@pytest.mark.asyncio
+async def test_anomaly_alerts_widget_empty_state(tmp_path: Path):
+    """
+    Scenario: AnomalyAlertsWidget empty state
+    Given get_recent_anomalies(project_name, hours=24.0) returns an empty list
+    When AnomalyAlertsWidget renders
+    Then it displays a clean empty-state row without raising an exception
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield AnomalyAlertsWidget(state_manager=state_manager, project_name="clean_project")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(AnomalyAlertsWidget)
+        assert widget.row_count == 1
+        row = widget.get_row_at(0)
+        assert "No anomalies in last 24h" in str(row[2])
+
+
+@pytest.mark.asyncio
+async def test_widgets_non_blocking_async_reads(tmp_path: Path):
+    """
+    Scenario: Non-blocking reads
+    Given either widget queries StateManager
+    When the query executes
+    Then it must be awaited asynchronously and never block the Textual UI event loop
+    """
+    import inspect
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    sdlc_widget = SDLCProgressWidget(state_manager=state_manager, project_name="alpha")
+    alerts_widget = AnomalyAlertsWidget(state_manager=state_manager, project_name="alpha")
+
+    # Assert update_project methods are coroutines
+    assert inspect.iscoroutinefunction(sdlc_widget.update_project)
+    assert inspect.iscoroutinefunction(alerts_widget.update_project)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield sdlc_widget
+            yield alerts_widget
+
+    app = TestApp()
+    async with app.run_test() as _:
+        await sdlc_widget.update_project("alpha")
+        await alerts_widget.update_project("alpha")
+
+        assert sdlc_widget.row_count == 1
+        assert alerts_widget.row_count == 1
+
+
 

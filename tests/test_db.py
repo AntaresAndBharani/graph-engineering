@@ -249,3 +249,191 @@ async def test_cleanup_orphaned_running_jobs(tmp_path: Path):
     assert acquired is True
 
 
+@pytest.mark.asyncio
+async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
+    """
+    Scenario: Schema creation
+    Given the StateManager initializes the database
+    When migrations run
+    Then tables sdlc_items and anomaly_events, and idx_anomalies_project_time must exist.
+    """
+    import aiosqlite
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    async with aiosqlite.connect(manager.db_path) as db:
+        # Check sdlc_items table
+        cursor = await db.execute("PRAGMA table_info(sdlc_items);")
+        columns = await cursor.fetchall()
+        col_map = {col[1]: {"type": col[2].upper(), "pk": col[5]} for col in columns}
+
+        expected_sdlc_cols = {
+            "project_name": "TEXT",
+            "issue_number": "INTEGER",
+            "title": "TEXT",
+            "state": "TEXT",
+            "labels": "TEXT",
+            "linked_pr": "INTEGER",
+            "updated_at": "REAL",
+        }
+        for name, expected_type in expected_sdlc_cols.items():
+            assert name in col_map, f"Missing column {name} in sdlc_items"
+            assert col_map[name]["type"] == expected_type
+
+        assert col_map["project_name"]["pk"] > 0
+        assert col_map["issue_number"]["pk"] > 0
+
+        # Check anomaly_events table
+        cursor = await db.execute("PRAGMA table_info(anomaly_events);")
+        columns = await cursor.fetchall()
+        col_map_anom = {col[1]: {"type": col[2].upper(), "pk": col[5]} for col in columns}
+
+        expected_anom_cols = {
+            "id": "INTEGER",
+            "project_name": "TEXT",
+            "issue_number": "INTEGER",
+            "node_name": "TEXT",
+            "error_type": "TEXT",
+            "error_message": "TEXT",
+            "created_at": "REAL",
+        }
+        for name, expected_type in expected_anom_cols.items():
+            assert name in col_map_anom, f"Missing column {name} in anomaly_events"
+            assert col_map_anom[name]["type"] == expected_type
+
+
+@pytest.mark.asyncio
+async def test_sdlc_items_sync_and_query_lifecycle(tmp_path: Path):
+    """
+    Scenario: Sync and query SDLC items
+    Given a project has active issues/PRs
+    When sync_project_sdlc_items is called
+    Then rows are upserted and returned by get_sdlc_items.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Empty state query
+    assert await manager.get_sdlc_items("alpha") == []
+
+    # Sync items for alpha
+    items = [
+        {
+            "issue_number": 101,
+            "title": "Story: Implement Auth",
+            "state": "OPEN",
+            "labels": ["ready-for-dev", "priority:high"],
+            "linked_pr": 201,
+        },
+        {
+            "issue_number": 102,
+            "title": "Bug: Fix Memory Leak",
+            "state": "OPEN",
+            "labels": "needs-architect-review",
+            "linked_pr": None,
+        },
+    ]
+    await manager.sync_project_sdlc_items("alpha", items)
+
+    # Query items for alpha
+    retrieved = await manager.get_sdlc_items("alpha")
+    assert len(retrieved) == 2
+    assert retrieved[0]["issue_number"] == 101
+    assert retrieved[0]["title"] == "Story: Implement Auth"
+    assert "ready-for-dev" in retrieved[0]["labels"]
+    assert retrieved[0]["linked_pr"] == 201
+    assert retrieved[1]["issue_number"] == 102
+    assert retrieved[1]["linked_pr"] is None
+
+    # Upsert idempotency (updating issue 101)
+    updated_items = [
+        {
+            "issue_number": 101,
+            "title": "Story: Implement Auth (Updated)",
+            "state": "CLOSED",
+            "labels": "done",
+            "linked_pr": 201,
+        }
+    ]
+    await manager.sync_project_sdlc_items("alpha", updated_items)
+    retrieved_after = await manager.get_sdlc_items("alpha")
+    assert len(retrieved_after) == 2
+    assert retrieved_after[0]["title"] == "Story: Implement Auth (Updated)"
+    assert retrieved_after[0]["state"] == "CLOSED"
+
+    # Multi-project isolation
+    await manager.sync_project_sdlc_items("beta", [{"issue_number": 999, "title": "Beta Task"}])
+    assert len(await manager.get_sdlc_items("beta")) == 1
+    assert len(await manager.get_sdlc_items("alpha")) == 2
+
+
+@pytest.mark.asyncio
+async def test_anomaly_events_record_and_24h_window_query(tmp_path: Path):
+    """
+    Scenario: Record anomaly event and query with 24h window
+    Given anomaly_events contains rows older and newer than 24h
+    When get_recent_anomalies is called
+    Then only rows within the window are returned.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Initially empty
+    assert await manager.get_recent_anomalies("alpha") == []
+    assert await manager.get_recent_anomalies() == []
+
+    # Record recent anomaly for alpha
+    await manager.record_anomaly_event(
+        project_name="alpha",
+        node_name="devtest",
+        error_type="HarnessTimeout",
+        error_message="Subprocess timed out after 900s",
+        issue_number=101,
+    )
+
+    # Record recent anomaly for beta
+    await manager.record_anomaly_event(
+        project_name="beta",
+        node_name="reviewer",
+        error_type="MergeConflict",
+        error_message="Git conflict on branch feat/x",
+    )
+
+    # Query without filter -> returns both
+    all_recent = await manager.get_recent_anomalies()
+    assert len(all_recent) == 2
+
+    # Query filtered by project
+    alpha_recent = await manager.get_recent_anomalies("alpha")
+    assert len(alpha_recent) == 1
+    assert alpha_recent[0]["node_name"] == "devtest"
+    assert alpha_recent[0]["error_type"] == "HarnessTimeout"
+    assert alpha_recent[0]["issue_number"] == 101
+
+    # Insert an old anomaly (> 25 hours ago)
+    old_time = time.time() - (25 * 3600)
+    import aiosqlite
+    async with aiosqlite.connect(manager.db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO anomaly_events (project_name, issue_number, node_name, error_type, error_message, created_at)
+            VALUES ('alpha', 100, 'architect', 'SLAExceeded', 'Issue triage exceeded SLA', ?)
+            """,
+            (old_time,),
+        )
+        await db.commit()
+
+    # Query with default 24h window -> old anomaly should be pruned
+    filtered_24h = await manager.get_recent_anomalies("alpha", hours=24.0)
+    assert len(filtered_24h) == 1
+    assert filtered_24h[0]["node_name"] == "devtest"
+
+    # Query with 48h window -> old anomaly is included
+    filtered_48h = await manager.get_recent_anomalies("alpha", hours=48.0)
+    assert len(filtered_48h) == 2
+
+
+

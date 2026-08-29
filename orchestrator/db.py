@@ -93,6 +93,36 @@ class StateManager:
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sdlc_items (
+                    project_name TEXT NOT NULL,
+                    issue_number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    labels TEXT,
+                    linked_pr INTEGER,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (project_name, issue_number)
+                );
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS anomaly_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_name TEXT NOT NULL,
+                    issue_number INTEGER,
+                    node_name TEXT NOT NULL,
+                    error_type TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_anomalies_project_time ON anomaly_events(project_name, created_at);"
+            )
             await db.commit()
 
     async def register_daemon(self, pid: int) -> None:
@@ -702,3 +732,129 @@ class StateManager:
                 )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # =========================================================================
+    # SDLC Items & Anomaly Memory Layer (Zero-HTTP UI Architecture)
+    # =========================================================================
+
+    async def sync_project_sdlc_items(
+        self,
+        project_name: str,
+        items: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Upserts active SDLC items (issues/subtasks/PRs) for a project.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            for item in items:
+                issue_number = int(item.get("issue_number") or item.get("id") or item.get("number", 0))
+                title = str(item.get("title", ""))
+                state = str(item.get("state") or item.get("status") or "OPEN")
+                raw_labels = item.get("labels")
+                if isinstance(raw_labels, (list, tuple, set)):
+                    labels_str = ", ".join(str(l) for l in raw_labels)
+                else:
+                    labels_str = str(raw_labels) if raw_labels is not None else ""
+                linked_pr = item.get("linked_pr")
+                linked_pr_val = int(linked_pr) if linked_pr is not None else None
+                updated_at = float(item.get("updated_at", now))
+
+                await db.execute(
+                    """
+                    INSERT INTO sdlc_items (project_name, issue_number, title, state, labels, linked_pr, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project_name, issue_number) DO UPDATE SET
+                        title = excluded.title,
+                        state = excluded.state,
+                        labels = excluded.labels,
+                        linked_pr = excluded.linked_pr,
+                        updated_at = excluded.updated_at
+                    """,
+                    (project_name, issue_number, title, state, labels_str, linked_pr_val, updated_at),
+                )
+            await db.commit()
+
+    async def get_sdlc_items(self, project_name: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves all active SDLC items for a specific project from SQLite.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT project_name, issue_number, title, state, labels, linked_pr, updated_at
+                FROM sdlc_items
+                WHERE project_name = ?
+                ORDER BY issue_number ASC
+                """,
+                (project_name,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def record_anomaly_event(
+        self,
+        project_name: str,
+        node_name: str,
+        error_type: str,
+        error_message: str,
+        issue_number: Optional[int] = None,
+    ) -> None:
+        """
+        Records an execution anomaly / retry event with timestamp into anomaly_events.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO anomaly_events (project_name, issue_number, node_name, error_type, error_message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (project_name, issue_number, node_name, error_type, error_message, now),
+            )
+            await db.commit()
+
+    async def get_recent_anomalies(
+        self,
+        project_name: Optional[str] = None,
+        hours: float = 24.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves anomaly events within the given hours window (default 24.0h),
+        optionally filtered by project_name.
+        """
+        cutoff = time.time() - (hours * 3600.0)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            if project_name:
+                cursor = await db.execute(
+                    """
+                    SELECT id, project_name, issue_number, node_name, error_type, error_message, created_at
+                    FROM anomaly_events
+                    WHERE project_name = ? AND created_at >= ?
+                    ORDER BY created_at DESC
+                    """,
+                    (project_name, cutoff),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT id, project_name, issue_number, node_name, error_type, error_message, created_at
+                    FROM anomaly_events
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC
+                    """,
+                    (cutoff,),
+                )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
