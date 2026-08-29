@@ -36,17 +36,19 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
 2. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
    - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite.
-   - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`) and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
+   - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`), recent 24h anomaly/retry events (`AnomalyAlertsWidget`), and global multi-window harness quota limits and breakdowns (`HarnessQuotaWidget`).
 3. **Reactive Project Selection**:
    - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.
-4. **Filtered & Bounded Log Stream (`RichLog`)**:
+4. **Harness Quota Observability (`HarnessQuotaWidget`)**:
+   - Surfaces real-time multi-window capacity progress bars, rolling 1h/5h windows, OK/THROTTLED status badges with replenishment countdown ETAs, and informative by-project and by-node percentage breakdowns with zero UI latency.
+5. **Filtered & Bounded Log Stream (`RichLog`)**:
    - Captures core root `orchestrator` daemon events via `TextualLogHandler`.
    - Backed by a bounded `collections.deque(maxlen=1000)` buffer to prevent memory growth or UI freezes.
    - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
-5. **Native Async Concurrency**:
+6. **Native Async Concurrency**:
    - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
    - Per-project worker loops execute concurrently in the same loop via `asyncio.gather()` / `asyncio.TaskGroup` with zero cross-thread SQLite collisions.
-6. **Graceful Teardown & Resource Cleanup**:
+7. **Graceful Teardown & Resource Cleanup**:
    - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
    - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.
 

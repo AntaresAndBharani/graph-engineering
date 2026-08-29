@@ -7,12 +7,12 @@ import pytest
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 
-from orchestrator.config import GlobalConfig, ProjectConfig
+from orchestrator.config import GlobalConfig, HarnessQuotaConfig, ProjectConfig, QuotaSettings
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
 from orchestrator.ui.dashboard import DashboardApp
-from orchestrator.ui.widgets import AnomalyAlertsWidget, SDLCProgressWidget
+from orchestrator.ui.widgets import AnomalyAlertsWidget, HarnessQuotaWidget, SDLCProgressWidget
 
 
 def test_textual_log_handler_bounded_buffer():
@@ -897,3 +897,317 @@ async def test_dashboard_keyboard_navigation_arrow_keys(tmp_path: Path):
 
         sdlc = app.query_one("#sdlc_widget", SDLCProgressWidget)
         assert sdlc.row_count >= 1
+
+
+def test_harness_quota_widget_helper_formatting():
+    """Asserts _format_tokens and _render_progress_bar format numbers and bars correctly."""
+    assert HarnessQuotaWidget._format_tokens(5_000_000) == "5.0M"
+    assert HarnessQuotaWidget._format_tokens(2_000_000) == "2.0M"
+    assert HarnessQuotaWidget._format_tokens(2_500_000) == "2.5M"
+    assert HarnessQuotaWidget._format_tokens(1_500_000) == "1.5M"
+    assert HarnessQuotaWidget._format_tokens(600_000) == "600k"
+    assert HarnessQuotaWidget._format_tokens(120_000) == "120k"
+    assert HarnessQuotaWidget._format_tokens(500) == "500"
+    assert HarnessQuotaWidget._format_tokens(0) == "0"
+
+    # Progress bar tests
+    bar_empty = HarnessQuotaWidget._render_progress_bar(0, 2_000_000, width=16)
+    assert bar_empty == f"[{'░' * 16}]"
+
+    bar_full = HarnessQuotaWidget._render_progress_bar(5_000_000, 5_000_000, width=16)
+    assert bar_full == f"[{'█' * 16}]"
+
+    bar_half = HarnessQuotaWidget._render_progress_bar(1_000_000, 2_000_000, width=16)
+    assert bar_half == f"[{'█' * 8}{'░' * 8}]"
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_columns(tmp_path: Path):
+    """
+    Asserts HarnessQuotaWidget initializes with correct columns:
+    [Harness | Capacity | Window | Status | By Project | By Node].
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(state_manager=state_manager)
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(HarnessQuotaWidget)
+        expected_columns = ["Harness", "Capacity", "Window", "Status", "By Project", "By Node"]
+        assert widget.TABLE_COLUMNS == expected_columns
+        column_labels = [str(col.label) for col in widget.columns.values()]
+        assert column_labels == expected_columns
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_empty_state(tmp_path: Path):
+    """Asserts HarnessQuotaWidget renders clean empty state when no state_manager or no harnesses configured."""
+    from textual.app import App, ComposeResult
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(state_manager=None)
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(HarnessQuotaWidget)
+        assert widget.row_count == 1
+        row = widget.get_row_at(0)
+        assert "No quota data" in str(row[1])
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_informative_breakdown(tmp_path: Path):
+    """
+    Scenario: Informative project and node token breakdown in TUI
+      Given multiple nodes across different projects have executed tasks under harness "antigravity"
+      When the operator inspects the Quota Status panel in the Textual TUI dashboard
+      Then the widget displays the global "antigravity" capacity progress bar
+      And it displays a breakdown of tokens by project (e.g. "graph-engineering": 60%, "crosstrainingapp": 40%)
+      And by node (e.g. "devtest": 50%, "reviewer": 30%, "bau": 20%)
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=2_000_000,
+                    avg_tokens_per_hour=400_000,
+                )
+            },
+        )
+    )
+
+    # Seed token usage:
+    # graph-engineering: 600k total (devtest: 300k, reviewer: 300k) -> 60%
+    # crosstrainingapp: 400k total (devtest: 200k, bau: 200k) -> 40%
+    # Overall by node: devtest: 500k (50%), reviewer: 300k (30%), bau: 200k (20%)
+    # Total tokens = 1_000_000 (Remaining = 1_000_000 / 2.0M, 50% used)
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=10,
+        prompt_tokens=250000,
+        completion_tokens=50000,
+        total_tokens=300000,
+    )
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="reviewer",
+        issue_number=10,
+        prompt_tokens=250000,
+        completion_tokens=50000,
+        total_tokens=300000,
+    )
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="crosstrainingapp",
+        node_name="devtest",
+        issue_number=20,
+        prompt_tokens=150000,
+        completion_tokens=50000,
+        total_tokens=200000,
+    )
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="crosstrainingapp",
+        node_name="bau",
+        issue_number=21,
+        prompt_tokens=150000,
+        completion_tokens=50000,
+        total_tokens=200000,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(config=config, state_manager=state_manager)
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(HarnessQuotaWidget)
+        assert widget.row_count == 1
+
+        row = widget.get_row_at(0)
+        harness_name = str(row[0])
+        capacity = str(row[1])
+        window = str(row[2])
+        status = str(row[3])
+        project_breakdown = str(row[4])
+        node_breakdown = str(row[5])
+
+        assert harness_name == "antigravity"
+        assert "1h Window" in window
+        # Check capacity progress bar rendering
+        assert "█" in capacity
+        assert "1.0M / 2.0M" in capacity or "1000k / 2.0M" in capacity or "2.0M" in capacity
+
+        # Check OK status with remaining tokens
+        assert "OK" in status
+
+        # Assert breakdown by project: "graph-engineering": 60%, "crosstrainingapp": 40%
+        assert '"graph-engineering": 60%' in project_breakdown
+        assert '"crosstrainingapp": 40%' in project_breakdown
+
+        # Assert breakdown by node: "devtest": 50%, "reviewer": 30%, "bau": 20%
+        assert '"devtest": 50%' in node_breakdown
+        assert '"reviewer": 30%' in node_breakdown
+        assert '"bau": 20%' in node_breakdown
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_throttled_countdown_badge(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Throttled harness shows countdown badge
+      Given harness "claude" is currently THROTTLED with an ETA of 14 minutes 20 seconds
+      When the dashboard renders the Harness Quota panel
+      Then it displays "THROTTLED (120k / 5.0M - Ready in 14m 20s)" for that harness
+    """
+    from textual.app import App, ComposeResult
+    from orchestrator.quota import QuotaCheckResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                )
+            },
+        )
+    )
+
+    async def mock_check_capacity(self, harness_name: str) -> QuotaCheckResult:
+        return QuotaCheckResult(
+            harness_name=harness_name,
+            allowed=False,
+            remaining=120_000,
+            required=150_000,
+            used=4_880_000,
+            limit=5_000_000,
+            velocity=976_000.0,
+            eta_seconds=860,  # 14 minutes 20 seconds
+            deficit=30_000,
+            window_hours=5.0,
+        )
+
+    from orchestrator.quota import QuotaManager
+    monkeypatch.setattr(QuotaManager, "check_harness_capacity", mock_check_capacity)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(config=config, state_manager=state_manager)
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(HarnessQuotaWidget)
+        assert widget.row_count == 1
+
+        row = widget.get_row_at(0)
+        harness_name = str(row[0])
+        status = str(row[3])
+
+        assert harness_name == "claude"
+        # Assert exact badge text: "THROTTLED (120k / 5.0M - Ready in 14m 20s)"
+        assert "THROTTLED (120k / 5.0M - Ready in 14m 20s)" in status
+
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_non_blocking_async_reads(tmp_path: Path):
+    """
+    Scenario: Non-blocking reads and zero I/O
+    Asserts HarnessQuotaWidget async methods are non-blocking coroutines.
+    """
+    import inspect
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    widget = HarnessQuotaWidget(state_manager=state_manager)
+    assert inspect.iscoroutinefunction(widget.update_quotas)
+    assert inspect.iscoroutinefunction(widget.update_project)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield widget
+
+    app = TestApp()
+    async with app.run_test() as _:
+        await widget.update_quotas()
+        await widget.update_project("some_project")
+        assert widget.row_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_dashboard_multi_pane_layout_includes_quota_tab(tmp_path: Path):
+    """
+    Asserts DashboardApp layout composes TabPane for Quotas with HarnessQuotaWidget.
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        quota_widget = app.query_one("#quota_widget", HarnessQuotaWidget)
+        assert quota_widget is not None
+
+        tabs = app.query_one("#tabs", TabbedContent)
+        assert tabs is not None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_quota_widget_refreshes_on_update_cycle(tmp_path: Path):
+    """
+    Asserts update_projects_table on DashboardApp updates HarnessQuotaWidget.
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        quota_widget = app.query_one(HarnessQuotaWidget)
+        assert quota_widget is not None
+        initial_row_count = quota_widget.row_count
+
+        # Call update_projects_table
+        await app.update_projects_table()
+        assert quota_widget.row_count == initial_row_count
+

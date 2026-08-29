@@ -15,14 +15,14 @@ from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
-from orchestrator.ui.widgets import AnomalyAlertsWidget, SDLCProgressWidget
+from orchestrator.ui.widgets import AnomalyAlertsWidget, HarnessQuotaWidget, SDLCProgressWidget
 
 
 class DashboardApp(App):
     """
     Read-only Async Textual TUI Observability Dashboard for graph-orchestrator watch.
     Displays a live alphabetically-sorted projects status table and multi-pane bottom split
-    with SDLCProgressWidget and TabbedContent hosting RichLog and AnomalyAlertsWidget.
+    with SDLCProgressWidget and TabbedContent hosting RichLog, AnomalyAlertsWidget, and HarnessQuotaWidget.
     """
 
     CSS = """
@@ -49,6 +49,9 @@ class DashboardApp(App):
         height: 100%;
     }
     #alerts_widget {
+        height: 100%;
+    }
+    #quota_widget {
         height: 100%;
     }
     """
@@ -95,6 +98,8 @@ class DashboardApp(App):
                     yield RichLog(id="log_view", highlight=True, markup=True, max_lines=1000)
                 with TabPane("Alerts (24h)", id="tab_alerts"):
                     yield AnomalyAlertsWidget(id="alerts_widget", state_manager=self.state_manager, hours=24.0)
+                with TabPane("Quotas", id="tab_quotas"):
+                    yield HarnessQuotaWidget(id="quota_widget", config=self.config, state_manager=self.state_manager)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -202,6 +207,12 @@ class DashboardApp(App):
 
         if self.selected_project:
             await self._update_bottom_panes(self.selected_project)
+        else:
+            try:
+                quota_widget = self.query_one(HarnessQuotaWidget)
+                await quota_widget.update_quotas()
+            except Exception:
+                pass
 
     @on(DataTable.RowHighlighted, "#projects_table")
     async def on_project_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -233,7 +244,7 @@ class DashboardApp(App):
 
     async def _update_bottom_panes(self, project_name: Optional[str]) -> None:
         """
-        Asynchronously updates SDLCProgressWidget and AnomalyAlertsWidget for the selected project.
+        Asynchronously updates SDLCProgressWidget, AnomalyAlertsWidget, and HarnessQuotaWidget for the selected project.
         """
         try:
             sdlc_widget = self.query_one(SDLCProgressWidget)
@@ -244,6 +255,12 @@ class DashboardApp(App):
         try:
             alerts_widget = self.query_one(AnomalyAlertsWidget)
             await alerts_widget.update_project(project_name, hours=24.0)
+        except Exception:
+            pass
+
+        try:
+            quota_widget = self.query_one(HarnessQuotaWidget)
+            await quota_widget.update_project(project_name)
         except Exception:
             pass
 
