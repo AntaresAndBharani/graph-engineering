@@ -30,10 +30,24 @@ async def test_project_pause_db_lifecycle(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_run_project_cycle_skips_paused_project(tmp_path: Path):
+async def test_run_project_cycle_skips_paused_project(tmp_path: Path, monkeypatch):
+    from orchestrator import poller
+    async def mock_empty(*a, **kw):
+        return []
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_empty)
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_empty)
+    monkeypatch.setattr(poller, "fetch_all_open_issues", mock_empty)
+
     db_file = tmp_path / "state.db"
     state_manager = StateManager(db_file)
     await state_manager.init_db()
+
+    # Pre-seed graph architecture plane and supervisor run
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Arch\n", encoding="utf-8")
+    await state_manager.record_node_run("architect_research", "org/repo")
+    await state_manager.record_node_run("supervisor", "org/repo")
 
     project = ProjectConfig(
         name="paused-proj",

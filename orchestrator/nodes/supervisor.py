@@ -248,9 +248,17 @@ async def evaluate_supervisor_issue(
 
     # 4. Live Mutation & State Blackboard Upsert
     if verdict == "PO_APPROVED":
+        clean_ac = (gherkin_ac or "").strip()
+        if clean_ac.startswith("```gherkin"):
+            clean_ac = clean_ac[len("```gherkin"):].strip()
+        elif clean_ac.startswith("```"):
+            clean_ac = clean_ac[3:].strip()
+        if clean_ac.endswith("```"):
+            clean_ac = clean_ac[:-3].strip()
+
         # Enrich body with Gherkin AC if not already present
-        if gherkin_ac and "## Acceptance Criteria (Gherkin)" not in body:
-            new_body = body.rstrip() + f"\n\n## Acceptance Criteria (Gherkin)\n\n```gherkin\n{gherkin_ac}\n```\n"
+        if clean_ac and "## Acceptance Criteria (Gherkin)" not in body:
+            new_body = body.rstrip() + f"\n\n## Acceptance Criteria (Gherkin)\n\n```gherkin\n{clean_ac}\n```\n"
         else:
             new_body = body
 
@@ -287,7 +295,7 @@ async def evaluate_supervisor_issue(
             issue_number=issue_num,
             body_hash=body_hash,
             status="PO_APPROVED",
-            gherkin_ac=gherkin_ac,
+            gherkin_ac=clean_ac,
             blockers=None,
         )
 
