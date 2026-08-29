@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 import shutil
 import sys
@@ -11,6 +12,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.live import Live
+
+_logger = logging.getLogger(__name__)
 
 from orchestrator import __version__
 from orchestrator.config import GlobalConfig, load_config
@@ -130,8 +133,8 @@ async def run_project_cycle(
     # 0. Zero-Token Polling Sweep: Background sync of SDLC items memory layer
     try:
         await poller.poll_project_sdlc_items(project, state_manager)
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.warning("[%s] Background SDLC items polling failed: %s", project.name, e)
 
     # 1. Supervisor Node (Periodic Watchdog Audit - does not trigger 1s tight loop)
     if node_name is None or node_name == "supervisor":

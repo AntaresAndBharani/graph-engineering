@@ -461,8 +461,6 @@ async def _triage_story(
         issue_id=issue_id,
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
-
     # Ingest pre-approved Gherkin AC from Blackboard if available
     po_record = await state_manager.get_po_tracking(project.repo, issue_id)
 

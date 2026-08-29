@@ -127,7 +127,7 @@ graph TD
 
 2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
-   - Implements asynchronous process execution, process tree lifecycle, and ANSI-sanitized log streaming (`AsyncHarnessAdapter`).
+   - Implements asynchronous process execution, process tree lifecycle, ANSI-sanitized log streaming, and harness-level telemetry anomaly event production (`AsyncHarnessAdapter` writing retry/timeout anomalies to `anomaly_events`).
    - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_all_open_issues`, `fetch_open_prs`, `sync_repository_labels`).
    - Manages dynamic file modification inspection (`SourceWatcher`).
 
@@ -222,7 +222,7 @@ To prevent brittle multi-agent state machines and communication loss between asy
 - **Context Sharing (PRs)**: When `ReviewerNode` evaluates a PR that has passing code reviews but git merge conflicts, it writes an `APPROVED_WITH_CONFLICT` decision artifact to the blackboard. `DevTestNode` reads the blackboard and performs pure conflict resolution without repeating code reviews.
 - **PO Issue Tracking & Hash Gating (`po_tracking`)**: When `SupervisorNode` evaluates an issue labeled `needs-po-review`, it records its SHA-256 body hash, readiness status (`PO_APPROVED` or `NEEDS_HUMAN_CLARIFICATION`), generated Gherkin AC, and detected blockers. Subsequent cycles use the stored hash to short-circuit unchanged issues with zero LLM tokens.
 - **Architect Triage Context Ingestion (`po_tracking`)**: When `ArchitectNode` evaluates an issue labeled `needs-triage`, it queries `get_po_tracking(repo, issue_number)` on the Blackboard. If a pre-approved Gherkin Acceptance Criteria artifact (`PO_APPROVED`) is found, it is injected directly into the triage prompt context, bypassing redundant requirement re-derivation and ensuring end-to-end alignment with the Product Owner's intent.
-- **SDLC Item & Telemetry Synchronization (`sdlc_items` & `anomaly_events`)**: All Application Pipeline Nodes (Layer 3) act as producers writing active issue/subtask/PR statuses (`sync_project_sdlc_items`) and telemetry anomalies/retry exceptions (`record_anomaly_event`) into SQLite WAL. The TUI presentation layer (Layer 4 widgets `SDLCProgressWidget` and `AnomalyAlertsWidget`) serves as a pure read-only consumer, maintaining Zero-HTTP UI latency and strict Clean Architecture decoupling.
+- **SDLC Item & Telemetry Synchronization (`sdlc_items` & `anomaly_events`)**: Application Pipeline Nodes (Layer 3) act as primary producers writing active issue/subtask/PR statuses (`sync_project_sdlc_items`) and domain-level anomalies into SQLite WAL, while `AsyncHarnessAdapter` (Layer 2 Infrastructure) acts as a secondary/harness-level producer writing telemetry anomalies, transient retry exceptions, and SLA violation events (`record_anomaly_event`). The TUI presentation layer (Layer 4 widgets `SDLCProgressWidget` and `AnomalyAlertsWidget`) serves as a pure read-only consumer, maintaining Zero-HTTP UI latency and strict Clean Architecture decoupling.
 
 ```mermaid
 sequenceDiagram
@@ -254,6 +254,7 @@ All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to
   $$\text{delay} = \min(\text{max\_delay}, \text{initial\_delay} \times \text{backoff\_factor}^{\text{attempt}}) \times (0.8 + 0.4 \times \text{random}())$$
 - **Fail-Fast Non-Retryable Errors**: Immediately returns on client errors (`401 Unauthorized`, `400 Bad Request`, `404 Not Found`, syntax compilation errors) without token or time waste.
 - **Terminal Exhaustion Protection**: Caps retries at `max_retries` before surfacing terminal failures to the calling node.
+- **Harness-Level Blackboard Telemetry Producer**: Interacts directly with `StateManager` (`record_anomaly_event`) as a harness-level producer to persist categorized transient anomalies (`http_503`, `http_429`, `http_502`, `http_504`, `connection_reset`) and execution SLA timeouts (`sla_violation`) into the SQLite WAL `anomaly_events` table for real-time dashboard observability.
 
 ```python
 adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
