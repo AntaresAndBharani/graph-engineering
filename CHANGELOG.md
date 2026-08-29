@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Added **Blackboard Gherkin AC Ingestion for Architect Triage (`orchestrator/nodes/architect.py`)**: The Architect node queries `po_tracking` on the Decoupled Artifact Blackboard (`get_po_tracking`) and incorporates pre-approved Gherkin Acceptance Criteria directly into the triage and INVEST decomposition context, avoiding redundant requirement re-derivation.
 - Added **Supervisor PO-Proxy CLI Inspection & Evaluation (`orchestrator supervisor evaluate` & `orchestrator supervisor status`)**: Exposes interactive and dry-run (`--dry-run`) evaluation commands for issues labeled `needs-po-review` with Gherkin acceptance criteria generation, SHA-256 hash gating, and persistent `po_tracking` Blackboard status reporting.
 - Added **Decoupled Blackboard `po_tracking` Table (`orchestrator/db.py`)**: Persistent SQLite WAL table and helper methods (`upsert_po_tracking`, `get_po_tracking`, `delete_po_tracking`, `list_po_trackings`) for cross-node PO readiness context.
 - Implemented the **Decoupled, Agnostic Multi-Agent Orchestrator CLI (`graph-orchestrator`)** in Python (`pyproject.toml`, `orchestrator/`), decoupling workflow execution and state from target application repositories.

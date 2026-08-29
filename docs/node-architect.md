@@ -56,7 +56,8 @@ To maximize reasoning depth while drastically minimizing token costs:
 - **Refactoring Required**: Posts detailed review comments and returns the task to `DevTest` with `needs-refactor`.
 
 ### 3. Story Triage & INVEST Decomposition (`needs-triage`)
-- Decomposes complex user stories into minimal, testable technical subtasks.
+- Ingests pre-approved **Gherkin Acceptance Criteria** from the `po_tracking` Blackboard table when available (status `PO_APPROVED`), preventing redundant requirement re-derivation.
+- Decomposes complex user stories into minimal, testable technical subtasks following INVEST principles.
 - Each child subtask is created with **Gherkin acceptance criteria** and labeled **`ready-for-dev`**.
 - Links the parent story (`Parent: #<issue_id>`) and synchronizes the parent checklist.
 
