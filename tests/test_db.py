@@ -260,6 +260,8 @@ async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
     import aiosqlite
     db_path = tmp_path / "state.db"
     manager = StateManager(db_path)
+    # Initial creation and idempotency test
+    await manager.init_db()
     await manager.init_db()
 
     async with aiosqlite.connect(manager.db_path) as db:
@@ -301,6 +303,12 @@ async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
         for name, expected_type in expected_anom_cols.items():
             assert name in col_map_anom, f"Missing column {name} in anomaly_events"
             assert col_map_anom[name]["type"] == expected_type
+
+        # Check idx_anomalies_project_time index
+        cursor = await db.execute("PRAGMA index_list(anomaly_events);")
+        indexes = await cursor.fetchall()
+        idx_names = [idx[1] for idx in indexes]
+        assert "idx_anomalies_project_time" in idx_names
 
 
 @pytest.mark.asyncio
