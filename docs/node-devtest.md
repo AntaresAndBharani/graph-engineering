@@ -45,7 +45,12 @@ flowchart TD
    - If the AI harness autonomously branches (`feat/issue-<id>`), commits, and creates a Pull Request via GitHub CLI, the DevTest node automatically discovers the open PR.
    - Automatically synchronizes PR metadata: attaches **`needs-architect-review`** and transitions the subtask issue to **`dev-implemented`**.
 
-4. **Self-Healing & Error Isolation**:
+4. **Context-Aware Conflict Resolution (Blackboard Pattern)**:
+   - Queries the local SQLite Blackboard (`pr_artifacts` table) before execution.
+   - If the task is flagged with `APPROVED_WITH_CONFLICT`, DevTest skips full code rewrites and focuses exclusively on reconciling git merge conflicts against `origin/main` without modifying pre-approved architectural contracts.
+   - Upon a clean push, marks the PR directly with `architect-approved`, avoiding duplicate review passes.
+
+5. **Self-Healing & Error Isolation**:
    - If the build or tests cannot be resolved, the issue is labeled **`orchestration-failed`** or **`needs-po-review`** with a direct pointer to the execution log in `~/.config/orchestrator/logs/`.
 
 ---

@@ -120,27 +120,50 @@ async def run_devtest_node(
 
     adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
 
-    # 5. Build Implementation Prompt
+    # 5. Check Blackboard for Pre-Approved Context (AC 5)
+    artifact = await state_manager.get_pr_artifact(project.repo, issue_id)
+    is_conflict_resolution = artifact is not None and artifact.get("status") == "APPROVED_WITH_CONFLICT"
+
     context_note = ""
-    if project.context_files:
+    if is_conflict_resolution:
+        context_note = (
+            "🚨 CRITICAL - PRE-APPROVED CODE (BLACKBOARD CONTEXT):\n"
+            f"PR/Issue #{issue_id} has already passed ARCHITECTURAL CODE REVIEW ({artifact.get('comment')}).\n"
+            "DO NOT rewrite domain models, architectural contracts, or business logic.\n"
+            "Your objective is STRICTLY to reconcile git merge conflicts against origin/main, verify the test suite passes, commit, and push.\n"
+        )
+    elif project.context_files:
         files_str = ", ".join(project.context_files)
         context_note = (
             f"Read the methodology and architecture files listed in: {files_str}.\n"
             f"Implement the code strictly adhering to those local repository standards.\n"
         )
 
-    prompt = (
-        f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
-        f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n\n"
-        f"{context_note}"
-        f"OPERATIONAL STEPS:\n"
-        f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
-        f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
-        f"3. Implement the minimal clean code required to make all tests pass.\n"
-        f"4. Verify that the entire test suite and linter pass cleanly.\n"
-        f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
-        f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
-    )
+    if is_conflict_resolution:
+        prompt = (
+            f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
+            f"Resolve git merge conflicts against origin/main for pre-approved Issue/PR #{issue_id} ('{issue_title}').\n\n"
+            f"{context_note}\n"
+            f"OPERATIONAL STEPS:\n"
+            f"1. Fetch origin and merge origin/main into the branch ('{branch_prefix}{issue_id}').\n"
+            f"2. Inspect and cleanly resolve all conflict markers (<<<<<<< HEAD ... ======= ... >>>>>>>).\n"
+            f"3. Run the local unit test suite and ensure all tests pass.\n"
+            f"4. Commit with a message 'chore(merge): resolve conflicts with main for #{issue_id}'.\n"
+            f"5. Push the branch to origin.\n"
+        )
+    else:
+        prompt = (
+            f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
+            f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n\n"
+            f"{context_note}"
+            f"OPERATIONAL STEPS:\n"
+            f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
+            f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
+            f"3. Implement the minimal clean code required to make all tests pass.\n"
+            f"4. Verify that the entire test suite and linter pass cleanly.\n"
+            f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
+            f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
+        )
 
     exit_code = await adapter.execute(
         prompt=prompt,
@@ -200,15 +223,25 @@ async def run_devtest_node(
 
     if existing_pr:
         pr_num = existing_pr["number"]
-        # Ensure PR has the output_label (needs-architect-review)
+        effective_output_label = "architect-approved" if is_conflict_resolution else output_label
         pr_labels = [l.get("name") for l in existing_pr.get("labels", []) if isinstance(l, dict)]
-        if output_label not in pr_labels and shutil.which("gh"):
+        if effective_output_label not in pr_labels and shutil.which("gh"):
             p_pr_label = await asyncio.create_subprocess_exec(
                 "gh", "pr", "edit", str(pr_num),
                 "--repo", project.repo,
-                "--add-label", output_label,
+                "--add-label", effective_output_label,
             )
             await p_pr_label.wait()
+
+        # Update Blackboard status
+        if is_conflict_resolution:
+            await state_manager.upsert_pr_artifact(
+                repo=project.repo,
+                pr_number=issue_id,
+                node_name="devtest",
+                status="CONFLICT_RESOLVED",
+                comment=f"DevTest node resolved merge conflicts on PR #{pr_num}.",
+            )
 
         # Transition parent issue to dev-implemented
         if shutil.which("gh"):
@@ -221,7 +254,7 @@ async def run_devtest_node(
             await p_issue_edit.wait()
 
         await state_manager.release_lock(issue_id, project.repo, "devtest")
-        return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_num} ('{output_label}')."
+        return True, f"DevTest node implemented issue #{issue_id} and opened/updated PR #{pr_num} ('{effective_output_label}')."
 
     # 7. Fallback: Check Git Diff (Did the model leave uncommitted code?)
     diff_proc = await asyncio.create_subprocess_exec(

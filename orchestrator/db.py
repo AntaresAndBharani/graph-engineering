@@ -66,6 +66,19 @@ class StateManager:
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pr_artifacts (
+                    repo TEXT NOT NULL,
+                    pr_number INTEGER NOT NULL,
+                    node_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    comment TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (repo, pr_number)
+                );
+                """
+            )
             await db.commit()
 
     async def register_daemon(self, pid: int) -> None:
@@ -462,3 +475,98 @@ class StateManager:
             )
             rows = await cursor.fetchall()
             return {row[0] for row in rows}
+
+    # =========================================================================
+    # Blackboard Pattern: PR Artifacts & Cross-Node Context Storage
+    # =========================================================================
+
+    async def upsert_pr_artifact(
+        self,
+        repo: str,
+        pr_number: int,
+        node_name: str,
+        status: str,
+        comment: str,
+    ) -> None:
+        """
+        Stores or updates a PR review/decision artifact in the Blackboard database.
+        Idempotent operation (INSERT OR REPLACE).
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO pr_artifacts (repo, pr_number, node_name, status, comment, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo, pr_number) DO UPDATE SET
+                    node_name = excluded.node_name,
+                    status = excluded.status,
+                    comment = excluded.comment,
+                    updated_at = excluded.updated_at
+                """,
+                (repo, pr_number, node_name, status, comment, now),
+            )
+            await db.commit()
+
+    async def get_pr_artifact(self, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves a PR artifact by repository and PR number from the Blackboard database.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT repo, pr_number, node_name, status, comment, updated_at
+                FROM pr_artifacts
+                WHERE repo = ? AND pr_number = ?
+                """,
+                (repo, pr_number),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def delete_pr_artifact(self, repo: str, pr_number: int) -> None:
+        """
+        Removes a PR artifact from the Blackboard database.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "DELETE FROM pr_artifacts WHERE repo = ? AND pr_number = ?",
+                (repo, pr_number),
+            )
+            await db.commit()
+
+    async def list_pr_artifacts(self, repo: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Lists all PR artifacts recorded on the Blackboard, optionally filtered by repo.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            if repo:
+                cursor = await db.execute(
+                    """
+                    SELECT repo, pr_number, node_name, status, comment, updated_at
+                    FROM pr_artifacts
+                    WHERE repo = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (repo,),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT repo, pr_number, node_name, status, comment, updated_at
+                    FROM pr_artifacts
+                    ORDER BY updated_at DESC
+                    """
+                )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]

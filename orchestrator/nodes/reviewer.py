@@ -226,6 +226,8 @@ async def run_reviewer_node(
     for target_pr in prs:
         pr_number = target_pr["number"]
         pr_title = target_pr.get("title", "")
+        pr_state = str(target_pr.get("state", "OPEN")).upper()
+        is_merged = bool(target_pr.get("merged", False))
         mergeable = target_pr.get("mergeable", "UNKNOWN")
         branch_name = target_pr.get("headRefName", "")
 
@@ -239,17 +241,54 @@ async def run_reviewer_node(
         if not lock_acquired:
             continue
 
+        # AC 2: True Post-Merge Handling
+        if pr_state == "CLOSED":
+            if is_merged:
+                console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]PR #{pr_number} Verified Merged into main[/bold white]")
+                await state_manager.delete_pr_artifact(project.repo, pr_number)
+                await state_manager.release_lock(pr_number, project.repo, "reviewer")
+                merged_prs.append(pr_number)
+                continue
+            else:
+                console.print(f"\n  [dim]🔍 [{project.name}:reviewer] PR #{pr_number} closed without merge. Releasing lock.[/dim]")
+                await state_manager.delete_pr_artifact(project.repo, pr_number)
+                await state_manager.release_lock(pr_number, project.repo, "reviewer")
+                continue
+
         console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]Evaluating PR #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
         console.print(f"  [dim]• Target: {project.repo} | Status: Remote CI Quality Gate & Auto-Merge[/dim]")
 
-        # 3. Check & Resolve Merge Conflicts Autonomously
+        # AC 3: Async Deferral when GitHub is calculating mergeability
+        if mergeable in (None, "UNKNOWN"):
+            console.print(f"  [{project.name}:reviewer] [dim]PR #{pr_number} mergeability is computing (UNKNOWN/None). Deferring cleanly (0 tokens).[/dim]")
+            await state_manager.release_lock(pr_number, project.repo, "reviewer")
+            pending_prs.append(pr_number)
+            continue
+
+        # AC 4: Check & Resolve Merge Conflicts Autonomously with Blackboard Persistence
         if mergeable == "CONFLICTING":
+            # Record review decision on the Blackboard
+            await state_manager.upsert_pr_artifact(
+                repo=project.repo,
+                pr_number=pr_number,
+                node_name="reviewer",
+                status="APPROVED_WITH_CONFLICT",
+                comment=f"Code approved for PR #{pr_number} ('{pr_title}'), but branch '{branch_name}' has git merge conflicts against origin/main.",
+            )
+
             if branch_name:
                 resolved, res_msg = await resolve_pr_merge_conflicts(
                     project, config, pr_number, branch_name, node_cfg
                 )
                 if resolved:
                     console.print(f"  [{project.name}:reviewer] [bold green]✓ {res_msg}[/bold green]")
+                    await state_manager.upsert_pr_artifact(
+                        repo=project.repo,
+                        pr_number=pr_number,
+                        node_name="reviewer",
+                        status="CONFLICT_RESOLVED",
+                        comment=f"Autonomous conflict resolver resolved conflicts on '{branch_name}'.",
+                    )
                     # PR is now updated on GitHub; remote CI will trigger. Release lock and wait for CI.
                     await state_manager.release_lock(pr_number, project.repo, "reviewer")
                     pending_prs.append(pr_number)
@@ -342,6 +381,7 @@ async def run_reviewer_node(
 
             if p_merge.returncode == 0:
                 merged_prs.append(pr_number)
+                await state_manager.delete_pr_artifact(project.repo, pr_number)
                 console.print(f"  [{project.name}:reviewer] [bold green]✓ Successfully auto-merged PR #{pr_number} into main[/bold green]")
             else:
                 console.print(f"  [{project.name}:reviewer] [bold yellow]Could not merge PR #{pr_number}[/bold yellow]")

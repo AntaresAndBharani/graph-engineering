@@ -921,5 +921,126 @@ async def _reload_daemon(config_path: Optional[Path]) -> None:
 
 
 
+@app.command("artifact")
+def artifact_command(
+    pr_number: int = typer.Argument(
+        ...,
+        help="Pull Request number to inspect in the Blackboard.",
+    ),
+    project_name: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Target a specific registered project name.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Inspects a Pull Request review artifact stored in the local SQLite Blackboard."""
+    asyncio.run(_show_artifact(pr_number, project_name, config_path))
+
+
+async def _show_artifact(pr_number: int, project_name: Optional[str], config_path: Optional[Path]) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    target_repo: Optional[str] = None
+    if project_name:
+        matching = [p for p in config.projects if p.name == project_name]
+        if matching:
+            target_repo = matching[0].repo
+
+    if not target_repo and len(config.projects) == 1:
+        target_repo = config.projects[0].repo
+
+    all_artifacts = await state_manager.list_pr_artifacts(repo=target_repo)
+    found = [a for a in all_artifacts if a.get("pr_number") == pr_number]
+
+    if not found:
+        console.print(f"[yellow]No Blackboard artifact found for PR #{pr_number}.[/yellow]")
+        return
+
+    art = found[0]
+    console.rule(f"[bold cyan]Blackboard PR Artifact #{pr_number}[/bold cyan]")
+    console.print(f"[bold white]Repository:[/bold white] [magenta]{art.get('repo')}[/magenta]")
+    console.print(f"[bold white]Created By Node:[/bold white] [cyan]{art.get('node_name')}[/cyan]")
+    console.print(f"[bold white]Status:[/bold white] [bold green]{art.get('status')}[/bold green]")
+    console.print(f"[bold white]Updated At:[/bold white] [dim]{time.ctime(art.get('updated_at', 0))}[/dim]")
+    console.print(f"\n[bold white]Context / Comment:[/bold white]\n{art.get('comment')}")
+
+
+@app.command("artifacts")
+def artifacts_command(
+    project_name: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Filter artifacts by project name.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Lists all active PR review artifacts stored in the local SQLite Blackboard."""
+    asyncio.run(_list_artifacts(project_name, config_path))
+
+
+async def _list_artifacts(project_name: Optional[str], config_path: Optional[Path]) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    target_repo: Optional[str] = None
+    if project_name:
+        matching = [p for p in config.projects if p.name == project_name]
+        if matching:
+            target_repo = matching[0].repo
+
+    artifacts = await state_manager.list_pr_artifacts(repo=target_repo)
+    if not artifacts:
+        console.print("[dim]No PR review artifacts recorded in the Blackboard.[/dim]")
+        return
+
+    table = Table(title="Decoupled Blackboard: PR Review Artifacts", header_style="bold cyan")
+    table.add_column("PR #", style="bold white")
+    table.add_column("Repository", style="magenta")
+    table.add_column("Node", style="cyan")
+    table.add_column("Status", style="bold yellow")
+    table.add_column("Comment / Decision", style="dim")
+    table.add_column("Updated", style="dim")
+
+    for art in artifacts:
+        updated_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(art.get("updated_at", 0)))
+        table.add_row(
+            str(art.get("pr_number")),
+            art.get("repo", ""),
+            art.get("node_name", ""),
+            art.get("status", ""),
+            art.get("comment", "")[:60] + ("..." if len(art.get("comment", "")) > 60 else ""),
+            updated_str,
+        )
+
+    console.print(table)
+
+
+
 if __name__ == "__main__":
     app()

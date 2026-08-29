@@ -230,3 +230,102 @@ async def test_reviewer_autonomous_conflict_resolution_attempt(tmp_path: Path, m
     assert "waiting for remote CI checks" in msg
 
 
+@pytest.mark.asyncio
+async def test_reviewer_ac2_closed_pr_handling(tmp_path: Path, monkeypatch):
+    import orchestrator.nodes.reviewer as rev_mod
+    from orchestrator.nodes.reviewer import run_reviewer_node
+
+    # Mock closed & merged PR
+    mock_prs = [
+        {"number": 501, "title": "Merged PR", "state": "closed", "merged": True, "labels": [{"name": "architect-approved"}]},
+        {"number": 502, "title": "Abandoned PR", "state": "closed", "merged": False, "labels": [{"name": "architect-approved"}]},
+    ]
+    async def mock_fetch(*a, **kw):
+        return mock_prs
+
+    monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch)
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.upsert_pr_artifact("org/repo", 501, "reviewer", "PENDING", "Initial")
+    await state_manager.upsert_pr_artifact("org/repo", 502, "reviewer", "PENDING", "Initial")
+
+    project = ProjectConfig(
+        name="test",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        nodes={"reviewer": NodeConfig(enabled=True)},
+    )
+
+    ran, msg = await run_reviewer_node(project, GlobalConfig(), state_manager)
+    assert ran is True
+    assert "501" in msg
+    # Blackboard artifacts for closed PRs are cleaned up
+    assert await state_manager.get_pr_artifact("org/repo", 501) is None
+    assert await state_manager.get_pr_artifact("org/repo", 502) is None
+
+
+@pytest.mark.asyncio
+async def test_reviewer_ac3_unknown_mergeability_deferred(tmp_path: Path, monkeypatch):
+    import orchestrator.nodes.reviewer as rev_mod
+    from orchestrator.nodes.reviewer import run_reviewer_node
+
+    mock_prs = [
+        {"number": 503, "title": "Calculating PR", "state": "open", "mergeable": "UNKNOWN", "labels": [{"name": "architect-approved"}]},
+    ]
+    async def mock_fetch(*a, **kw):
+        return mock_prs
+
+    monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch)
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="test",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        nodes={"reviewer": NodeConfig(enabled=True)},
+    )
+
+    ran, msg = await run_reviewer_node(project, GlobalConfig(), state_manager)
+    assert ran is False
+    assert "waiting for remote CI checks" in msg or "Idle" in msg
+
+
+@pytest.mark.asyncio
+async def test_reviewer_ac4_blackboard_conflict_artifact(tmp_path: Path, monkeypatch):
+    import orchestrator.nodes.reviewer as rev_mod
+    from orchestrator.nodes.reviewer import run_reviewer_node
+
+    mock_prs = [
+        {"number": 504, "title": "Conflicting Feature", "state": "open", "mergeable": "CONFLICTING", "headRefName": "feat/504", "labels": [{"name": "architect-approved"}]},
+    ]
+    async def mock_fetch(*a, **kw):
+        return mock_prs
+
+    monkeypatch.setattr(rev_mod, "fetch_open_prs", mock_fetch)
+
+    async def mock_resolve(*a, **kw):
+        return True, "Resolved cleanly"
+
+    monkeypatch.setattr(rev_mod, "resolve_pr_merge_conflicts", mock_resolve)
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="test",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        nodes={"reviewer": NodeConfig(enabled=True)},
+    )
+
+    ran, msg = await run_reviewer_node(project, GlobalConfig(), state_manager)
+    # Verify Blackboard recorded the conflict resolution status
+    art = await state_manager.get_pr_artifact("org/repo", 504)
+    assert art is not None
+    assert art["status"] in ("APPROVED_WITH_CONFLICT", "CONFLICT_RESOLVED")
+
+
+
