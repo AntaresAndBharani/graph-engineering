@@ -111,3 +111,73 @@ async def test_pr_artifacts_blackboard_lifecycle(tmp_path: Path):
     assert await manager.get_pr_artifact("org/repo", 437) is None
     assert len(await manager.list_pr_artifacts("org/repo")) == 0
     assert len(await manager.list_pr_artifacts("org/other-repo")) == 1
+
+
+@pytest.mark.asyncio
+async def test_po_tracking_blackboard_lifecycle(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 1. Initially empty
+    assert await manager.get_po_tracking("org/repo", 15) is None
+    assert await manager.list_po_trackings("org/repo") == []
+
+    # 2. Upsert PO tracking record
+    await manager.upsert_po_tracking(
+        repo="org/repo",
+        issue_number=15,
+        body_hash="hash-12345",
+        status="NEEDS_HUMAN_CLARIFICATION",
+        gherkin_ac=None,
+        blockers="Missing business rules",
+    )
+
+    record = await manager.get_po_tracking("org/repo", 15)
+    assert record is not None
+    assert record["repo"] == "org/repo"
+    assert record["issue_number"] == 15
+    assert record["body_hash"] == "hash-12345"
+    assert record["status"] == "NEEDS_HUMAN_CLARIFICATION"
+    assert record["gherkin_ac"] is None
+    assert record["blockers"] == "Missing business rules"
+    assert record["updated_at"] > 0
+
+    # 3. Idempotent update on conflict
+    await manager.upsert_po_tracking(
+        repo="org/repo",
+        issue_number=15,
+        body_hash="hash-67890",
+        status="PO_APPROVED",
+        gherkin_ac="Feature: Test\nScenario: A\nGiven B\nWhen C\nThen D",
+        blockers=None,
+    )
+
+    updated = await manager.get_po_tracking("org/repo", 15)
+    assert updated is not None
+    assert updated["body_hash"] == "hash-67890"
+    assert updated["status"] == "PO_APPROVED"
+    assert "Feature: Test" in updated["gherkin_ac"]
+    assert updated["blockers"] is None
+
+    # 4. Multi-repo isolation and listing
+    await manager.upsert_po_tracking(
+        repo="org/other-repo",
+        issue_number=15,
+        body_hash="other-hash",
+        status="PO_APPROVED",
+    )
+
+    all_records = await manager.list_po_trackings()
+    assert len(all_records) == 2
+
+    repo_records = await manager.list_po_trackings("org/repo")
+    assert len(repo_records) == 1
+    assert repo_records[0]["repo"] == "org/repo"
+
+    # 5. Delete record
+    await manager.delete_po_tracking("org/repo", 15)
+    assert await manager.get_po_tracking("org/repo", 15) is None
+    assert len(await manager.list_po_trackings("org/repo")) == 0
+    assert len(await manager.list_po_trackings("org/other-repo")) == 1
+
