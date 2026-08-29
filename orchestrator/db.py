@@ -154,6 +154,53 @@ class StateManager:
             )
             await db.commit()
 
+    async def request_reload(self) -> Optional[int]:
+        """
+        Signals an in-memory hot-reload to the running daemon.
+        Returns the registered daemon PID if currently active.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('reload_requested', '1', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.commit()
+
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'pid';")
+            row = await cursor.fetchone()
+            if row and row[0]:
+                try:
+                    return int(row[0])
+                except (ValueError, TypeError):
+                    return None
+            return None
+
+    async def is_reload_requested(self) -> bool:
+        """Checks whether an in-memory hot-reload has been requested."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'reload_requested';")
+            row = await cursor.fetchone()
+            return bool(row and row[0] == "1")
+
+    async def clear_reload_request(self) -> None:
+        """Clears the reload request flag."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('reload_requested', '0', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = excluded.updated_at;",
+                (now,),
+            )
+            await db.commit()
+
     async def get_daemon_info(self) -> Dict[str, Any]:
         """Returns the current status, PID, and stop requested flag for daemon."""
         async with aiosqlite.connect(self.db_path) as db:

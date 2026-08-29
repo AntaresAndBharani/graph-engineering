@@ -23,6 +23,7 @@ from orchestrator.nodes.bau import run_bau_node
 from orchestrator.nodes.devtest import run_devtest_node
 from orchestrator.nodes.reviewer import run_reviewer_node
 from orchestrator.nodes.supervisor import run_supervisor_node
+from orchestrator.reloader import SourceWatcher, hot_reload_runtime
 
 app = typer.Typer(
     name="orchestrator",
@@ -201,11 +202,14 @@ async def _project_worker_loop(
     config: GlobalConfig,
     state_manager: StateManager,
     interval: int,
+    config_path: Optional[Path] = None,
+    watcher: Optional[SourceWatcher] = None,
 ) -> None:
     """
     Independent worker loop for a single project.
     Runs sequentially within this project.
     If work is performed in a pass, immediately starts the next pass (with a 1s debounce).
+    Automatically checks for file changes or manual reload signals before each pass.
     Only sleeps for `interval` when all nodes in this project are idle.
     """
     while True:
@@ -213,6 +217,33 @@ async def _project_worker_loop(
             if await state_manager.is_stop_requested():
                 console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
                 break
+
+            # In-Memory Hot-Reload Check (Manual Signal or Auto-File Watcher)
+            reload_requested = await state_manager.is_reload_requested()
+            has_changed = False
+            modified_files: List[str] = []
+            if watcher:
+                has_changed, modified_files = watcher.check_for_changes()
+
+            if reload_requested or has_changed:
+                if reload_requested:
+                    console.print(f"\n  [bold cyan]🔄 [Manual Reload Requested][/bold cyan] 'orchestrator reload' signal detected.")
+                if has_changed:
+                    console.print(f"\n  [bold yellow]📝 [File Modification Detected][/bold yellow] {', '.join(modified_files)}")
+
+                console.print("  [dim]⚙️ Reloading in-memory configuration and runtime Python modules...[/dim]")
+                try:
+                    config = hot_reload_runtime(config_path)
+                    await state_manager.clear_reload_request()
+                    matching = [p for p in config.projects if p.name == project.name]
+                    if matching:
+                        project = matching[0]
+                    console.print(
+                        f"  [bold green]✓ In-Memory Hot-Reload Complete![/bold green] "
+                        f"[dim](Project: {project.name} | Poll: {config.settings.poll_interval_seconds}s)[/dim]"
+                    )
+                except Exception as re_err:
+                    console.print(f"  [bold red]Hot-Reload Error:[/bold red] {re_err}")
 
             await state_manager.cleanup_expired_locks()
             work_done = await run_project_cycle(project, config, state_manager, silent_idle=False)
@@ -266,10 +297,13 @@ async def _watch_daemon(
     state_manager = StateManager(config.settings.resolved_db_path)
     await state_manager.init_db()
 
-    # Register daemon process ID and clear past stop flags
+    # Register daemon process ID and clear past stop/reload flags
     import os
     daemon_pid = os.getpid()
     await state_manager.register_daemon(daemon_pid)
+    await state_manager.clear_reload_request()
+
+    watcher = SourceWatcher(config_path=config_path, watch_source=True)
 
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
@@ -280,7 +314,8 @@ async def _watch_daemon(
         f"• Managed Projects: [cyan]{len(enabled_projects)}[/cyan] (Parallel Workers)\n"
         f"• Daemon PID: [cyan]{daemon_pid}[/cyan]\n"
         f"• State DB: [cyan]{config.settings.resolved_db_path}[/cyan]\n"
-        f"• Logs: [cyan]{config.settings.resolved_log_dir}[/cyan]",
+        f"• Logs: [cyan]{config.settings.resolved_log_dir}[/cyan]\n"
+        f"• Auto Hot-Reload: [green]Active[/green] (Watching config.yaml & source files)",
         title="Daemon Active",
         border_style="green",
     ))
@@ -296,7 +331,7 @@ async def _watch_daemon(
 
     # Spawn concurrent worker tasks for each project
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval))
+        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path, watcher=watcher))
         for p in enabled_projects
     ]
 
@@ -753,6 +788,38 @@ async def _stop_daemon(force: bool, config_path: Optional[Path]) -> None:
         console.print("[dim]Daemon workers will finish current step without scheduling any new nodes.[/dim]")
         if active_killed > 0:
             console.print(f"[bold yellow]Terminated {active_killed} active AI harness process(es).[/bold yellow]")
+
+
+@app.command("reload")
+def reload_command(
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Hot-reloads configuration and Python modules in the running daemon without restarting."""
+    asyncio.run(_reload_daemon(config_path))
+
+
+async def _reload_daemon(config_path: Optional[Path]) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    daemon_pid = await state_manager.request_reload()
+    console.print("[bold green]✓ In-memory hot-reload signal registered in state database.[/bold green]")
+    if daemon_pid:
+        console.print(f"[dim]Active daemon (PID: {daemon_pid}) notified. It will reload configuration and Python modules on its next cycle.[/dim]")
+    else:
+        console.print("[dim]The daemon will reload configuration and Python modules on its next cycle check.[/dim]")
+
 
 
 if __name__ == "__main__":
