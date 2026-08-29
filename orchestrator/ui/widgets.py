@@ -134,7 +134,7 @@ class AnomalyAlertsWidget(DataTable):
             return
         self.clear()
 
-        if not self.state_manager:
+        if not self.project_name or not self.state_manager:
             self.add_row("-", "-", "No anomalies in last 24h", "-")
             return
 

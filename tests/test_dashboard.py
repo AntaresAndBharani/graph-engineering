@@ -612,7 +612,8 @@ async def test_dashboard_multi_pane_layout_composition(tmp_path: Path):
     await state_manager.init_db()
 
     app = DashboardApp(config=config, state_manager=state_manager)
-    async with app.run_test() as _:
+    async with app.run_test() as pilot:
+        await pilot.pause()
         # Top pane
         top_table = app.query_one("#projects_table", DataTable)
         assert top_table is not None
@@ -648,16 +649,13 @@ async def test_dashboard_no_project_selected_empty_state(tmp_path: Path):
     Given the dashboard has just mounted and no row is highlighted
     Then both bottom panes render a graceful empty state without exceptions
     """
-    config = GlobalConfig(
-        projects=[
-            ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path)),
-        ]
-    )
+    config = GlobalConfig(projects=[])
     state_manager = StateManager(tmp_path / "state.db")
     await state_manager.init_db()
 
     app = DashboardApp(config=config, state_manager=state_manager)
-    async with app.run_test() as _:
+    async with app.run_test() as pilot:
+        await pilot.pause()
         sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
         alerts_widget = app.query_one("#alerts_widget", AnomalyAlertsWidget)
 
@@ -716,21 +714,10 @@ async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: 
     async with app.run_test() as pilot:
         table = app.query_one("#projects_table", DataTable)
         sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        table.focus()
 
-        # Highlight row 0 (alpha)
-        table.move_cursor(row=0)
-        await pilot.pause()
-
-        assert app.selected_project == "alpha"
-        assert sdlc_widget.row_count == 1
-        row_alpha = sdlc_widget.get_row_at(0)
-        assert row_alpha[0] == "#101"
-        assert row_alpha[1] == "feat(core): alpha feature"
-        assert row_alpha[2] == "ready-for-dev"
-        assert row_alpha[3] == "#201"
-
-        # Highlight row 1 (beta)
-        table.move_cursor(row=1)
+        # Highlight row 1 (beta) via Down arrow
+        await pilot.press("down")
         await pilot.pause()
 
         assert app.selected_project == "beta"
@@ -740,6 +727,18 @@ async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: 
         assert row_beta[1] == "fix(core): beta bugfix"
         assert row_beta[2] == "needs-architect-review"
         assert row_beta[3] == "-"
+
+        # Highlight row 0 (alpha) via Up arrow
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert app.selected_project == "alpha"
+        assert sdlc_widget.row_count == 1
+        row_alpha = sdlc_widget.get_row_at(0)
+        assert row_alpha[0] == "#101"
+        assert row_alpha[1] == "feat(core): alpha feature"
+        assert row_alpha[2] == "ready-for-dev"
+        assert row_alpha[3] == "#201"
 
 
 @pytest.mark.asyncio
@@ -779,20 +778,10 @@ async def test_dashboard_reactive_project_selection_updates_alerts_tab(tmp_path:
     async with app.run_test() as pilot:
         table = app.query_one("#projects_table", DataTable)
         alerts_widget = app.query_one("#alerts_widget", AnomalyAlertsWidget)
+        table.focus()
 
-        # Highlight row 0 (alpha)
-        table.move_cursor(row=0)
-        await pilot.pause()
-
-        assert app.selected_project == "alpha"
-        assert alerts_widget.row_count == 1
-        row_alpha = alerts_widget.get_row_at(0)
-        assert row_alpha[1] == "devtest"
-        assert row_alpha[2] == "HarnessTimeout"
-        assert row_alpha[3] == "Alpha execution timed out"
-
-        # Highlight row 1 (beta)
-        table.move_cursor(row=1)
+        # Highlight row 1 (beta) via Down arrow
+        await pilot.press("down")
         await pilot.pause()
 
         assert app.selected_project == "beta"
@@ -801,6 +790,17 @@ async def test_dashboard_reactive_project_selection_updates_alerts_tab(tmp_path:
         assert row_beta[1] == "reviewer"
         assert row_beta[2] == "MergeConflict"
         assert row_beta[3] == "Beta merge conflict in main"
+
+        # Highlight row 0 (alpha) via Up arrow
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert app.selected_project == "alpha"
+        assert alerts_widget.row_count == 1
+        row_alpha = alerts_widget.get_row_at(0)
+        assert row_alpha[1] == "devtest"
+        assert row_alpha[2] == "HarnessTimeout"
+        assert row_alpha[3] == "Alpha execution timed out"
 
 
 @pytest.mark.asyncio
