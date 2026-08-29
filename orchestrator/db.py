@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 import os
 from pathlib import Path
 import time
@@ -122,6 +123,34 @@ class StateManager:
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_anomalies_project_time ON anomaly_events(project_name, created_at);"
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS token_usage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    harness_name TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    node_name TEXT NOT NULL,
+                    issue_number INTEGER,
+                    prompt_tokens INTEGER NOT NULL,
+                    completion_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+                );
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_token_usage_harness_time 
+                ON token_usage_events(harness_name, created_at);
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_token_usage_project_node 
+                ON token_usage_events(project_name, node_name, created_at);
+                """
             )
             await db.commit()
 
@@ -857,4 +886,169 @@ class StateManager:
                 )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def record_token_usage_event(
+        self,
+        harness_name: str,
+        model_name: str,
+        project_name: str,
+        node_name: str,
+        issue_number: Optional[int],
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        created_at: Optional[str] = None,
+    ) -> int:
+        """
+        Records a token usage event in the ledger. If created_at is not provided,
+        defaults to current UTC timestamp.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            if created_at is None:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO token_usage_events (
+                        harness_name, model_name, project_name, node_name,
+                        issue_number, prompt_tokens, completion_tokens, total_tokens
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        harness_name,
+                        model_name,
+                        project_name,
+                        node_name,
+                        issue_number,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                    ),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO token_usage_events (
+                        harness_name, model_name, project_name, node_name,
+                        issue_number, prompt_tokens, completion_tokens, total_tokens, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        harness_name,
+                        model_name,
+                        project_name,
+                        node_name,
+                        issue_number,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        created_at,
+                    ),
+                )
+            await db.commit()
+            return cursor.lastrowid or 0
+
+    async def get_window_token_sum(
+        self,
+        harness_name: str,
+        window_hours: float,
+    ) -> int:
+        """
+        Calculates the total tokens consumed by a harness within the trailing rolling window.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            async with db.execute(
+                """
+                SELECT COALESCE(SUM(total_tokens), 0)
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                """,
+                (harness_name, cutoff),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return int(row[0]) if row else 0
+
+    async def get_window_events(
+        self,
+        harness_name: str,
+        window_hours: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns all token usage events for the specified harness within the rolling window in chronological order.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            async with db.execute(
+                """
+                SELECT id, harness_name, model_name, project_name, node_name,
+                       issue_number, prompt_tokens, completion_tokens, total_tokens, created_at
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (harness_name, cutoff),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def get_window_breakdown(
+        self,
+        harness_name: str,
+        window_hours: float,
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Aggregates total tokens by project and by node for a given harness within the rolling window.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        by_project: Dict[str, int] = {}
+        by_node: Dict[str, int] = {}
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            async with db.execute(
+                """
+                SELECT project_name, COALESCE(SUM(total_tokens), 0) as project_total
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                GROUP BY project_name
+                """,
+                (harness_name, cutoff),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                for r in rows:
+                    by_project[r["project_name"]] = int(r["project_total"])
+
+            async with db.execute(
+                """
+                SELECT node_name, COALESCE(SUM(total_tokens), 0) as node_total
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                GROUP BY node_name
+                """,
+                (harness_name, cutoff),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                for r in rows:
+                    by_node[r["node_name"]] = int(r["node_total"])
+
+        return {"by_project": by_project, "by_node": by_node}
+
+    async def get_usage_breakdown(
+        self,
+        harness_name: str,
+        window_hours: float,
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Alias for get_window_breakdown.
+        """
+        return await self.get_window_breakdown(harness_name, window_hours)
+
 
