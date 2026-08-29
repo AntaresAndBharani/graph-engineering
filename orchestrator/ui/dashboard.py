@@ -83,6 +83,9 @@ class DashboardApp(App):
                 formatted = self.log_handler.format(rec)
                 log_view.write(formatted)
 
+        # Register dashboard to receive live harness stream lines
+        AsyncHarnessAdapter.register_stream_listener(self._handle_harness_stream_line)
+
         # Initial render of project status table
         await self.update_projects_table()
 
@@ -98,6 +101,18 @@ class DashboardApp(App):
             try:
                 log_view = self.query_one(RichLog)
                 log_view.write(formatted)
+            except Exception:
+                pass
+
+    def _handle_harness_stream_line(self, line: str) -> None:
+        """Callback invoked by AsyncHarnessAdapter on live subprocess stream emissions."""
+        try:
+            log_view = self.query_one(RichLog)
+            self.call_from_thread(log_view.write, line)
+        except Exception:
+            try:
+                log_view = self.query_one(RichLog)
+                log_view.write(line)
             except Exception:
                 pass
 
@@ -170,6 +185,7 @@ class DashboardApp(App):
         Executes graceful resource cleanup: terminates active harness subprocesses
         and unregisters daemon PID from state.db.
         """
+        AsyncHarnessAdapter.unregister_stream_listener(self._handle_harness_stream_line)
         AsyncHarnessAdapter.terminate_all_active()
         if self.state_manager:
             try:
