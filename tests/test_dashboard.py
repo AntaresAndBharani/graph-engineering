@@ -91,6 +91,14 @@ def test_textual_log_handler_drops_filtered_node_traces():
     assert handler.buffer[0].getMessage() == "Core daemon heartbeat"
 
 
+def test_pyproject_declares_textual_dependency():
+    """Asserts pyproject.toml declares textual>=0.50.0 in dependencies."""
+    pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+    assert pyproject_path.exists()
+    content = pyproject_path.read_text(encoding="utf-8")
+    assert "textual>=0.50.0" in content
+
+
 def test_no_circular_dependencies():
     """Asserts orchestrator.ui.dashboard is not imported by config.py or db.py."""
     import orchestrator.config as cfg
