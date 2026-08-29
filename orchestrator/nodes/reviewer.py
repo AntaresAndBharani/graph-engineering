@@ -10,7 +10,7 @@ from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
-from orchestrator.poller import fetch_open_prs
+from orchestrator.poller import check_dispatch_quota, fetch_open_prs
 
 
 async def check_pr_ci_status(repo: str, pr_number: int) -> tuple[str, str]:
@@ -137,6 +137,11 @@ async def resolve_pr_merge_conflicts(
     if not harness_cfg:
         await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         return False, "No AI harness configured for conflict resolution."
+
+    allowed, q_res = await check_dispatch_quota(project, "reviewer", config, state_manager)
+    if not allowed:
+        await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
     model = node_cfg.conflict_model or "gemini-3.7-flash-low"
     effort = node_cfg.conflict_effort

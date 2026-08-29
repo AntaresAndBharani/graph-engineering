@@ -170,11 +170,31 @@ DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
 }
 
 
+class HarnessQuotaConfig(BaseModel):
+    window_hours: float = Field(default=1.0, gt=0)
+    window_token_limit: int = Field(default=2_000_000, gt=0)
+    avg_tokens_per_hour: int = Field(default=400_000, gt=0)
+
+
+DEFAULT_HARNESS_QUOTAS: Dict[str, HarnessQuotaConfig] = {
+    "antigravity": HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
+    "claude": HarnessQuotaConfig(window_hours=5.0, window_token_limit=5_000_000, avg_tokens_per_hour=300_000),
+    "devin": HarnessQuotaConfig(window_hours=5.0, window_token_limit=2_500_000, avg_tokens_per_hour=150_000),
+    "openai": HarnessQuotaConfig(window_hours=1.0, window_token_limit=1_500_000, avg_tokens_per_hour=300_000),
+}
+
+
+class QuotaSettings(BaseModel):
+    buffer_minutes: int = Field(default=30, ge=0)
+    harnesses: Dict[str, HarnessQuotaConfig] = Field(default_factory=lambda: dict(DEFAULT_HARNESS_QUOTAS))
+
+
 class GlobalConfig(BaseModel):
     version: int = 2
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
     managed_labels: List[LabelConfig] = Field(default_factory=lambda: list(DEFAULT_MANAGED_LABELS))
     harnesses: Dict[str, HarnessConfig] = Field(default_factory=lambda: dict(DEFAULT_HARNESSES))
+    quota: QuotaSettings = Field(default_factory=QuotaSettings)
     projects: List[ProjectConfig] = Field(default_factory=list)
 
 
@@ -231,5 +251,26 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
         for k, v in DEFAULT_HARNESSES.items():
             if k not in raw_data["harnesses"]:
                 raw_data["harnesses"][k] = v.model_dump()
+
+    # Merge quota defaults
+    if "quota" in raw_data and isinstance(raw_data["quota"], dict):
+        q_data = raw_data["quota"]
+        if "harnesses" in q_data and isinstance(q_data["harnesses"], dict):
+            merged_harnesses = {}
+            for k, default_cfg in DEFAULT_HARNESS_QUOTAS.items():
+                if k in q_data["harnesses"]:
+                    user_h = q_data["harnesses"][k]
+                    if isinstance(user_h, dict):
+                        d = default_cfg.model_dump()
+                        d.update(user_h)
+                        merged_harnesses[k] = d
+                    else:
+                        merged_harnesses[k] = user_h
+                else:
+                    merged_harnesses[k] = default_cfg.model_dump()
+            for k, user_h in q_data["harnesses"].items():
+                if k not in merged_harnesses:
+                    merged_harnesses[k] = user_h
+            q_data["harnesses"] = merged_harnesses
 
     return GlobalConfig(**raw_data)

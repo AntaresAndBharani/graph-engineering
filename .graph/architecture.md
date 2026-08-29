@@ -256,6 +256,8 @@ All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to
 - **Fail-Fast Non-Retryable Errors**: Immediately returns on client errors (`401 Unauthorized`, `400 Bad Request`, `404 Not Found`, syntax compilation errors) without token or time waste.
 - **Terminal Exhaustion Protection**: Caps retries at `max_retries` before surfacing terminal failures to the calling node.
 - **Harness-Level Blackboard Telemetry Producer**: Interacts directly with `StateManager` (`record_anomaly_event`) as a harness-level producer to persist categorized transient anomalies (`http_503`, `http_429`, `http_502`, `http_504`, `connection_reset`) and execution SLA timeouts (`sla_violation`) into the SQLite WAL `anomaly_events` table for real-time dashboard observability.
+- **Post-Execution Token Event Ledger**: Extracts structured prompt, completion, and total tokens from execution outputs via regex/JSON (with empirical character fallback `max(1000, floor((len(prompt) + len(stdout)) / 4))`) and records usage in the `token_usage_events` SQLite WAL table for global multi-window quota velocity gating.
+
 
 ```python
 adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
