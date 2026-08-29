@@ -126,16 +126,21 @@ async def resolve_pr_merge_conflicts(
         await proc_push.wait()
         return True, f"Cleanly merged {branch_name} with origin/main and pushed."
 
-    # 3. Conflict markers present; invoke AI harness to resolve conflicts cleanly
-    harness_name = node_cfg.harness or "claude"
+    # 3. Conflict markers present; invoke cost-effective AI harness to resolve conflicts cleanly
+    harness_name = node_cfg.conflict_harness or "antigravity"
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
-        harness_name = "antigravity"
+        harness_name = node_cfg.harness or "antigravity"
         harness_cfg = config.harnesses.get(harness_name)
 
     if not harness_cfg:
         await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         return False, "No AI harness configured for conflict resolution."
+
+    model = node_cfg.conflict_model or "gemini-3.7-flash-low"
+    effort = node_cfg.conflict_effort
+
+    console.print(f"  [{project.name}:conflict-resolver] [bold cyan]⚡ Resolving Merge Conflicts via {harness_name}/{model}[/bold cyan]")
 
     log_file = get_project_log_path(
         config.settings.resolved_log_dir,
@@ -162,8 +167,8 @@ async def resolve_pr_merge_conflicts(
         prompt=prompt,
         cwd=project.local_path,
         log_file=log_file,
-        model=node_cfg.model,
-        effort=node_cfg.effort,
+        model=model,
+        effort=effort,
         console_prefix=f"[{project.name}:conflict-resolver]",
     )
 

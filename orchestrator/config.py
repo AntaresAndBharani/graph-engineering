@@ -39,6 +39,9 @@ class NodeConfig(BaseModel):
     research_model: Optional[str] = None
     research_effort: Optional[str] = None
     research_interval_seconds: int = 604800
+    conflict_harness: Optional[str] = "antigravity"
+    conflict_model: Optional[str] = "gemini-3.7-flash-low"
+    conflict_effort: Optional[str] = None
 
 
 def resolve_path(v: str | Path) -> Path:

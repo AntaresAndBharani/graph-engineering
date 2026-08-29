@@ -120,6 +120,9 @@ projects:
         effort: "medium"
         label_trigger: "architect-approved"
         auto_merge_approved: true
+        # Cost-effective conflict resolver harness & model
+        conflict_harness: "antigravity"
+        conflict_model: "gemini-3.7-flash-low"
       bau:
         enabled: true
         harness: "antigravity"

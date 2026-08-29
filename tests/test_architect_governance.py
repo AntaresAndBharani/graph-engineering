@@ -21,6 +21,8 @@ def test_architect_config_defaults():
     assert cfg.research_model == "gemini-3.7-flash-high"
     assert cfg.research_interval_seconds == 604800
     assert cfg.review_trigger == "needs-architect-review"
+    assert cfg.conflict_harness == "antigravity"
+    assert cfg.conflict_model == "gemini-3.7-flash-low"
 
 
 @pytest.mark.asyncio
