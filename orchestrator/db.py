@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 import os
 from pathlib import Path
 import time
@@ -122,6 +123,28 @@ class StateManager:
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_anomalies_project_time ON anomaly_events(project_name, created_at);"
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS token_usage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    harness_name TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    node_name TEXT NOT NULL,
+                    issue_number INTEGER,
+                    prompt_tokens INTEGER NOT NULL,
+                    completion_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+                );
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_usage_harness_time ON token_usage_events(harness_name, created_at);"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_usage_project_node ON token_usage_events(project_name, node_name, created_at);"
             )
             await db.commit()
 
@@ -857,4 +880,173 @@ class StateManager:
                 )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Token Usage Events & Quota Ledger (Global Multi-Window Gating)
+    # =========================================================================
+
+    async def record_token_usage_event(
+        self,
+        harness_name: str,
+        model_name: str,
+        project_name: str,
+        node_name: str,
+        issue_number: Optional[int],
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        created_at: Optional[str | datetime | float | int] = None,
+    ) -> None:
+        """
+        Records a token usage event with UTC timestamp into token_usage_events.
+        """
+        if created_at is None:
+            created_at_val = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        elif isinstance(created_at, datetime):
+            if created_at.tzinfo is not None:
+                created_at_val = created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                created_at_val = created_at.strftime("%Y-%m-%d %H:%M:%S")
+        elif isinstance(created_at, (int, float)):
+            created_at_val = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            created_at_val = str(created_at)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO token_usage_events (
+                    harness_name, model_name, project_name, node_name, issue_number,
+                    prompt_tokens, completion_tokens, total_tokens, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    harness_name,
+                    model_name,
+                    project_name,
+                    node_name,
+                    issue_number,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    created_at_val,
+                ),
+            )
+            await db.commit()
+
+    async def get_window_token_usage(
+        self,
+        harness_name: str,
+        window_hours: float = 1.0,
+    ) -> int:
+        """
+        Sums total_tokens for events where created_at >= now(UTC) - window_hours,
+        using strict UTC comparisons.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT SUM(total_tokens)
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                """,
+                (harness_name, cutoff_str),
+            )
+            row = await cursor.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+            return 0
+
+    async def get_usage_breakdown(
+        self,
+        harness_name: str,
+        window_hours: float = 1.0,
+    ) -> Dict[str, Any]:
+        """
+        Returns per-project_name and per-node_name token sums within the window for the given harness.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+
+            cursor_proj = await db.execute(
+                """
+                SELECT project_name, SUM(total_tokens)
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                GROUP BY project_name
+                """,
+                (harness_name, cutoff_str),
+            )
+            proj_rows = await cursor_proj.fetchall()
+            by_project = {row[0]: int(row[1]) for row in proj_rows}
+
+            cursor_node = await db.execute(
+                """
+                SELECT node_name, SUM(total_tokens)
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                GROUP BY node_name
+                """,
+                (harness_name, cutoff_str),
+            )
+            node_rows = await cursor_node.fetchall()
+            by_node = {row[0]: int(row[1]) for row in node_rows}
+
+            return {
+                "by_project": by_project,
+                "by_node": by_node,
+                "projects": by_project,
+                "nodes": by_node,
+            }
+
+    async def get_token_usage_events(
+        self,
+        harness_name: Optional[str] = None,
+        window_hours: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves raw token usage events, optionally filtered by harness_name and window_hours.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+
+            query = (
+                "SELECT id, harness_name, model_name, project_name, node_name, "
+                "issue_number, prompt_tokens, completion_tokens, total_tokens, created_at "
+                "FROM token_usage_events"
+            )
+            params: list[Any] = []
+            conditions: list[str] = []
+
+            if harness_name:
+                conditions.append("harness_name = ?")
+                params.append(harness_name)
+
+            if window_hours is not None:
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+                cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+                conditions.append("created_at >= ?")
+                params.append(cutoff_str)
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            query += " ORDER BY created_at ASC"
+
+            cursor = await db.execute(query, tuple(params))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
 
