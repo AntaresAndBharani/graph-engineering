@@ -116,7 +116,7 @@ async def test_dashboard_app_composition(tmp_path: Path):
     await state_manager.init_db()
 
     app = DashboardApp(config=config, state_manager=state_manager)
-    async with app.run_test() as pilot:
+    async with app.run_test() as _:
         assert app.query_one(Header) is not None
         assert app.query_one(DataTable) is not None
         assert app.query_one(RichLog) is not None
@@ -124,11 +124,49 @@ async def test_dashboard_app_composition(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_table_columns(tmp_path: Path):
+    """
+    Scenario: Table columns
+    Given the dashboard is actively rendering
+    Then the DataTable displays columns [Project Name | Repository | Active Node | Status | Last Updated | Locks/Anomalies]
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as _:
+        table = app.query_one(DataTable)
+        # Extract column labels from table.columns dictionary
+        column_labels = [str(col.label) for col in table.columns.values()]
+        expected_columns = [
+            "Project Name",
+            "Repository",
+            "Active Node",
+            "Status",
+            "Last Updated",
+            "Locks/Anomalies",
+        ]
+        assert column_labels == expected_columns
+        assert app.TABLE_COLUMNS == expected_columns
+
+
+@pytest.mark.asyncio
 async def test_dashboard_table_alphabetical_sorting(tmp_path: Path):
-    """Asserts DataTable renders project rows in alphabetical order."""
+    """
+    Scenario: Alphabetical sort
+    Given multiple managed projects are active
+    When the DataTable renders
+    Then rows are sorted alphabetically by project name
+    """
     config = GlobalConfig(
         projects=[
             ProjectConfig(name="zebra", repo="org/zebra", local_path=str(tmp_path)),
+            ProjectConfig(name="Beta", repo="org/Beta", local_path=str(tmp_path)),
             ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
             ProjectConfig(name="middle", repo="org/middle", local_path=str(tmp_path)),
         ]
@@ -137,7 +175,7 @@ async def test_dashboard_table_alphabetical_sorting(tmp_path: Path):
     await state_manager.init_db()
 
     app = DashboardApp(config=config, state_manager=state_manager)
-    async with app.run_test() as pilot:
+    async with app.run_test() as _:
         table = app.query_one(DataTable)
         # Verify rendered rows in table
         rendered_names = []
@@ -145,7 +183,87 @@ async def test_dashboard_table_alphabetical_sorting(tmp_path: Path):
             row_data = table.get_row_at(row_index)
             rendered_names.append(row_data[0])
 
-        assert rendered_names == ["alpha", "middle", "zebra"]
+        assert rendered_names == ["alpha", "Beta", "middle", "zebra"]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_periodic_refresh_and_live_state_updates(tmp_path: Path):
+    """
+    Scenario: Non-blocking periodic refresh
+    Given the dashboard is running
+    When the 2-second interval timer fires
+    Then it queries state_manager/in-memory worker states asynchronously
+    And the UI rendering loop is not blocked during the query
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj_a", repo="org/proj_a", local_path=str(tmp_path)),
+            ProjectConfig(name="proj_b", repo="org/proj_b", local_path=str(tmp_path)),
+            ProjectConfig(name="proj_c", repo="org/proj_c", local_path=str(tmp_path), enabled=False),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as _:
+        table = app.query_one(DataTable)
+        assert table.row_count == 3
+
+        # Initial state check
+        row_a = table.get_row_at(0)
+        assert row_a[0] == "proj_a"
+        assert "Active" in str(row_a[3])
+        assert "Idle" in str(row_a[2])
+
+        row_c = table.get_row_at(2)
+        assert row_c[0] == "proj_c"
+        assert "Disabled" in str(row_c[3])
+
+        # Mutate state asynchronously: Acquire lock on proj_a and pause proj_b
+        await state_manager.acquire_lock(issue_id=42, repo="org/proj_a", node_type="DevTest")
+        await state_manager.pause_project("proj_b")
+
+        # Trigger update_projects_table (as fired by the 2-second timer)
+        await app.update_projects_table()
+
+        # Verify live updates rendered in DataTable
+        row_a_updated = table.get_row_at(0)
+        assert row_a_updated[0] == "proj_a"
+        assert "DevTest" in str(row_a_updated[2])
+        assert "Issue #42" in str(row_a_updated[5])
+
+        row_b_updated = table.get_row_at(1)
+        assert row_b_updated[0] == "proj_b"
+        assert "Paused" in str(row_b_updated[3])
+
+
+@pytest.mark.asyncio
+async def test_dashboard_manual_refresh_action(tmp_path: Path):
+    """Asserts pressing 'r' triggers action_refresh and updates table without blocking."""
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj_test", repo="org/proj_test", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        table = app.query_one(DataTable)
+        assert table.row_count == 1
+        assert "Idle" in str(table.get_row_at(0)[2])
+
+        # Simulate job running in state_manager
+        await state_manager.acquire_lock(issue_id=99, repo="org/proj_test", node_type="Reviewer")
+
+        # Press 'r' to trigger manual refresh binding
+        await pilot.press("r")
+
+        row = table.get_row_at(0)
+        assert "Reviewer" in str(row[2])
+        assert "Issue #99" in str(row[5])
 
 
 @pytest.mark.asyncio
