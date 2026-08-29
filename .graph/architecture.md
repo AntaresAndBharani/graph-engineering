@@ -268,7 +268,10 @@ exit_code = await adapter.execute(
 
 ### 3. Distributed State Machine & TTL Locking (`StateManager`)
 - **Write-Ahead Logging (WAL)**: SQLite runs in WAL mode (`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`) ensuring concurrent non-blocking reads and serialized atomic writes across async workers.
-- **TTL Lock Protection**: Every task execution is bounded by a Time-To-Live (TTL). If a daemon crashes or an agent hangs, subsequent worker cycles automatically detect expired locks, transition their state to `FAILED`, and recover execution safely.
+- **TTL Lock Protection & Retry-Aware Sizing**: Every task execution is bounded by a dynamic Time-To-Live (TTL). When retry policies are enabled on harnesses, lock TTL is sized dynamically based on the full retry budget:
+  $$\text{lock\_ttl} = \text{timeout\_minutes} \times (1 + \text{max\_retries}) + 5$$
+  This ensures that locks do not expire prematurely while `AsyncHarnessAdapter` executes exponential backoff across retries.
+- **Startup Orphan Lock Reclamation**: On daemon startup (`register_daemon`) and single-pass CLI runs, `cleanup_orphaned_running_jobs()` automatically identifies and transitions orphaned `RUNNING` locks left behind by killed or crashed processes to `FAILED`, preventing 30-minute deadlock freezes.
 - **Inter-Process Communication (IPC) via DB**: Graceful daemon shutdown (`orchestrator stop`) sets a `stop_requested` flag in SQLite, allowing active workers to finish their current atomic unit without starting new nodes.
 - **Per-Project Pause & Resume**: Individual project pipelines can be toggled (`orchestrator pause -p <name>` / `orchestrator resume -p <name>`) persisted across runs in the `project_states` table.
 

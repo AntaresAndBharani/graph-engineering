@@ -244,11 +244,15 @@ async def _review_pr_architecture(
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not configured."
 
+    retry_cfg = getattr(harness_cfg, "retry", None)
+    max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
+    lock_ttl = int(harness_cfg.timeout_minutes * (1 + max_retries) + 5)
+
     lock_acquired = await state_manager.acquire_lock(
         issue_id=pr_number,
         repo=project.repo,
         node_type="architect_review",
-        ttl_minutes=harness_cfg.timeout_minutes,
+        ttl_minutes=lock_ttl,
     )
     if not lock_acquired:
         return False, f"PR #{pr_number} is locked by active review run."
@@ -287,16 +291,17 @@ async def _review_pr_architecture(
     )
 
     adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
-    exit_code = await adapter.execute(
-        prompt=prompt,
-        cwd=project.local_path,
-        log_file=log_file,
-        model=node_cfg.model,
-        effort=node_cfg.effort,
-        console_prefix=f"[{project.name}:architect-review]",
-    )
-
-    await state_manager.release_lock(pr_number, project.repo, "architect_review")
+    try:
+        exit_code = await adapter.execute(
+            prompt=prompt,
+            cwd=project.local_path,
+            log_file=log_file,
+            model=node_cfg.model,
+            effort=node_cfg.effort,
+            console_prefix=f"[{project.name}:architect-review]",
+        )
+    finally:
+        await state_manager.release_lock(pr_number, project.repo, "architect_review")
 
     if exit_code == 0:
         return True, f"Architect completed architectural review on PR #{pr_number}."
@@ -393,11 +398,15 @@ async def _triage_story(
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
 
+    retry_cfg = getattr(harness_cfg, "retry", None)
+    max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
+    lock_ttl = int(harness_cfg.timeout_minutes * (1 + max_retries) + 5)
+
     lock_acquired = await state_manager.acquire_lock(
         issue_id=issue_id,
         repo=project.repo,
         node_type="architect",
-        ttl_minutes=harness_cfg.timeout_minutes,
+        ttl_minutes=lock_ttl,
     )
     if not lock_acquired:
         return False, f"Issue #{issue_id} is currently locked by another active run. Skipping."

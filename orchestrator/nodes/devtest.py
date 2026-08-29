@@ -81,11 +81,15 @@ async def run_devtest_node(
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
 
+    retry_cfg = getattr(harness_cfg, "retry", None)
+    max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
+    lock_ttl = int(harness_cfg.timeout_minutes * (1 + max_retries) + 5)
+
     lock_acquired = await state_manager.acquire_lock(
         issue_id=issue_id,
         repo=project.repo,
         node_type="devtest",
-        ttl_minutes=harness_cfg.timeout_minutes,
+        ttl_minutes=lock_ttl,
     )
     if not lock_acquired:
         return False, f"Issue #{issue_id} is currently locked by another active run. Skipping."
