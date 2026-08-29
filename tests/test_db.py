@@ -181,3 +181,45 @@ async def test_po_tracking_blackboard_lifecycle(tmp_path: Path):
     assert len(await manager.list_po_trackings("org/repo")) == 0
     assert len(await manager.list_po_trackings("org/other-repo")) == 1
 
+
+@pytest.mark.asyncio
+async def test_po_tracking_schema_columns_and_composite_pk(tmp_path: Path):
+    """
+    Verifies Scenario 1: Schema creation is idempotent, columns match specification,
+    and composite primary key (repo, issue_number) is enforced.
+    """
+    import aiosqlite
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+
+    # Initial creation
+    await manager.init_db()
+    # Idempotency check: running init_db() multiple times should succeed without error
+    await manager.init_db()
+
+    async with aiosqlite.connect(manager.db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(po_tracking);")
+        columns = await cursor.fetchall()
+        # columns format: (cid, name, type, notnull, dflt_value, pk)
+        col_map = {col[1]: {"type": col[2].upper(), "notnull": col[3], "pk": col[5]} for col in columns}
+
+        expected_columns = {
+            "repo": "TEXT",
+            "issue_number": "INTEGER",
+            "body_hash": "TEXT",
+            "status": "TEXT",
+            "gherkin_ac": "TEXT",
+            "blockers": "TEXT",
+            "updated_at": "REAL",
+        }
+
+        for col_name, expected_type in expected_columns.items():
+            assert col_name in col_map, f"Missing column: {col_name}"
+            assert col_map[col_name]["type"] == expected_type, f"Column {col_name} expected {expected_type}, got {col_map[col_name]['type']}"
+
+        # Verify composite primary key on (repo, issue_number)
+        assert col_map["repo"]["pk"] > 0, "repo must be part of primary key"
+        assert col_map["issue_number"]["pk"] > 0, "issue_number must be part of primary key"
+        assert col_map["body_hash"]["pk"] == 0, "body_hash must not be primary key"
+
+
