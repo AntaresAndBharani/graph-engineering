@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from pydantic import ValidationError
 import pytest
 from orchestrator.config import (
+    DEFAULT_HARNESS_QUOTAS,
     GlobalConfig,
     HarnessConfig,
+    HarnessQuotaConfig,
     LabelConfig,
     ProjectConfig,
+    QuotaSettings,
     SettingsConfig,
     load_config,
 )
@@ -125,5 +129,152 @@ harnesses:
     assert custom_retry.backoff_factor == 3.0
     assert custom_retry.max_delay_seconds == 30.0
     assert "custom_rate_limit" in custom_retry.retryable_patterns
+
+
+def test_default_quota_config_available_with_no_user_overrides(tmp_path: Path):
+    """
+    Scenario: Default quota config is available with no user overrides
+      Given a config.yaml with no "quota" section
+      When load_config() runs
+      Then quota.buffer_minutes defaults to 30
+      And quota.harnesses contains "antigravity", "claude", "devin", "openai" with
+          the documented window_hours/window_token_limit/avg_tokens_per_hour
+    """
+    yaml_file = tmp_path / "default_quota_config.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+settings:
+  poll_interval_seconds: 60
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert loaded.quota.buffer_minutes == 30
+    assert set(loaded.quota.harnesses.keys()) == {"antigravity", "claude", "devin", "openai"}
+
+    antigravity = loaded.quota.harnesses["antigravity"]
+    assert antigravity.window_hours == 1.0
+    assert antigravity.window_token_limit == 2_000_000
+    assert antigravity.avg_tokens_per_hour == 400_000
+
+    claude = loaded.quota.harnesses["claude"]
+    assert claude.window_hours == 5.0
+    assert claude.window_token_limit == 5_000_000
+    assert claude.avg_tokens_per_hour == 300_000
+
+    devin = loaded.quota.harnesses["devin"]
+    assert devin.window_hours == 5.0
+    assert devin.window_token_limit == 2_500_000
+    assert devin.avg_tokens_per_hour == 150_000
+
+    openai = loaded.quota.harnesses["openai"]
+    assert openai.window_hours == 1.0
+    assert openai.window_token_limit == 1_500_000
+    assert openai.avg_tokens_per_hour == 300_000
+
+
+def test_partial_user_override_preserves_other_harness_defaults(tmp_path: Path):
+    """
+    Scenario: Partial user override preserves other harness defaults
+      Given a config.yaml overriding only quota.harnesses.claude.window_token_limit
+      When load_config() runs
+      Then claude's window_token_limit reflects the override
+      And antigravity/devin/openai retain their default quota values
+    """
+    yaml_file = tmp_path / "partial_override_config.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+quota:
+  buffer_minutes: 45
+  harnesses:
+    claude:
+      window_token_limit: 8000000
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert loaded.quota.buffer_minutes == 45
+
+    # Claude was partially overridden: window_token_limit updated, window_hours & avg_tokens_per_hour retained
+    claude = loaded.quota.harnesses["claude"]
+    assert claude.window_token_limit == 8_000_000
+    assert claude.window_hours == 5.0
+    assert claude.avg_tokens_per_hour == 300_000
+
+    # Antigravity, devin, openai retained defaults
+    antigravity = loaded.quota.harnesses["antigravity"]
+    assert antigravity.window_hours == 1.0
+    assert antigravity.window_token_limit == 2_000_000
+    assert antigravity.avg_tokens_per_hour == 400_000
+
+    devin = loaded.quota.harnesses["devin"]
+    assert devin.window_hours == 5.0
+    assert devin.window_token_limit == 2_500_000
+    assert devin.avg_tokens_per_hour == 150_000
+
+    openai = loaded.quota.harnesses["openai"]
+    assert openai.window_hours == 1.0
+    assert openai.window_token_limit == 1_500_000
+    assert openai.avg_tokens_per_hour == 300_000
+
+
+def test_custom_harness_quota_merged(tmp_path: Path):
+    yaml_file = tmp_path / "custom_quota_config.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    custom_runner:
+      window_hours: 2.5
+      window_token_limit: 1000000
+      avg_tokens_per_hour: 200000
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert "custom_runner" in loaded.quota.harnesses
+    assert loaded.quota.harnesses["custom_runner"].window_hours == 2.5
+    assert loaded.quota.harnesses["custom_runner"].window_token_limit == 1_000_000
+    assert loaded.quota.harnesses["custom_runner"].avg_tokens_per_hour == 200_000
+    # Standard harnesses still present
+    assert "antigravity" in loaded.quota.harnesses
+    assert "claude" in loaded.quota.harnesses
+    assert "devin" in loaded.quota.harnesses
+    assert "openai" in loaded.quota.harnesses
+
+
+def test_harness_quota_config_validation_errors():
+    # Negative and zero window_hours
+    with pytest.raises(ValidationError):
+        HarnessQuotaConfig(window_hours=0)
+    with pytest.raises(ValidationError):
+        HarnessQuotaConfig(window_hours=-1.0)
+
+    # Negative and zero window_token_limit
+    with pytest.raises(ValidationError):
+        HarnessQuotaConfig(window_token_limit=0)
+    with pytest.raises(ValidationError):
+        HarnessQuotaConfig(window_token_limit=-500)
+
+    # Negative and zero avg_tokens_per_hour
+    with pytest.raises(ValidationError):
+        HarnessQuotaConfig(avg_tokens_per_hour=0)
+    with pytest.raises(ValidationError):
+        HarnessQuotaConfig(avg_tokens_per_hour=-100)
+
+    # Negative buffer_minutes on QuotaSettings
+    with pytest.raises(ValidationError):
+        QuotaSettings(buffer_minutes=-5)
+
+    # Buffer minutes of 0 is allowed
+    qs = QuotaSettings(buffer_minutes=0)
+    assert qs.buffer_minutes == 0
+
 
 
