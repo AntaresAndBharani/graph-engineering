@@ -161,7 +161,14 @@ async def _remediate_refactor_pr(
         f"6. Push the updated branch to `origin {branch_name}`.\n"
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="devtest",
+        issue_number=pr_number,
+    )
     try:
         exit_code = await adapter.execute(
             prompt=prompt,
@@ -392,6 +399,14 @@ async def run_devtest_node(
             f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
         )
 
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="devtest",
+        issue_number=issue_id,
+    )
     exit_code = await adapter.execute(
         prompt=prompt,
         cwd=project.local_path,

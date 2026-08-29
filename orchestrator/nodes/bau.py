@@ -115,7 +115,13 @@ async def run_bau_node(
         f"}}\n"
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="bau",
+    )
     model = node_cfg.model or "gemini-3.7-flash-low"
     effort = node_cfg.effort
 

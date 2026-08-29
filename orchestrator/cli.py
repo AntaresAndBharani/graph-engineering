@@ -127,6 +127,12 @@ async def run_project_cycle(
     pipeline_work_done = False
     prefix = f"[{project.name}]"
 
+    # 0. Zero-Token Polling Sweep: Background sync of SDLC items memory layer
+    try:
+        await poller.poll_project_sdlc_items(project, state_manager)
+    except Exception:
+        pass
+
     # 1. Supervisor Node (Periodic Watchdog Audit - does not trigger 1s tight loop)
     if node_name is None or node_name == "supervisor":
         if await state_manager.is_stop_requested():

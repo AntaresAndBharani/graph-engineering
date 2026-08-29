@@ -353,3 +353,180 @@ async def test_harness_retry_transition_to_non_retryable(tmp_path: Path, monkeyp
     assert call_count == 2
 
 
+def test_classify_error():
+    from orchestrator.harness import classify_error
+
+    assert classify_error("", is_timeout=True) == "sla_violation"
+    assert classify_error("503 UNAVAILABLE service dropout") == "http_503"
+    assert classify_error("HTTP 429 Too Many Requests (Rate limit hit)") == "http_429"
+    assert classify_error("502 Bad Gateway") == "http_502"
+    assert classify_error("504 Gateway Timeout") == "http_504"
+    assert classify_error("Task timed out after 30 minutes") == "sla_violation"
+    assert classify_error("Connection reset by peer", error_snippet="connection reset") == "connection_reset"
+    assert classify_error("Unknown failure") == "execution_failure"
+
+
+@pytest.mark.asyncio
+async def test_scenario_harness_records_anomaly_on_transient_failure(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Harness records anomaly on transient failure
+    Given `orchestrator/harness.py` AsyncHarnessAdapter executes a node harness call
+    When the call fails or is retried due to a transient upstream error (503, 429) or an SLA violation
+    Then `StateManager.record_anomaly_event(project_name, node_name, error_type, error_message, issue_number)` is called
+     with error_type reflecting the failure classification (e.g. "http_503", "http_429", "sla_violation")
+    """
+    import asyncio
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.db import StateManager
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    retry_cfg = HarnessRetryConfig(max_retries=2, initial_delay_seconds=1.0)
+    cfg = HarnessConfig(binary="antigravity", args=["-p", "{prompt}"], retry=retry_cfg)
+    adapter = AsyncHarnessAdapter(
+        name="antigravity",
+        config=cfg,
+        state_manager=state_manager,
+        project_name="my-project",
+        node_name="devtest",
+        issue_number=37,
+    )
+
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return 1, "503 UNAVAILABLE - Gateway Dropout"
+        return 0, "Success on retry"
+
+    async def mock_sleep(d):
+        pass
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    log_file = tmp_path / "harness.log"
+    exit_code = await adapter.execute(
+        prompt="Execute task",
+        cwd=tmp_path,
+        log_file=log_file,
+    )
+
+    assert exit_code == 0
+    assert call_count == 2
+
+    # Verify anomaly recorded in StateManager
+    anomalies = await state_manager.get_recent_anomalies("my-project")
+    assert len(anomalies) == 1
+    assert anomalies[0]["node_name"] == "devtest"
+    assert anomalies[0]["error_type"] == "http_503"
+    assert anomalies[0]["issue_number"] == 37
+    assert "503" in anomalies[0]["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_harness_records_anomaly_on_timeout_sla_violation(tmp_path: Path, monkeypatch):
+    """
+    Asserts timeout (returncode 124) records 'sla_violation' anomaly event.
+    """
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.db import StateManager
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    retry_cfg = HarnessRetryConfig(max_retries=0)
+    cfg = HarnessConfig(binary="claude", args=["-p", "{prompt}"], retry=retry_cfg)
+    adapter = AsyncHarnessAdapter(
+        name="claude",
+        config=cfg,
+        state_manager=state_manager,
+        project_name="proj-timeout",
+        node_name="architect",
+        issue_number=100,
+    )
+
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        return 124, "Process timed out after 30 minutes"
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+
+    log_file = tmp_path / "timeout.log"
+    exit_code = await adapter.execute(
+        prompt="Execute task",
+        cwd=tmp_path,
+        log_file=log_file,
+    )
+
+    assert exit_code == 124
+
+    anomalies = await state_manager.get_recent_anomalies("proj-timeout")
+    assert len(anomalies) == 1
+    assert anomalies[0]["error_type"] == "sla_violation"
+    assert anomalies[0]["issue_number"] == 100
+    assert anomalies[0]["node_name"] == "architect"
+
+
+@pytest.mark.asyncio
+async def test_scenario_non_blocking_harness_anomaly_recording_failure(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Non-blocking, best-effort recording
+    Given the SQLite write for anomaly_events fails unexpectedly
+    When the harness continues its normal flow
+    Then the failure must not crash the node execution (log and continue)
+    """
+    import asyncio
+    from unittest.mock import AsyncMock
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    retry_cfg = HarnessRetryConfig(max_retries=1, initial_delay_seconds=1.0)
+    cfg = HarnessConfig(binary="claude", args=["-p", "{prompt}"], retry=retry_cfg)
+
+    # StateManager mock that fails on record_anomaly_event
+    failing_sm = AsyncMock()
+    failing_sm.record_anomaly_event.side_effect = RuntimeError("Database Locked / Disk Full")
+
+    adapter = AsyncHarnessAdapter(
+        name="claude",
+        config=cfg,
+        state_manager=failing_sm,
+        project_name="fail-db",
+        node_name="devtest",
+        issue_number=1,
+    )
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return 1, "429 RESOURCE_EXHAUSTED"
+        return 0, "Success"
+
+    async def mock_sleep(d):
+        pass
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    log_file = tmp_path / "resilient.log"
+    exit_code = await adapter.execute("prompt", tmp_path, log_file)
+
+    # Must complete successfully despite SQLite exception
+    assert exit_code == 0
+    assert call_count == 2
+
+
+

@@ -85,6 +85,7 @@ async def resolve_pr_merge_conflicts(
     pr_number: int,
     branch_name: str,
     node_cfg: NodeConfig,
+    state_manager: Optional[StateManager] = None,
 ) -> tuple[bool, str]:
     """
     Autonomously resolves git merge conflicts on a PR branch against origin/main.
@@ -162,7 +163,14 @@ async def resolve_pr_merge_conflicts(
         f"7. Push to origin: `git push origin {branch_name}`\n"
     )
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="reviewer",
+        issue_number=pr_number,
+    )
     exit_code = await adapter.execute(
         prompt=prompt,
         cwd=project.local_path,
@@ -295,7 +303,7 @@ async def run_reviewer_node(
             res_msg = "Conflicting files detected."
             if branch_name:
                 resolved, res_msg = await resolve_pr_merge_conflicts(
-                    project, config, pr_number, branch_name, node_cfg
+                    project, config, pr_number, branch_name, node_cfg, state_manager=state_manager
                 )
                 if resolved:
                     console.print(f"  [{project.name}:reviewer] [bold green]✓ {res_msg}[/bold green]")

@@ -201,7 +201,14 @@ async def evaluate_supervisor_issue(
             "supervisor",
             issue_id=f"po_{issue_num}",
         )
-        adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
+        adapter = AsyncHarnessAdapter(
+            harness_name,
+            harness_cfg,
+            state_manager=state_manager,
+            project_name=project.name,
+            node_name="supervisor",
+            issue_number=issue_num,
+        )
         exit_code = await adapter.execute(
             prompt=prompt,
             cwd=project.local_path,
@@ -538,6 +545,16 @@ async def run_supervisor_node(
         elif anomaly_type == "STALE_ISSUE_SLA":
             issue_id = anomaly["issue_id"]
             age_hours = anomaly.get("age_hours", 12.0)
+            try:
+                await state_manager.record_anomaly_event(
+                    project_name=project.name,
+                    node_name="supervisor",
+                    error_type="sla_violation",
+                    error_message=f"Issue #{issue_id} open for {age_hours:.1f}h (> 12h SLA threshold).",
+                    issue_number=issue_id,
+                )
+            except Exception:
+                pass
             if shutil.which("gh"):
                 cmd_label = ["gh", "issue", "edit", str(issue_id), "--repo", project.repo, "--add-label", "needs-po-review"]
                 cmd_comment = [
