@@ -78,6 +78,31 @@ class AsyncHarnessAdapter:
         self.env_vars = config.env_vars
 
     @classmethod
+    def has_active_processes(cls) -> bool:
+        """Returns True if any harness subprocess is currently executing."""
+        return len(cls._active_processes) > 0
+
+    @classmethod
+    def get_active_process_count(cls) -> int:
+        """Returns the count of currently executing harness subprocesses."""
+        return len(cls._active_processes)
+
+    @classmethod
+    async def wait_all_active(cls, timeout: float = 30.0) -> bool:
+        """
+        Asynchronously waits for all active harness subprocesses to finish.
+        Returns True if all finished within timeout, False if timeout elapsed.
+        """
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        while len(cls._active_processes) > 0:
+            elapsed = loop.time() - start
+            if elapsed >= timeout:
+                return False
+            await asyncio.sleep(0.5)
+        return True
+
+    @classmethod
     def terminate_all_active(cls) -> int:
         """Terminates all currently running harness subprocesses and their process trees."""
         count = len(cls._active_processes)
