@@ -136,6 +136,9 @@ class StateManager:
                 "CREATE INDEX IF NOT EXISTS idx_sdlc_lookahead ON sdlc_items(project_name, state, created_at);"
             )
             await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sdlc_lock ON sdlc_items(project_name, parent_issue_id, sequence_order, issue_number);"
+            )
+            await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS anomaly_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1108,6 +1111,230 @@ class StateManager:
             updated = cursor.rowcount > 0
             await db.commit()
             return updated
+
+    async def get_next_devtest_task(self, project_name: str) -> Optional[int]:
+        """
+        Deterministic CTE query that resolves the single active locked parent story
+        and returns only its next sequential subtask, with blocked-story quarantine
+        and standalone/planned-promotion fallbacks.
+
+        Workflow:
+        1. CTE ActiveStory: Resolves the single active (non-CLOSED/MERGED, non-PLANNED) STORY item
+           that has uncompleted subtasks (or is open), ordered by sequence_order ASC, issue_number ASC.
+        2. If an active story exists:
+           - Returns the next sequential uncompleted subtask under parent_issue_id = active_story_id.
+           - If the next subtask is 'blocked' / 'orchestration-failed', returns None (lock is held, no fallback).
+           - If the next subtask is 'ready-for-dev', returns its issue_number.
+           - If the next subtask is not 'ready-for-dev' (e.g. queued or in-progress), returns None (lock held).
+        3. If no active story is locked:
+           - Fallback 1: Standalone tasks with parent_issue_id IS NULL and 'ready-for-dev',
+             ordered by sequence_order ASC, issue_number ASC.
+           - Fallback 2: Oldest planned story promotion: promotes the oldest PLANNED story to ACTIVE,
+             unlocks its first queued subtask to 'ready-for-dev', and returns that subtask's issue_number.
+        4. Returns None if no eligible task is found.
+        """
+        def _is_blocked(state: Optional[str], labels: Optional[str]) -> bool:
+            if state:
+                s = str(state).strip().upper()
+                if any(b in s for b in ("BLOCKED", "ORCHESTRATION-FAILED", "ORCHESTRATION_FAILED", "ORCHESTRATION:FAILED")):
+                    return True
+            if labels:
+                lbls = str(labels).lower()
+                if any(b in lbls for b in ("blocked", "status:blocked", "orchestration-failed", "status:orchestration-failed")):
+                    return True
+            return False
+
+        def _is_ready_for_dev(state: Optional[str], labels: Optional[str]) -> bool:
+            if labels:
+                lbls = str(labels).lower()
+                if any(r in lbls for r in ("ready-for-dev", "status:ready-for-dev")):
+                    return True
+            if state:
+                s = str(state).strip().upper()
+                if s in ("READY-FOR-DEV", "STATUS:READY-FOR-DEV", "READY_FOR_DEV"):
+                    return True
+            return False
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+
+            # 1. CTE: Resolve single active locked parent story
+            active_story_query = """
+                WITH ActiveStory AS (
+                    SELECT issue_number AS active_story_id
+                    FROM sdlc_items
+                    WHERE project_name = ?
+                      AND UPPER(item_type) = 'STORY'
+                      AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
+                      AND (
+                          EXISTS (
+                              SELECT 1 FROM sdlc_items sub
+                              WHERE sub.project_name = sdlc_items.project_name
+                                AND sub.parent_issue_id = sdlc_items.issue_number
+                                AND UPPER(sub.state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                          )
+                          OR NOT EXISTS (
+                              SELECT 1 FROM sdlc_items sub2
+                              WHERE sub2.project_name = sdlc_items.project_name
+                                AND sub2.parent_issue_id = sdlc_items.issue_number
+                          )
+                      )
+                    ORDER BY sequence_order ASC, issue_number ASC
+                    LIMIT 1
+                )
+                SELECT active_story_id FROM ActiveStory;
+            """
+            cursor = await db.execute(active_story_query, (project_name,))
+            row = await cursor.fetchone()
+            active_story_id = int(row[0]) if row and row[0] is not None else None
+
+            if active_story_id is not None:
+                # Active Story Lock is held! Query next sequential uncompleted child subtask
+                subtask_cursor = await db.execute(
+                    """
+                    SELECT issue_number, state, labels, sequence_order
+                    FROM sdlc_items
+                    WHERE project_name = ?
+                      AND parent_issue_id = ?
+                      AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                    ORDER BY sequence_order ASC, issue_number ASC
+                    LIMIT 1;
+                    """,
+                    (project_name, active_story_id),
+                )
+                subtask_row = await subtask_cursor.fetchone()
+                if subtask_row:
+                    sub_id = int(subtask_row["issue_number"])
+                    sub_state = subtask_row["state"]
+                    sub_labels = subtask_row["labels"]
+
+                    if _is_blocked(sub_state, sub_labels):
+                        return None
+
+                    if _is_ready_for_dev(sub_state, sub_labels):
+                        return sub_id
+
+                    # Next subtask in sequence is not ready (e.g. queued/in-progress) -> hold lock, return None
+                    return None
+                else:
+                    # Active story has no child subtasks; check if story itself is ready
+                    story_cursor = await db.execute(
+                        """
+                        SELECT issue_number, state, labels
+                        FROM sdlc_items
+                        WHERE project_name = ? AND issue_number = ?
+                        """,
+                        (project_name, active_story_id),
+                    )
+                    story_row = await story_cursor.fetchone()
+                    if story_row:
+                        if _is_blocked(story_row["state"], story_row["labels"]):
+                            return None
+                        if _is_ready_for_dev(story_row["state"], story_row["labels"]):
+                            return int(story_row["issue_number"])
+                    return None
+
+            # 2. Fallback 1: Standalone tasks (parent_issue_id IS NULL and not a STORY)
+            standalone_cursor = await db.execute(
+                """
+                SELECT issue_number, state, labels, sequence_order
+                FROM sdlc_items
+                WHERE project_name = ?
+                  AND parent_issue_id IS NULL
+                  AND (item_type IS NULL OR UPPER(item_type) != 'STORY')
+                  AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
+                  AND (labels LIKE '%ready-for-dev%' OR labels LIKE '%status:ready-for-dev%' OR UPPER(state) IN ('READY-FOR-DEV', 'STATUS:READY-FOR-DEV'))
+                ORDER BY sequence_order ASC, issue_number ASC
+                LIMIT 1;
+                """,
+                (project_name,),
+            )
+            standalone_row = await standalone_cursor.fetchone()
+            if standalone_row:
+                s_id = int(standalone_row["issue_number"])
+                s_state = standalone_row["state"]
+                s_labels = standalone_row["labels"]
+                if not _is_blocked(s_state, s_labels):
+                    return s_id
+                return None
+
+            # 3. Fallback 2: Oldest planned story promotion
+            planned_cursor = await db.execute(
+                """
+                SELECT issue_number, title, state, labels, created_at, updated_at
+                FROM sdlc_items
+                WHERE project_name = ? AND (UPPER(state) = 'PLANNED' OR UPPER(state) = 'STATUS:PLANNED')
+                ORDER BY COALESCE(created_at, updated_at) ASC, sequence_order ASC, issue_number ASC
+                LIMIT 1;
+                """,
+                (project_name,),
+            )
+            planned_row = await planned_cursor.fetchone()
+            if planned_row:
+                planned_story_id = int(planned_row["issue_number"])
+                now = time.time()
+                await db.execute(
+                    """
+                    UPDATE sdlc_items
+                    SET state = 'ACTIVE', updated_at = ?
+                    WHERE project_name = ? AND issue_number = ?
+                    """,
+                    (now, project_name, planned_story_id),
+                )
+                await db.commit()
+
+                # Find its first unclosed child subtask
+                p_sub_cursor = await db.execute(
+                    """
+                    SELECT issue_number, state, labels, sequence_order
+                    FROM sdlc_items
+                    WHERE project_name = ?
+                      AND parent_issue_id = ?
+                      AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                    ORDER BY sequence_order ASC, issue_number ASC
+                    LIMIT 1;
+                    """,
+                    (project_name, planned_story_id),
+                )
+                p_sub_row = await p_sub_cursor.fetchone()
+                if p_sub_row:
+                    p_sub_id = int(p_sub_row["issue_number"])
+                    p_sub_state = p_sub_row["state"]
+                    p_sub_labels = p_sub_row["labels"] or ""
+
+                    # If not already ready-for-dev, promote/unlock it
+                    if not _is_ready_for_dev(p_sub_state, p_sub_labels) and not _is_blocked(p_sub_state, p_sub_labels):
+                        new_labels = p_sub_labels
+                        if "status:queued" in new_labels:
+                            new_labels = new_labels.replace("status:queued", "status:ready-for-dev")
+                        elif "queued" in new_labels:
+                            new_labels = new_labels.replace("queued", "ready-for-dev")
+                        elif not new_labels.strip():
+                            new_labels = "ready-for-dev"
+                        else:
+                            new_labels = f"{new_labels}, ready-for-dev"
+
+                        await db.execute(
+                            """
+                            UPDATE sdlc_items
+                            SET labels = ?, state = 'OPEN', updated_at = ?
+                            WHERE project_name = ? AND issue_number = ?
+                            """,
+                            (new_labels, now, project_name, p_sub_id),
+                        )
+                        await db.commit()
+                        p_sub_labels = new_labels
+                        p_sub_state = "OPEN"
+
+                    if _is_blocked(p_sub_state, p_sub_labels):
+                        return None
+                    return p_sub_id
+                else:
+                    return planned_story_id
+
+            return None
 
     async def record_anomaly_event(
         self,
