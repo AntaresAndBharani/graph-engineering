@@ -103,10 +103,20 @@ class ProjectConfig(BaseModel):
     enabled: bool = True
     context_files: List[str] = Field(default_factory=lambda: list(DEFAULT_CONTEXT_FILES))
     nodes: Dict[str, NodeConfig] = Field(default_factory=dict)
+    max_planned_stories: int = 2
+    worktrees_enabled: bool = True
+    worktree_dir: Optional[Path] = None
 
     @field_validator("local_path", mode="before")
     @classmethod
     def expand_local_path(cls, v: str | Path) -> Path:
+        return resolve_path(v)
+
+    @field_validator("worktree_dir", mode="before")
+    @classmethod
+    def expand_worktree_dir(cls, v: Optional[str | Path]) -> Optional[Path]:
+        if v is None:
+            return None
         return resolve_path(v)
 
 
@@ -118,6 +128,9 @@ class SettingsConfig(BaseModel):
     db_path: str = "~/.config/orchestrator/state.db"
     log_dir: str = "~/.config/orchestrator/logs"
     log_level: str = "INFO"
+    max_planned_stories: int = 2
+    worktrees_enabled: bool = True
+    worktree_dir: Optional[str] = None
 
     @property
     def resolved_db_path(self) -> Path:
@@ -130,6 +143,12 @@ class SettingsConfig(BaseModel):
         p = resolve_path(self.log_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    @property
+    def resolved_worktree_dir(self) -> Optional[Path]:
+        if not self.worktree_dir:
+            return None
+        return resolve_path(self.worktree_dir)
 
 
 DEFAULT_MANAGED_LABELS: List[LabelConfig] = [
@@ -246,7 +265,7 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
 
     # Merge default labels and harnesses if omitted in user config
     if "managed_labels" not in raw_data or not raw_data["managed_labels"]:
-        raw_data["managed_labels"] = [l.model_dump() for l in DEFAULT_MANAGED_LABELS]
+        raw_data["managed_labels"] = [lbl.model_dump() for lbl in DEFAULT_MANAGED_LABELS]
 
     if "harnesses" not in raw_data or not raw_data["harnesses"]:
         raw_data["harnesses"] = {k: v.model_dump() for k, v in DEFAULT_HARNESSES.items()}
