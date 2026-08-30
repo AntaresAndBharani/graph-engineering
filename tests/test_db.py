@@ -278,6 +278,8 @@ async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
             "state": "TEXT",
             "labels": "TEXT",
             "linked_pr": "INTEGER",
+            "pr_status": "TEXT",
+            "pr_ci_details": "TEXT",
             "created_at": "REAL",
             "updated_at": "REAL",
         }
@@ -342,6 +344,8 @@ async def test_sdlc_items_sync_and_query_lifecycle(tmp_path: Path):
             "state": "OPEN",
             "labels": ["ready-for-dev", "priority:high"],
             "linked_pr": 201,
+            "pr_status": "OPEN",
+            "pr_ci_details": "RUNNING",
         },
         {
             "issue_number": 102,
@@ -360,8 +364,12 @@ async def test_sdlc_items_sync_and_query_lifecycle(tmp_path: Path):
     assert retrieved[0]["title"] == "Story: Implement Auth"
     assert "ready-for-dev" in retrieved[0]["labels"]
     assert retrieved[0]["linked_pr"] == 201
+    assert retrieved[0]["pr_status"] == "OPEN"
+    assert retrieved[0]["pr_ci_details"] == "RUNNING"
     assert retrieved[1]["issue_number"] == 102
     assert retrieved[1]["linked_pr"] is None
+    assert retrieved[1]["pr_status"] is None
+    assert retrieved[1]["pr_ci_details"] is None
 
     # Upsert idempotency (updating issue 101)
     updated_items = [
@@ -371,6 +379,8 @@ async def test_sdlc_items_sync_and_query_lifecycle(tmp_path: Path):
             "state": "CLOSED",
             "labels": "done",
             "linked_pr": 201,
+            "pr_status": "MERGED",
+            "pr_ci_details": "PASS",
         }
     ]
     await manager.sync_project_sdlc_items("alpha", updated_items)
@@ -378,11 +388,292 @@ async def test_sdlc_items_sync_and_query_lifecycle(tmp_path: Path):
     assert len(retrieved_after) == 2
     assert retrieved_after[0]["title"] == "Story: Implement Auth (Updated)"
     assert retrieved_after[0]["state"] == "CLOSED"
+    assert retrieved_after[0]["pr_status"] == "MERGED"
+    assert retrieved_after[0]["pr_ci_details"] == "PASS"
 
     # Multi-project isolation
     await manager.sync_project_sdlc_items("beta", [{"issue_number": 999, "title": "Beta Task"}])
     assert len(await manager.get_sdlc_items("beta")) == 1
     assert len(await manager.get_sdlc_items("alpha")) == 2
+
+
+@pytest.mark.asyncio
+async def test_non_destructive_schema_evolution_pr_status_and_ci(tmp_path: Path):
+    """
+    Scenario: Non-destructive schema evolution
+      Given the orchestrator daemon initializes on an existing database without pr_status
+      When StateManager.init_db() runs
+      Then it must ALTER TABLE to add pr_status and pr_ci_details without dropping existing rows
+    """
+    import aiosqlite
+    db_path = tmp_path / "legacy_state.db"
+
+    # 1. Create a legacy table without pr_status and pr_ci_details
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE sdlc_items (
+                project_name TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                parent_issue_id INTEGER,
+                item_type TEXT DEFAULT 'SUBTASK',
+                sequence_order INTEGER DEFAULT 0,
+                title TEXT NOT NULL,
+                state TEXT NOT NULL,
+                labels TEXT,
+                linked_pr INTEGER,
+                created_at REAL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (project_name, issue_number)
+            );
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO sdlc_items (project_name, issue_number, title, state, updated_at)
+            VALUES ('graph-engineering', 450, 'Legacy Pre-existing Item', 'OPEN', 1700000000.0);
+            """
+        )
+        await db.commit()
+
+    # 2. Run StateManager.init_db()
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 3. Verify columns exist now and previous row is completely intact
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(sdlc_items);")
+        columns = await cursor.fetchall()
+        col_names = [col[1] for col in columns]
+        assert "pr_status" in col_names
+        assert "pr_ci_details" in col_names
+
+    # Check preserved legacy row
+    items = await manager.get_sdlc_items("graph-engineering")
+    assert len(items) == 1
+    assert items[0]["issue_number"] == 450
+    assert items[0]["title"] == "Legacy Pre-existing Item"
+    assert items[0]["pr_status"] is None
+    assert items[0]["pr_ci_details"] is None
+
+    # 4. Upsert new item with pr_status and pr_ci_details
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [
+            {
+                "issue_number": 450,
+                "title": "Legacy Pre-existing Item (Updated)",
+                "pr_status": "OPEN",
+                "pr_ci_details": "PASS",
+            }
+        ],
+    )
+    updated_items = await manager.get_sdlc_items("graph-engineering")
+    assert len(updated_items) == 1
+    assert updated_items[0]["pr_status"] == "OPEN"
+    assert updated_items[0]["pr_ci_details"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_smart_visibility_keeps_orphaned_open_subtasks_visible(tmp_path: Path):
+    """
+    Scenario: Smart visibility keeps orphaned open subtasks visible
+      Given parent story #454 is "closed"
+      And child subtask #456 is still "open"
+      When get_active_sdlc_hierarchy() is called
+      Then it must return parent story #454 with child subtask #456
+      And subtasks must be ordered by sequence_order ASC, issue_number ASC
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Insert parent story #454 (closed) and subtasks #456 (open) & #455 (closed)
+    items = [
+        {
+            "issue_number": 454,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "Story: Large Refactoring",
+            "state": "CLOSED",
+            "labels": "done",
+            "parent_issue_id": None,
+        },
+        {
+            "issue_number": 456,
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "title": "Subtask: Cleanup Old Modules",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+            "parent_issue_id": 454,
+            "linked_pr": 501,
+            "pr_status": "OPEN",
+            "pr_ci_details": "PASS",
+        },
+        {
+            "issue_number": 455,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Subtask: Initial Extraction",
+            "state": "CLOSED",
+            "labels": "done",
+            "parent_issue_id": 454,
+            "linked_pr": 500,
+            "pr_status": "MERGED",
+            "pr_ci_details": "PASS",
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    hierarchy = await manager.get_active_sdlc_hierarchy("graph-engineering")
+    assert len(hierarchy) == 1
+
+    root_story = hierarchy[0]
+    assert root_story["issue_number"] == 454
+    assert root_story["state"] == "CLOSED"
+    assert len(root_story["subtasks"]) == 2
+
+    # Check ordering: sequence_order ASC, issue_number ASC
+    assert root_story["subtasks"][0]["issue_number"] == 455
+    assert root_story["subtasks"][0]["sequence_order"] == 1
+    assert root_story["subtasks"][0]["state"] == "CLOSED"
+
+    assert root_story["subtasks"][1]["issue_number"] == 456
+    assert root_story["subtasks"][1]["sequence_order"] == 2
+    assert root_story["subtasks"][1]["state"] == "OPEN"
+    assert root_story["subtasks"][1]["pr_status"] == "OPEN"
+    assert root_story["subtasks"][1]["pr_ci_details"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_fully_closed_trees_are_hidden(tmp_path: Path):
+    """
+    Scenario: Fully closed trees are hidden
+      Given parent story #500 and all its children are "closed"
+      When get_active_sdlc_hierarchy() is called
+      Then story #500 and its children must not be returned
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Story #500 and all its children are CLOSED
+    items = [
+        {
+            "issue_number": 500,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "Story: Legacy Migration",
+            "state": "CLOSED",
+            "parent_issue_id": None,
+        },
+        {
+            "issue_number": 501,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Subtask: DB Schema",
+            "state": "CLOSED",
+            "parent_issue_id": 500,
+        },
+        {
+            "issue_number": 502,
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "title": "Subtask: Seed Data",
+            "state": "MERGED",
+            "parent_issue_id": 500,
+        },
+        # Story #600 is an ACTIVE story with an open subtask
+        {
+            "issue_number": 600,
+            "item_type": "STORY",
+            "sequence_order": 2,
+            "title": "Story: Active Feature",
+            "state": "OPEN",
+            "parent_issue_id": None,
+        },
+        {
+            "issue_number": 601,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Subtask: Implement Handler",
+            "state": "OPEN",
+            "parent_issue_id": 600,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    hierarchy = await manager.get_active_sdlc_hierarchy("graph-engineering")
+
+    # Story #500 is completely excluded, only Story #600 is returned
+    assert len(hierarchy) == 1
+    assert hierarchy[0]["issue_number"] == 600
+    assert len(hierarchy[0]["subtasks"]) == 1
+    assert hierarchy[0]["subtasks"][0]["issue_number"] == 601
+
+
+@pytest.mark.asyncio
+async def test_sdlc_hierarchy_edge_cases_and_standalone_items(tmp_path: Path):
+    """
+    Tests edge cases:
+    - Empty project returns empty list.
+    - Standalone open issues (without children or parent) are returned.
+    - Standalone closed issues (without children or parent) are hidden.
+    - Orphaned subtask with non-existent parent_issue_id is returned if open.
+    - Multi-project hierarchy isolation.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 1. Empty project
+    assert await manager.get_active_sdlc_hierarchy("empty-project") == []
+
+    # 2. Standalone open & closed items
+    items = [
+        {
+            "issue_number": 10,
+            "title": "Standalone Open Bug",
+            "state": "OPEN",
+            "parent_issue_id": None,
+        },
+        {
+            "issue_number": 20,
+            "title": "Standalone Closed Bug",
+            "state": "CLOSED",
+            "parent_issue_id": None,
+        },
+        {
+            "issue_number": 30,
+            "title": "Orphaned Open Subtask",
+            "state": "OPEN",
+            "parent_issue_id": 9999,  # Parent not present in DB
+        },
+    ]
+    await manager.sync_project_sdlc_items("proj_a", items)
+
+    hierarchy_a = await manager.get_active_sdlc_hierarchy("proj_a")
+    assert len(hierarchy_a) == 2
+    ids = [h["issue_number"] for h in hierarchy_a]
+    assert 10 in ids
+    assert 30 in ids
+    assert 20 not in ids
+
+    # 3. Multi-project isolation
+    items_b = [
+        {
+            "issue_number": 100,
+            "title": "Project B Story",
+            "state": "OPEN",
+            "parent_issue_id": None,
+        }
+    ]
+    await manager.sync_project_sdlc_items("proj_b", items_b)
+
+    hierarchy_b = await manager.get_active_sdlc_hierarchy("proj_b")
+    assert len(hierarchy_b) == 1
+    assert hierarchy_b[0]["issue_number"] == 100
 
 
 @pytest.mark.asyncio

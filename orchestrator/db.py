@@ -106,6 +106,8 @@ class StateManager:
                     state TEXT NOT NULL,
                     labels TEXT,
                     linked_pr INTEGER,
+                    pr_status TEXT,
+                    pr_ci_details TEXT,
                     created_at REAL,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (project_name, issue_number)
@@ -123,6 +125,10 @@ class StateManager:
                     await db.execute("ALTER TABLE sdlc_items ADD COLUMN sequence_order INTEGER DEFAULT 0;")
                 if "created_at" not in cols:
                     await db.execute("ALTER TABLE sdlc_items ADD COLUMN created_at REAL DEFAULT NULL;")
+                if "pr_status" not in cols:
+                    await db.execute("ALTER TABLE sdlc_items ADD COLUMN pr_status TEXT DEFAULT NULL;")
+                if "pr_ci_details" not in cols:
+                    await db.execute("ALTER TABLE sdlc_items ADD COLUMN pr_ci_details TEXT DEFAULT NULL;")
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sdlc_parent ON sdlc_items(project_name, parent_issue_id);"
             )
@@ -799,11 +805,15 @@ class StateManager:
                 state = str(item.get("state") or item.get("status") or "OPEN")
                 raw_labels = item.get("labels")
                 if isinstance(raw_labels, (list, tuple, set)):
-                    labels_str = ", ".join(str(l) for l in raw_labels)
+                    labels_str = ", ".join(str(lbl) for lbl in raw_labels)
                 else:
                     labels_str = str(raw_labels) if raw_labels is not None else ""
                 linked_pr = item.get("linked_pr")
                 linked_pr_val = int(linked_pr) if linked_pr is not None else None
+                pr_status = item.get("pr_status")
+                pr_status_val = str(pr_status) if pr_status is not None else None
+                pr_ci_details = item.get("pr_ci_details")
+                pr_ci_details_val = str(pr_ci_details) if pr_ci_details is not None else None
                 updated_at = float(item.get("updated_at", now))
                 raw_created = item.get("created_at")
                 created_at_val = float(raw_created) if raw_created is not None else updated_at
@@ -814,8 +824,11 @@ class StateManager:
 
                 await db.execute(
                     """
-                    INSERT INTO sdlc_items (project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO sdlc_items (
+                        project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                        title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_name, issue_number) DO UPDATE SET
                         parent_issue_id = COALESCE(excluded.parent_issue_id, sdlc_items.parent_issue_id),
                         item_type = excluded.item_type,
@@ -824,10 +837,12 @@ class StateManager:
                         state = excluded.state,
                         labels = excluded.labels,
                         linked_pr = excluded.linked_pr,
+                        pr_status = COALESCE(excluded.pr_status, sdlc_items.pr_status),
+                        pr_ci_details = COALESCE(excluded.pr_ci_details, sdlc_items.pr_ci_details),
                         created_at = COALESCE(sdlc_items.created_at, excluded.created_at),
                         updated_at = excluded.updated_at
                     """,
-                    (project_name, issue_number, parent_val, item_type, sequence_order, title, state, labels_str, linked_pr_val, created_at_val, updated_at),
+                    (project_name, issue_number, parent_val, item_type, sequence_order, title, state, labels_str, linked_pr_val, pr_status_val, pr_ci_details_val, created_at_val, updated_at),
                 )
             await db.commit()
 
@@ -841,7 +856,8 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ?
                 ORDER BY issue_number ASC
@@ -857,6 +873,86 @@ class StateManager:
                 items.append(r)
             return items
 
+    async def get_active_sdlc_hierarchy(self, project_name: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves active SDLC hierarchy for a project grouped by parent story with smart visibility.
+        - Queries all sdlc_items for the project.
+        - Groups subtasks under parent_issue_id in Python.
+        - Smart Visibility: a story tree is excluded ONLY when the parent AND 100% of its
+          child subtasks are CLOSED/MERGED. If any child is open, the parent is retained as root.
+        - Subtasks are ordered by sequence_order ASC, issue_number ASC.
+        """
+        def _is_closed(state: Optional[str]) -> bool:
+            if not state:
+                return False
+            s = str(state).strip().upper()
+            return s in ("CLOSED", "MERGED", "DONE", "STATUS:CLOSED", "STATUS:MERGED", "STATUS:DONE")
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
+                FROM sdlc_items
+                WHERE project_name = ?
+                ORDER BY sequence_order ASC, issue_number ASC
+                """,
+                (project_name,),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return []
+
+            items = []
+            for row in rows:
+                r = dict(row)
+                if "status" not in r:
+                    r["status"] = r.get("state")
+                r["subtasks"] = []
+                r["children"] = []
+                items.append(r)
+
+            items_by_id = {item["issue_number"]: item for item in items}
+            roots: List[Dict[str, Any]] = []
+            children_by_parent: Dict[int, List[Dict[str, Any]]] = {}
+
+            for item in items:
+                parent_id = item.get("parent_issue_id")
+                if parent_id is not None and parent_id in items_by_id and parent_id != item["issue_number"]:
+                    children_by_parent.setdefault(parent_id, []).append(item)
+                else:
+                    roots.append(item)
+
+            # Assign sorted children to roots
+            for root in roots:
+                r_id = root["issue_number"]
+                subtasks = children_by_parent.get(r_id, [])
+                subtasks.sort(key=lambda s: (s.get("sequence_order", 0) or 0, s.get("issue_number", 0) or 0))
+                root["subtasks"] = subtasks
+                root["children"] = subtasks
+
+            # Smart Visibility Filter
+            active_hierarchy: List[Dict[str, Any]] = []
+            for root in roots:
+                root_closed = _is_closed(root.get("state"))
+                subtasks = root.get("subtasks", [])
+                if subtasks:
+                    all_subtasks_closed = all(_is_closed(c.get("state")) for c in subtasks)
+                else:
+                    all_subtasks_closed = True
+
+                # Exclude ONLY when parent AND 100% of children are closed
+                if root_closed and all_subtasks_closed:
+                    continue
+
+                active_hierarchy.append(root)
+
+            active_hierarchy.sort(key=lambda r: (r.get("sequence_order", 0) or 0, r.get("issue_number", 0) or 0))
+            return active_hierarchy
+
     async def get_active_story(self, project_name: str) -> Optional[Dict[str, Any]]:
         """
         Retrieves the active open/in-progress story for a project if one exists.
@@ -867,7 +963,8 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND item_type = 'STORY' AND state != 'CLOSED' AND state != 'MERGED'
                   AND UPPER(state) NOT IN ('PLANNED', 'STATUS:PLANNED')
@@ -894,7 +991,8 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND parent_issue_id = ?
                 ORDER BY sequence_order ASC, issue_number ASC
@@ -920,7 +1018,8 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND parent_issue_id = ? AND state != 'CLOSED' AND state != 'MERGED'
                   AND (labels LIKE '%queued%' OR labels LIKE '%status:queued%')
@@ -966,7 +1065,8 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
+                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND (UPPER(state) = 'PLANNED' OR UPPER(state) = 'STATUS:PLANNED')
                 ORDER BY COALESCE(created_at, updated_at) ASC, sequence_order ASC, issue_number ASC
