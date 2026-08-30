@@ -210,7 +210,8 @@ async def _run_single_pass(
     state_manager = StateManager(config.settings.resolved_db_path)
     await state_manager.init_db()
 
-    # Clean any orphaned or expired locks
+    # Clean any orphaned or expired locks and clear stale stop requests for manual one-shot runs
+    await state_manager.clear_stop_request()
     await state_manager.cleanup_orphaned_running_jobs()
     cleaned = await state_manager.cleanup_expired_locks()
     if cleaned > 0:
