@@ -126,9 +126,10 @@ graph TD
    - Strictly isolated from concrete execution logic, database calls, and network I/O.
    - Provides pure path normalization, environment resolution functions (`resolve_path`), and bounded log streaming (`TextualLogHandler`).
 
-2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
+2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`, `orchestrator/worktree.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
    - Implements multi-window rolling quota calculations, velocity tracking, runway gating, and replenishment ETA projections (`QuotaManager`), decoupled from persistence through the typed `TokenUsageReader` protocol.
+   - Manages creation, synchronization, safe removal, and pruning of ephemeral git worktrees per node and project with serial execution fallback (`WorktreeManager`).
    - Implements asynchronous process execution, process tree lifecycle, ANSI-sanitized log streaming, and harness-level telemetry anomaly event production (`AsyncHarnessAdapter` writing retry/timeout anomalies to `anomaly_events`).
    - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_all_open_issues`, `fetch_open_prs`, `sync_repository_labels`).
    - Manages dynamic file modification inspection (`SourceWatcher`).
@@ -178,6 +179,7 @@ graph-engineering/
 │   ├── poller.py                    # Zero-token GitHub CLI/GraphQL query abstraction
 │   ├── quota.py                     # Multi-window rolling token quota, burn velocity & replenishment ETA engine
 │   ├── reloader.py                  # Hot-reloading watcher and module re-importer
+│   ├── worktree.py                  # Ephemeral git worktree manager and lifecycle fallback
 │   ├── ui/                          # Presentation & TUI dashboard package
 │   │   ├── __init__.py              # Subpackage exports
 │   │   ├── dashboard.py             # DashboardApp Textual TUI with DataTable & RichLog
@@ -205,6 +207,7 @@ graph-engineering/
 │   ├── test_reloader.py             # Hot reloading and source watcher tests
 │   ├── test_stop.py                 # Graceful daemon shutdown tests
 │   ├── test_supervisor_po.py        # Supervisor PO-proxy evaluation tests
+│   ├── test_worktrees.py            # WorktreeManager lifecycle, sync, and fallback tests
 │   └── __init__.py                  # Test package root
 ├── pyproject.toml                   # PEP 517/PEP 621 build specification (Hatchling)
 ├── CHANGELOG.md                     # Keep a Changelog historical log
