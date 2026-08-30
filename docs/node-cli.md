@@ -26,7 +26,7 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
 │ Active SDLC Items (alpha)                        │ [ Logs ]  Alerts (24h)                          │
 │ ID    Title                   Status   PR        │ 14:52:08 [INFO] Daemon started                  │
 │ #27   feat(ui): dashboard     dev      #32       │ 14:52:10 [INFO] [alpha] DevTest: Starting TDD   │
-└──────────────────────────────────────────────────┴─────────────────────────────── Q: Quit  R: Refresh ┘
+└──────────────────────────────────────────────────┴───── Q: Quit  R: Refresh  Space: Toggle Auto-Scroll  Ctrl+L: Clear Logs ┘
 ```
 
 ### Key UI Capabilities:
@@ -36,13 +36,15 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
 2. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
    - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite.
-   - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`) and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
+   - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`), quota limits (`HarnessQuotaWidget`), and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
 3. **Reactive Project Selection**:
    - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.
-4. **Filtered & Bounded Log Stream (`RichLog`)**:
-   - Captures core root `orchestrator` daemon events via `TextualLogHandler`.
+4. **Filtered & Append-Only Bounded Log Stream (`RichLog`)**:
+   - Captures core root `orchestrator` daemon events via `TextualLogHandler` and live agent subprocess outputs.
    - Backed by a bounded `collections.deque(maxlen=1000)` buffer to prevent memory growth or UI freezes.
    - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
+   - **Persistent Append-Only Stream**: Historical log entries persist indefinitely across 2.0s table refresh ticks without calling `clear()`.
+   - **Interactive Auto-Scroll & Clear Controls**: Pressing `Space` toggles auto-scrolling (`[Auto-Scroll: ON/OFF]`) allowing the operator to freeze scroll position to inspect historical traces, while `Ctrl+L` manually clears the buffer on demand.
 5. **Native Async Concurrency**:
    - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
    - Per-project worker loops execute concurrently in the same loop via `asyncio.gather()` / `asyncio.TaskGroup` with zero cross-thread SQLite collisions.
