@@ -295,6 +295,7 @@ async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
         sdlc_idx_names = [idx[1] for idx in sdlc_indexes]
         assert "idx_sdlc_parent" in sdlc_idx_names
         assert "idx_sdlc_lookahead" in sdlc_idx_names
+        assert "idx_sdlc_lock" in sdlc_idx_names
 
         # Check anomaly_events table
         cursor = await db.execute("PRAGMA table_info(anomaly_events);")
@@ -1312,6 +1313,435 @@ async def test_planned_stories_lookahead_edge_cases_and_multi_project_isolation(
     assert await manager.get_oldest_planned_story("proj1") is None
     # proj2 unchanged
     assert await manager.count_planned_stories("proj2") == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_story_lock_prevents_cross_story_pickup(tmp_path: Path):
+    """
+    Scenario: Strict Story Lock Prevents Cross-Story Pickup
+      Given SQLite contains active Story A (#90) with subtasks #93 and #94 in "ready-for-dev"
+      And Story B (#95) with subtask #98 in "ready-for-dev"
+      When DevTest queries get_next_devtest_task
+      Then the query must return ONLY subtask #93
+      And subtask #98 must be completely ignored until Story A is closed.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "title": "Story A: Payment Integration",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1: Stripe API Client",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 94,
+            "title": "Subtask A2: Webhook Handler",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 95,
+            "title": "Story B: User Profiles",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 98,
+            "title": "Subtask B1: Avatar Upload",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 95,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # 1. First query: Story A is locked, lowest sequential subtask #93 is returned
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task == 93
+
+    # 2. Complete subtask #93 -> next sequential subtask #94 under Story A is returned
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 93, "state": "CLOSED", "labels": "dev-implemented"}],
+    )
+    task2 = await manager.get_next_devtest_task("graph-engineering")
+    assert task2 == 94
+
+    # 3. Complete subtask #94 and close Story A -> Story B unlocks subtask #98
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [
+            {"issue_number": 94, "state": "CLOSED", "labels": "dev-implemented"},
+            {"issue_number": 90, "state": "CLOSED", "labels": "dev-implemented"},
+        ],
+    )
+    task3 = await manager.get_next_devtest_task("graph-engineering")
+    assert task3 == 98
+
+
+@pytest.mark.asyncio
+async def test_blocked_pipeline_halts_without_skipping_stories(tmp_path: Path):
+    """
+    Scenario: Blocked Pipeline Halts Without Skipping Stories
+      Given active Story A is locked
+      And its next subtask #93 has transitioned to "status:blocked" or "orchestration-failed"
+      When DevTest queries get_next_devtest_task
+      Then the query must return None
+      And it must NOT skip or dispatch subtasks from Story B.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "title": "Story A: Data Migration",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1: Schema Migration",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["status:blocked", "ready-for-dev"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 94,
+            "title": "Subtask A2: Data Seeder",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 95,
+            "title": "Story B: Auth Engine",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 98,
+            "title": "Subtask B1: Token Generator",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 95,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # Subtask #93 is blocked -> get_next_devtest_task returns None (no skip to #94 or Story B #98)
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task is None
+
+    # Test with orchestration-failed label
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 93, "labels": ["orchestration-failed"]}],
+    )
+    task_failed = await manager.get_next_devtest_task("graph-engineering")
+    assert task_failed is None
+
+
+@pytest.mark.asyncio
+async def test_autonomous_story_promotion_after_full_completion(tmp_path: Path):
+    """
+    Scenario: Autonomous Story Promotion After Full Completion
+      Given 100% of subtasks for Story A are closed and merged
+      When the query re-evaluates ActiveStory
+      Then it must promote the oldest planned Story B to active status
+      And unlock Story B's first subtask #98 as the next candidate.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    base_time = 1700000000.0
+    items = [
+        # Story A and its subtasks are 100% closed/merged
+        {
+            "issue_number": 90,
+            "title": "Story A: Completed Story",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+            "created_at": base_time,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "CLOSED",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 94,
+            "title": "Subtask A2",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "MERGED",
+            "sequence_order": 2,
+        },
+        # Story B is PLANNED with queued subtask #98
+        {
+            "issue_number": 95,
+            "title": "Story B: Next Planned Feature",
+            "item_type": "STORY",
+            "state": "PLANNED",
+            "sequence_order": 2,
+            "created_at": base_time + 100.0,
+        },
+        {
+            "issue_number": 98,
+            "title": "Subtask B1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 95,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # Re-evaluates ActiveStory: Story A is completed -> promotes Story B and unlocks #98
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task == 98
+
+    # Verify Story B was promoted to ACTIVE in SQLite
+    sdlc_items = await manager.get_sdlc_items("graph-engineering")
+    story_b = next(s for s in sdlc_items if s["issue_number"] == 95)
+    assert story_b["state"] == "ACTIVE"
+
+    # Verify Subtask #98 was unlocked with ready-for-dev
+    sub_98 = next(s for s in sdlc_items if s["issue_number"] == 98)
+    assert "ready-for-dev" in sub_98["labels"]
+    assert sub_98["state"] == "OPEN"
+
+
+@pytest.mark.asyncio
+async def test_standalone_task_fallback_and_priority(tmp_path: Path):
+    """
+    Scenario: Standalone Task Priority Fallback
+      Given no active story is locked
+      And SQLite contains Standalone Task #40 with "ready-for-dev"
+      And Planned Story #50 with subtask #51 ("queued")
+      When DevTest queries get_next_devtest_task
+      Then Standalone Task #40 must be returned first
+      And Story #50 must remain in PLANNED state.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 40,
+            "title": "Standalone Bug: Fix Memory Leak",
+            "item_type": "STANDALONE",
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 50,
+            "title": "Story: Planned Work",
+            "item_type": "STORY",
+            "state": "PLANNED",
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 51,
+            "title": "Subtask 1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 50,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task == 40
+
+    # Planned story #50 was not prematurely promoted
+    assert await manager.count_planned_stories("graph-engineering") == 1
+
+    # After closing task #40, planned story #50 is promoted and returns #51
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 40, "state": "CLOSED"}],
+    )
+    next_task = await manager.get_next_devtest_task("graph-engineering")
+    assert next_task == 51
+    assert await manager.count_planned_stories("graph-engineering") == 0
+
+
+@pytest.mark.asyncio
+async def test_active_story_takes_precedence_over_standalone_task(tmp_path: Path):
+    """
+    Scenario: Active Story Takes Precedence Over Standalone Task
+      Given Active Story A (#90) has subtask #93 in "ready-for-dev"
+      And Standalone Task #40 is also in "ready-for-dev"
+      When DevTest queries get_next_devtest_task
+      Then the query must return Subtask #93 (Standalone Task #40 is ignored while Story A is active).
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "title": "Story A",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 40,
+            "title": "Standalone Bug",
+            "item_type": "STANDALONE",
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 0,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task == 93
+
+
+@pytest.mark.asyncio
+async def test_active_story_next_subtask_in_progress_holds_lock(tmp_path: Path):
+    """
+    Scenario: Active Story Next Subtask In Progress Holds Lock
+      Given Active Story A (#90) has subtask #93 in state "IN_PROGRESS"
+      And subtask #94 is in "ready-for-dev"
+      And Story B (#95) has subtask #98 in "ready-for-dev"
+      When DevTest queries get_next_devtest_task
+      Then the query must return None (lock is held, no out-of-order execution, no skip to Story B).
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "title": "Story A",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "IN_PROGRESS",
+            "labels": ["in-progress"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 94,
+            "title": "Subtask A2",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 95,
+            "title": "Story B",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 98,
+            "title": "Subtask B1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 95,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task is None
+
+
+@pytest.mark.asyncio
+async def test_get_next_devtest_task_multi_project_isolation(tmp_path: Path):
+    """
+    Scenario: Multi-Project Isolation for get_next_devtest_task
+      Given Project A has Story #90 with subtask #93
+      And Project B has Story #200 with subtask #201
+      When get_next_devtest_task is queried per project
+      Then each project strictly resolves its own locked tasks.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items_a = [
+        {"issue_number": 90, "item_type": "STORY", "state": "OPEN"},
+        {"issue_number": 93, "item_type": "SUBTASK", "parent_issue_id": 90, "state": "OPEN", "labels": "ready-for-dev"},
+    ]
+    items_b = [
+        {"issue_number": 200, "item_type": "STORY", "state": "OPEN"},
+        {"issue_number": 201, "item_type": "SUBTASK", "parent_issue_id": 200, "state": "OPEN", "labels": "ready-for-dev"},
+    ]
+    await manager.sync_project_sdlc_items("proj_a", items_a)
+    await manager.sync_project_sdlc_items("proj_b", items_b)
+
+    assert await manager.get_next_devtest_task("proj_a") == 93
+    assert await manager.get_next_devtest_task("proj_b") == 201
+    assert await manager.get_next_devtest_task("nonexistent") is None
 
 
 

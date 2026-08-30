@@ -113,7 +113,7 @@ LIMIT 1;
 - **Label:** `needs-triage`
 
 ## 🔨 Subtasks
-- [ ] feat(db): StateManager.get_next_devtest_task CTE query with strict Story Lock and standalone fallback
+- [x] feat(db): StateManager.get_next_devtest_task CTE query with strict Story Lock and standalone fallback
 - [ ] feat(devtest): deterministic locked issue dispatch in run_devtest_node Phase 3
 - [ ] feat(logging, ui): terminal log broadcasting and SDLC widget visual indicator for active Story Lock
 - [ ] test(db, devtest): unit and integration tests for CTE story locking, blocked stories, and non-contention
