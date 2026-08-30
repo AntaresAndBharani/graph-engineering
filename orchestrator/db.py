@@ -1098,6 +1098,45 @@ class StateManager:
             await db.commit()
             return updated
 
+    async def get_active_locked_story_id(self, project_name: str) -> Optional[int]:
+        """
+        Resolves the single active locked parent story ID for a project using CTE logic.
+        Returns the issue_number of the active locked story if one exists, else None.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            active_story_query = """
+                WITH ActiveStory AS (
+                    SELECT issue_number AS active_story_id
+                    FROM sdlc_items
+                    WHERE project_name = ?
+                      AND UPPER(item_type) = 'STORY'
+                      AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
+                      AND (
+                          EXISTS (
+                              SELECT 1 FROM sdlc_items sub
+                              WHERE sub.project_name = sdlc_items.project_name
+                                AND sub.parent_issue_id = sdlc_items.issue_number
+                                AND UPPER(sub.state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                          )
+                          OR NOT EXISTS (
+                              SELECT 1 FROM sdlc_items sub2
+                              WHERE sub2.project_name = sdlc_items.project_name
+                                AND sub2.parent_issue_id = sdlc_items.issue_number
+                          )
+                      )
+                    ORDER BY sequence_order ASC, issue_number ASC
+                    LIMIT 1
+                )
+                SELECT active_story_id FROM ActiveStory;
+            """
+            cursor = await db.execute(active_story_query, (project_name,))
+            row = await cursor.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+
     async def get_next_devtest_task(self, project_name: str) -> Optional[int]:
         """
         Deterministic CTE query that resolves the single active locked parent story
@@ -1141,40 +1180,12 @@ class StateManager:
                     return True
             return False
 
+        active_story_id = await self.get_active_locked_story_id(project_name)
+
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA busy_timeout=5000;")
-
-            # 1. CTE: Resolve single active locked parent story
-            active_story_query = """
-                WITH ActiveStory AS (
-                    SELECT issue_number AS active_story_id
-                    FROM sdlc_items
-                    WHERE project_name = ?
-                      AND UPPER(item_type) = 'STORY'
-                      AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
-                      AND (
-                          EXISTS (
-                              SELECT 1 FROM sdlc_items sub
-                              WHERE sub.project_name = sdlc_items.project_name
-                                AND sub.parent_issue_id = sdlc_items.issue_number
-                                AND UPPER(sub.state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
-                          )
-                          OR NOT EXISTS (
-                              SELECT 1 FROM sdlc_items sub2
-                              WHERE sub2.project_name = sdlc_items.project_name
-                                AND sub2.parent_issue_id = sdlc_items.issue_number
-                          )
-                      )
-                    ORDER BY sequence_order ASC, issue_number ASC
-                    LIMIT 1
-                )
-                SELECT active_story_id FROM ActiveStory;
-            """
-            cursor = await db.execute(active_story_query, (project_name,))
-            row = await cursor.fetchone()
-            active_story_id = int(row[0]) if row and row[0] is not None else None
 
             if active_story_id is not None:
                 # Active Story Lock is held! Query next sequential uncompleted child subtask

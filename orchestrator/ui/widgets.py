@@ -181,6 +181,11 @@ class SDLCProgressWidget(DataTable):
             except Exception:
                 hierarchy = []
 
+            try:
+                active_locked_id = await self.state_manager.get_active_locked_story_id(self.project_name)
+            except Exception:
+                active_locked_id = None
+
             if not hierarchy:
                 _apply_keyed_diff(
                     self,
@@ -196,7 +201,18 @@ class SDLCProgressWidget(DataTable):
 
                 raw_labels = root.get("labels")
                 raw_state = root.get("state") or root.get("status")
-                status_label = str(raw_labels) if raw_labels else (str(raw_state) if raw_state else "-")
+                base_status = str(raw_labels) if raw_labels else (str(raw_state) if raw_state else "-")
+
+                is_locked = (
+                    active_locked_id is not None
+                    and root_num is not None
+                    and str(root_num).isdigit()
+                    and int(root_num) == int(active_locked_id)
+                )
+                if is_locked:
+                    status_label = f"[LOCKED] {base_status}" if base_status != "-" else "[LOCKED]"
+                else:
+                    status_label = base_status
 
                 linked_pr = root.get("linked_pr")
                 pr_status = root.get("pr_status")

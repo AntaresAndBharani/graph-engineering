@@ -750,5 +750,17 @@ def test_scenario_issue_106_node_scoped_disk_tail_fallback(tmp_path: Path):
     assert not any("DEV" in line for line in arch_results)
 
 
+def test_format_story_lock_dispatch_log():
+    """Verifies format_story_lock_dispatch_log formats expected structured message."""
+    from orchestrator.logging import format_story_lock_dispatch_log
+
+    msg = format_story_lock_dispatch_log(parent_id=90, subtask_id=93)
+    assert msg == "Story Lock Active: Parent #90. Dispatched Subtask #93"
+
+    msg_with_proj = format_story_lock_dispatch_log(parent_id=90, subtask_id=93, project_name="graph-engineering")
+    assert msg_with_proj == "[graph-engineering:devtest] Story Lock Active: Parent #90. Dispatched Subtask #93"
+
+
+
 
 
