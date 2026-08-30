@@ -33,10 +33,10 @@ flowchart TD
 
 ## 🔑 Operational Capabilities
 
-1. **Deterministic Git Safety Pre-Flight**:
-   - Verifies the local working directory is clean (`git status --porcelain`).
-   - Checks out the default branch (`main`) and pulls the latest remote commits (`git pull origin main`).
-   - Aborts safely with an alert if uncommitted changes or dirty working trees are detected.
+1. **Deterministic Git Safety Pre-Flight & Worktree Isolation**:
+   - Verifies that `local_path` is a valid git repository whose remote origin matches `project.repo`.
+   - Operates in its dedicated ephemeral git worktree (`.graph/worktrees/devtest_<project>`) managed via `WorktreeManager`, ensuring parallel non-destructive execution without index locking collisions.
+   - Cleans the worktree, checks out `main`, and pulls latest upstream commits prior to execution.
 
 2. **Agnostic Harness & Local OAuth Execution**:
    - Executes via the configured harness adapter (`antigravity`, `claude`, or `devin`).
@@ -48,12 +48,18 @@ flowchart TD
    - If remote CI fails, DevTest tags the PR with **`needs-refactor`** with details on failing checks for autonomous remediation.
    - If manual review is explicitly configured (`auto_merge_approved: false`), attaches **`needs-architect-review`**.
 
-4. **Context-Aware Conflict Resolution (Blackboard Pattern)**:
+4. **Sequential Subtask Progression & Autonomous Planned Story Promotion**:
+   - Checks off completed subtasks in the parent story checklist.
+   - Unlocks the next sequential child subtask (transitions label from `queued` to `ready-for-dev`).
+   - When 100% of child subtasks are completed and merged, closes the parent story with label `dev-implemented`.
+   - Automatically queries SQLite for the oldest planned story (`get_oldest_planned_story`), promotes it to `ACTIVE` (`promote_planned_story`), updates GitHub labels from `planned` to `architect-processed`, and promotes its first child subtask from `queued` to `ready-for-dev`.
+
+5. **Context-Aware Conflict Resolution (Blackboard Pattern)**:
    - Queries the local SQLite Blackboard (`pr_artifacts` table) before execution.
    - If the task is flagged with `APPROVED_WITH_CONFLICT`, DevTest skips full code rewrites and focuses exclusively on reconciling git merge conflicts against `origin/main` without modifying pre-approved architectural contracts.
    - Upon a clean push, marks the PR directly with `architect-approved`, avoiding duplicate review passes.
 
-5. **Self-Healing & Error Isolation**:
+6. **Self-Healing & Error Isolation**:
    - If the build or tests cannot be resolved, the issue is labeled **`orchestration-failed`** or **`needs-po-review`** with a direct pointer to the execution log in `~/.config/orchestrator/logs/`.
 
 ---

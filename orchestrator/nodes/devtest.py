@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from rich.console import Console
 
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
@@ -16,6 +18,10 @@ from orchestrator.logging import get_project_log_path
 from orchestrator import poller
 from orchestrator.nodes.reviewer import check_pr_ci_status
 from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
+from orchestrator.worktree import WorktreeManager
+
+_logger = logging.getLogger(__name__)
+console = Console()
 
 
 async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool, str]:
@@ -132,17 +138,18 @@ async def _remediate_refactor_pr(
     if not branch_name:
         branch_name = f"feat/issue-{pr_number}"
 
-    # 2. Pre-flight checkout of the PR branch
+    # 2. Resolve Worktree & Pre-flight checkout of the PR branch
+    exec_cwd = await WorktreeManager.ensure_worktree(project, "devtest")
     try:
-        p1 = await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        p1 = await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await p1.wait()
-        p2 = await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        p2 = await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await p2.wait()
-        p3 = await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        p3 = await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await p3.wait()
-        p4 = await asyncio.create_subprocess_exec("git", "checkout", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        p4 = await asyncio.create_subprocess_exec("git", "checkout", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await p4.wait()
-        p5 = await asyncio.create_subprocess_exec("git", "pull", "origin", branch_name, cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        p5 = await asyncio.create_subprocess_exec("git", "pull", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await p5.wait()
     except Exception as e:
         await state_manager.fail_job(
@@ -180,7 +187,7 @@ async def _remediate_refactor_pr(
     try:
         exit_code = await adapter.execute(
             prompt=prompt,
-            cwd=project.local_path,
+            cwd=exec_cwd,
             log_file=log_file,
             model=node_cfg.model,
             effort=node_cfg.effort,
@@ -201,19 +208,19 @@ async def _remediate_refactor_pr(
     # 4. Check git status and push if uncommitted changes remain
     diff_proc = await asyncio.create_subprocess_exec(
         "git", "status", "--porcelain",
-        cwd=str(project.local_path),
+        cwd=str(exec_cwd),
         stdout=asyncio.subprocess.PIPE,
     )
     diff_out, _ = await diff_proc.communicate()
     if diff_out.strip():
-        pa = await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(project.local_path))
+        pa = await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(exec_cwd))
         await pa.wait()
         pc = await asyncio.create_subprocess_exec(
             "git", "commit", "-m", f"refactor: address architect feedback for PR #{pr_number}",
-            cwd=str(project.local_path),
+            cwd=str(exec_cwd),
         )
         await pc.wait()
-        pp = await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(project.local_path))
+        pp = await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(exec_cwd))
         await pp.wait()
 
     # 5. E2E CI Verification / Auto-Merge on Remediated PR
@@ -425,7 +432,7 @@ async def _advance_parent_and_unlock_next_subtask(
         )
         await p_comment.wait()
     else:
-        # Check if 100% of all children are now CLOSED
+            # Check if 100% of all children are now CLOSED
         all_closed = all(str(c.get("state", "")).upper() == "CLOSED" for c in children)
         if all_closed:
             p_edit_parent = await asyncio.create_subprocess_exec(
@@ -433,6 +440,7 @@ async def _advance_parent_and_unlock_next_subtask(
                 "--repo", project.repo,
                 "--remove-label", "architect-processed",
                 "--remove-label", "status:in-progress",
+                "--remove-label", "planned",
                 "--add-label", "dev-implemented",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -459,6 +467,136 @@ async def _advance_parent_and_unlock_next_subtask(
                     "item_type": "STORY",
                 }],
             )
+
+            # Autonomous Story Promotion on Completion
+            await _promote_next_planned_story(project, state_manager, parent_id)
+
+
+async def _promote_next_planned_story(
+    project: ProjectConfig,
+    state_manager: StateManager,
+    completed_story_id: int,
+) -> Optional[int]:
+    """
+    On completion of a story's final subtask, promotes the oldest planned story
+    into active status and unlocks its first queued subtask.
+    Logs: "[<project_name>|devtest] Story #<completed_story_id> complete. Activating planned Story #<next_story_id>."
+    """
+    oldest_planned = await state_manager.get_oldest_planned_story(project.name)
+    if not oldest_planned:
+        return None
+
+    next_story_id = int(oldest_planned["issue_number"])
+
+    # 1. Atomic promotion in SQLite
+    await state_manager.promote_planned_story(project.name, next_story_id, new_status="ACTIVE")
+
+    # 2. Log activation
+    log_msg = f"[{project.name}|devtest] Story #{completed_story_id} complete. Activating planned Story #{next_story_id}."
+    console.print(f"  [bold green]{log_msg}[/bold green]")
+    _logger.info(log_msg)
+
+    # 3. Update story and unlock first queued subtask on GitHub / StateManager
+    if shutil.which("gh"):
+        # Update parent story labels
+        try:
+            p_edit_story = await asyncio.create_subprocess_exec(
+                "gh", "issue", "edit", str(next_story_id),
+                "--repo", project.repo,
+                "--remove-label", "planned",
+                "--remove-label", "status:planned",
+                "--add-label", "architect-processed",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_edit_story.wait()
+        except Exception as e:
+            _logger.debug("Error editing promoted story #%s on GitHub: %s", next_story_id, e)
+
+        # Search for child subtasks
+        try:
+            proc_subtasks = await asyncio.create_subprocess_exec(
+                "gh", "issue", "list",
+                "--repo", project.repo,
+                "--search", f"#{next_story_id}",
+                "--state", "all",
+                "--json", "number,title,state,labels",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_st, _ = await proc_subtasks.communicate()
+            children = []
+            if proc_subtasks.returncode == 0 and stdout_st:
+                all_res = json.loads(stdout_st.decode("utf-8", errors="replace"))
+                children = [c for c in all_res if c.get("number") != next_story_id]
+
+            children.sort(key=lambda x: x.get("number", 0))
+
+            queued_children = []
+            for c in children:
+                c_state = str(c.get("state", "")).upper()
+                if c_state != "CLOSED":
+                    c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
+                    if "queued" in c_labels or "status:queued" in c_labels:
+                        queued_children.append(c)
+
+            if queued_children:
+                first_child = queued_children[0]
+                first_id = first_child["number"]
+                child_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in first_child.get("labels", [])]
+                queued_lbl = "status:queued" if "status:queued" in child_labels else "queued"
+                ready_lbl = "status:ready-for-dev" if queued_lbl == "status:queued" else "ready-for-dev"
+
+                p_unlock = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "edit", str(first_id),
+                    "--repo", project.repo,
+                    "--remove-label", queued_lbl,
+                    "--add-label", ready_lbl,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_unlock.wait()
+
+                p_comment = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "comment", str(next_story_id),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **DevTest Story Activation**: Story #{completed_story_id} completed. Activated Story #{next_story_id} and unlocked first subtask #{first_id} (`{ready_lbl}`).",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_comment.wait()
+
+                await state_manager.sync_project_sdlc_items(
+                    project.name,
+                    [{
+                        "issue_number": first_id,
+                        "title": first_child.get("title", f"Subtask #{first_id}"),
+                        "state": "OPEN",
+                        "labels": [ready_lbl],
+                        "parent_issue_id": next_story_id,
+                        "item_type": "SUBTASK",
+                    }],
+                )
+        except Exception as e:
+            _logger.debug("Error unlocking child subtask for story #%s: %s", next_story_id, e)
+    else:
+        # If gh is not available, check StateManager for next queued subtask to update locally
+        queued_sub = await state_manager.get_next_queued_subtask(project.name, next_story_id)
+        if queued_sub:
+            sub_id = queued_sub["issue_number"]
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": sub_id,
+                    "title": queued_sub.get("title", f"Subtask #{sub_id}"),
+                    "state": "OPEN",
+                    "labels": ["ready-for-dev"],
+                    "parent_issue_id": next_story_id,
+                    "item_type": "SUBTASK",
+                }],
+            )
+
+    return next_story_id
 
 
 async def _verify_and_auto_merge_pr(
@@ -865,18 +1003,18 @@ async def run_devtest_node(
         issue_id=issue_id,
     )
 
-    # 4. Pre-Flight Cleanup: wipe aborted AI artifacts and ensure clean workspace
-    from rich.console import Console
-    console = Console()
+    # 4. Resolve Worktree & Pre-Flight Cleanup: wipe aborted AI artifacts and ensure clean workspace
     console.print(f"\n  [bold blue]⚡ [{project.name}:devtest][/bold blue] [bold white]Implementing Subtask #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
     console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_prefix}{issue_id} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
     console.print(f"  [dim]• Scope: 3-Amigos TDD Development, Test Verification & PR Creation[/dim]")
 
+    exec_cwd = await WorktreeManager.ensure_worktree(project, "devtest")
+
     try:
-        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
-        await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
-        await (await asyncio.create_subprocess_exec("git", "checkout", "main", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
-        await (await asyncio.create_subprocess_exec("git", "pull", "origin", "main", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", "main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "pull", "origin", "main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
     except Exception as e:
         await state_manager.fail_job(
             issue_id=issue_id,
@@ -950,7 +1088,7 @@ async def run_devtest_node(
     )
     exit_code = await adapter.execute(
         prompt=prompt,
-        cwd=project.local_path,
+        cwd=exec_cwd,
         log_file=log_file,
         model=node_cfg.model,
         effort=node_cfg.effort,
@@ -1039,7 +1177,7 @@ async def run_devtest_node(
     # 7. Fallback: Check Git Diff (Did the model leave uncommitted code?)
     diff_proc = await asyncio.create_subprocess_exec(
         "git", "status", "--porcelain",
-        cwd=str(project.local_path),
+        cwd=str(exec_cwd),
         stdout=asyncio.subprocess.PIPE,
     )
     diff_out, _ = await diff_proc.communicate()
@@ -1063,12 +1201,12 @@ async def run_devtest_node(
     # 8. Branch, Commit, Push & PR Lifecycle (if uncommitted changes exist)
     created_pr_num = None
     try:
-        await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, cwd=str(project.local_path))).wait()
-        await (await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(project.local_path))).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, cwd=str(exec_cwd))).wait()
+        await (await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(exec_cwd))).wait()
         await (await asyncio.create_subprocess_exec(
-            "git", "commit", "-m", f"feat: implement #{issue_id} - {issue_title}", cwd=str(project.local_path)
+            "git", "commit", "-m", f"feat: implement #{issue_id} - {issue_title}", cwd=str(exec_cwd)
         )).wait()
-        await (await asyncio.create_subprocess_exec("git", "push", "-u", "origin", branch_name, cwd=str(project.local_path))).wait()
+        await (await asyncio.create_subprocess_exec("git", "push", "-u", "origin", branch_name, cwd=str(exec_cwd))).wait()
 
         if shutil.which("gh"):
             p_pr = await asyncio.create_subprocess_exec(
@@ -1077,7 +1215,7 @@ async def run_devtest_node(
                 "--title", f"feat: resolve #{issue_id} - {issue_title}",
                 "--body", f"Automated 3-Amigos DevTest implementation.\n\nCloses #{issue_id}",
                 "--label", output_label,
-                cwd=str(project.local_path),
+                cwd=str(exec_cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

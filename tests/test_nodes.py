@@ -641,6 +641,345 @@ async def test_reviewer_resolves_conflict_and_merges_immediately(tmp_path: Path,
     assert sdlc_items[0]["state"] == "MERGED"
 
 
+@pytest.mark.asyncio
+async def test_scenario_devtest_operates_in_its_own_worktree(tmp_path: Path, monkeypatch):
+    """
+    Scenario: DevTest operates in its own worktree
+      Given a project configured with local_path "/repo" and worktrees_enabled=True
+      When the DevTest node executes
+      Then it must operate in ".graph/worktrees/devtest_<project>" obtained via WorktreeManager
+      And it must not mutate the Architect node's working tree
+      And both nodes execute git operations without ".git/index.lock" collisions
+    """
+    from unittest.mock import AsyncMock
+    from orchestrator.nodes.devtest import run_devtest_node, verify_git_safety
+    from orchestrator.harness import AsyncHarnessAdapter
+    from orchestrator.worktree import WorktreeManager
+    import orchestrator.poller as poller_mod
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        worktrees_enabled=True,
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    config = GlobalConfig()
+
+    mock_issues = [{"number": 75, "title": "feat: worktree execution"}]
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "Safety verified.")))
+
+    expected_devtest_wt = (tmp_path / ".graph" / "worktrees" / "devtest_graph-engineering").resolve()
+    architect_wt = (tmp_path / ".graph" / "worktrees" / "architect_graph-engineering").resolve()
+
+    monkeypatch.setattr(
+        WorktreeManager,
+        "ensure_worktree",
+        AsyncMock(return_value=expected_devtest_wt),
+    )
+
+    executed_cwds = []
+
+    async def mock_execute(self, prompt, cwd=None, **kwargs):
+        executed_cwds.append(cwd)
+        return 0
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_execute)
+
+    class MockProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+        async def communicate(self):
+            return b"", b""
+
+    subprocess_cwds = []
+
+    async def mock_subprocess_exec(*cmd, **kw):
+        if "cwd" in kw:
+            subprocess_cwds.append(kw["cwd"])
+        mock_p = MockProc()
+        if "status" in cmd and "--porcelain" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"M file.py\n", b""))
+        elif "pr" in cmd and "create" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"https://github.com/AntaresAndBharani/graph-engineering/pull/75\n", b""))
+        else:
+            mock_p.communicate = AsyncMock(return_value=(b"", b""))
+        return mock_p
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_pr_ci_status", AsyncMock(return_value=("PASS", "100% green")))
+
+    ran, msg = await run_devtest_node(project, config, state_manager)
+    assert ran is True
+    assert len(executed_cwds) == 1
+    assert executed_cwds[0] == expected_devtest_wt
+    assert executed_cwds[0] != architect_wt
+    assert "devtest_graph-engineering" in str(executed_cwds[0])
+    # Verify git operations executed in the worktree directory
+    assert str(expected_devtest_wt) in subprocess_cwds
+
+
+@pytest.mark.asyncio
+async def test_scenario_autonomous_story_promotion_on_completion(tmp_path: Path, monkeypatch, caplog):
+    """
+    Scenario: Autonomous Story Promotion on Completion
+      Given DevTest completes and merges the final subtask of active Story #50
+      When DevTest closes Story #50 with label "dev-implemented"
+      And SQLite contains planned Story #60 with Subtasks #61 and #62
+      Then DevTest must call promote_planned_story to activate Story #60
+      And Subtask #61 must have label "queued" removed and "ready-for-dev" applied
+      And the orchestrator logs: "[graph-engineering|devtest] Story #50 complete. Activating planned Story #60."
+    """
+    import json
+    import logging
+    from unittest.mock import AsyncMock
+    from orchestrator.nodes.devtest import _advance_parent_and_unlock_next_subtask
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+    )
+
+    # Seed active Story #50 and child Subtasks #51, #52
+    items = [
+        {
+            "issue_number": 50,
+            "title": "Story #50: Core Pipeline",
+            "state": "OPEN",
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "labels": ["architect-processed"],
+        },
+        {
+            "issue_number": 51,
+            "parent_issue_id": 50,
+            "title": "Subtask #51",
+            "state": "CLOSED",
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 52,
+            "parent_issue_id": 50,
+            "title": "Subtask #52",
+            "state": "OPEN",
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+        },
+        # Seed planned Story #60 with Subtasks #61 and #62
+        {
+            "issue_number": 60,
+            "title": "Story #60: Planned Extensions",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "sequence_order": 2,
+            "labels": ["planned"],
+            "created_at": 1700000000.0,
+        },
+        {
+            "issue_number": 61,
+            "parent_issue_id": 60,
+            "title": "Subtask #61",
+            "state": "OPEN",
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "labels": ["queued"],
+        },
+        {
+            "issue_number": 62,
+            "parent_issue_id": 60,
+            "title": "Subtask #62",
+            "state": "OPEN",
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "labels": ["queued"],
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+    assert await state_manager.count_planned_stories("graph-engineering") == 1
+
+    subtask_52_data = {
+        "number": 52,
+        "title": "Subtask #52",
+        "body": "Acceptance criteria.\n\nParent: #50",
+        "labels": [{"name": "dev-implemented"}],
+    }
+    parent_50_data = {
+        "number": 50,
+        "title": "Story #50: Core Pipeline",
+        "body": "## Subtasks\n- [x] #51\n- [ ] #52\n",
+        "state": "OPEN",
+        "labels": [{"name": "architect-processed"}],
+    }
+    story_50_children = [
+        {"number": 51, "title": "Subtask #51", "state": "CLOSED", "labels": [{"name": "dev-implemented"}]},
+        {"number": 52, "title": "Subtask #52", "state": "CLOSED", "labels": [{"name": "dev-implemented"}]},
+    ]
+    story_60_children = [
+        {"number": 61, "title": "Subtask #61", "state": "OPEN", "labels": [{"name": "queued"}]},
+        {"number": 62, "title": "Subtask #62", "state": "OPEN", "labels": [{"name": "queued"}]},
+    ]
+
+    executed_cmds = []
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        executed_cmds.append(list(args))
+        cmd_str = " ".join(str(a) for a in args)
+        mock_p = AsyncMock()
+        mock_p.returncode = 0
+        mock_p.wait = AsyncMock(return_value=0)
+
+        if "issue view 52" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(subtask_52_data).encode("utf-8"), b""))
+        elif "issue view 50" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(parent_50_data).encode("utf-8"), b""))
+        elif "issue list" in cmd_str and "#50" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(story_50_children).encode("utf-8"), b""))
+        elif "issue list" in cmd_str and "#60" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(story_60_children).encode("utf-8"), b""))
+        else:
+            mock_p.communicate = AsyncMock(return_value=(b"", b""))
+        return mock_p
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+
+    with caplog.at_level(logging.INFO):
+        await _advance_parent_and_unlock_next_subtask(project, state_manager, 52)
+
+    # 1. Verify Story #50 was closed with dev-implemented
+    story_50_closed = any("issue" in c and "close" in c and "50" in c for c in executed_cmds)
+    assert story_50_closed is True
+
+    # 2. Verify planned Story #60 was promoted in SQLite
+    assert await state_manager.count_planned_stories("graph-engineering") == 0
+    sdlc_items = await state_manager.get_sdlc_items("graph-engineering")
+    story_60 = next(s for s in sdlc_items if s["issue_number"] == 60)
+    assert story_60["state"] == "ACTIVE"
+
+    # 3. Verify Subtask #61 had 'queued' removed and 'ready-for-dev' applied
+    subtask_61_unlocked = any(
+        "issue" in c and "edit" in c and "61" in c and "--add-label" in c and "ready-for-dev" in c
+        for c in executed_cmds
+    )
+    assert subtask_61_unlocked is True
+
+    # 4. Verify the exact log statement
+    expected_log = "[graph-engineering|devtest] Story #50 complete. Activating planned Story #60."
+    assert expected_log in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_scenario_no_planned_story_available(tmp_path: Path, monkeypatch):
+    """
+    Scenario: No planned story available
+      Given DevTest closes the final subtask of the active story
+      And SQLite contains no story in "PLANNED" state
+      Then DevTest completes normally without attempting promotion
+      And no error is raised
+    """
+    import json
+    from unittest.mock import AsyncMock
+    from orchestrator.nodes.devtest import _advance_parent_and_unlock_next_subtask
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+    )
+
+    # Only active Story #50, NO planned stories in SQLite
+    items = [
+        {
+            "issue_number": 50,
+            "title": "Story #50: Standalone Story",
+            "state": "OPEN",
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "labels": ["architect-processed"],
+        },
+        {
+            "issue_number": 51,
+            "parent_issue_id": 50,
+            "title": "Subtask #51",
+            "state": "OPEN",
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+    assert await state_manager.count_planned_stories("graph-engineering") == 0
+
+    subtask_51_data = {
+        "number": 51,
+        "title": "Subtask #51",
+        "body": "Acceptance criteria.\n\nParent: #50",
+        "labels": [{"name": "dev-implemented"}],
+    }
+    parent_50_data = {
+        "number": 50,
+        "title": "Story #50: Standalone Story",
+        "body": "## Subtasks\n- [ ] #51\n",
+        "state": "OPEN",
+        "labels": [{"name": "architect-processed"}],
+    }
+    story_50_children = [
+        {"number": 51, "title": "Subtask #51", "state": "CLOSED", "labels": [{"name": "dev-implemented"}]},
+    ]
+
+    executed_cmds = []
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        executed_cmds.append(list(args))
+        cmd_str = " ".join(str(a) for a in args)
+        mock_p = AsyncMock()
+        mock_p.returncode = 0
+        mock_p.wait = AsyncMock(return_value=0)
+
+        if "issue view 51" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(subtask_51_data).encode("utf-8"), b""))
+        elif "issue view 50" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(parent_50_data).encode("utf-8"), b""))
+        elif "issue list" in cmd_str:
+            mock_p.communicate = AsyncMock(return_value=(json.dumps(story_50_children).encode("utf-8"), b""))
+        else:
+            mock_p.communicate = AsyncMock(return_value=(b"", b""))
+        return mock_p
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+
+    # Call _advance_parent_and_unlock_next_subtask - should complete normally without error
+    await _advance_parent_and_unlock_next_subtask(project, state_manager, 51)
+
+    story_50_closed = any("issue" in c and "close" in c and "50" in c for c in executed_cmds)
+    assert story_50_closed is True
+
+    # No promotion calls occurred
+    sdlc_items = await state_manager.get_sdlc_items("graph-engineering")
+    story_50 = next(s for s in sdlc_items if s["issue_number"] == 50)
+    assert story_50["state"] == "CLOSED"
+    assert await state_manager.count_planned_stories("graph-engineering") == 0
+
+
+
 
 
 
