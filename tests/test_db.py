@@ -1744,6 +1744,152 @@ async def test_get_next_devtest_task_multi_project_isolation(tmp_path: Path):
     assert await manager.get_next_devtest_task("nonexistent") is None
 
 
+@pytest.mark.asyncio
+async def test_active_story_without_subtasks_ready_and_blocked(tmp_path: Path):
+    """
+    Scenario: Active story without subtasks directly returns story ID if ready, None if blocked
+      Given Active Story #70 has no child subtasks and is 'ready-for-dev'
+      When get_next_devtest_task is queried
+      Then it returns 70
+      When Story #70 is updated to 'status:blocked'
+      Then get_next_devtest_task returns None.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 70,
+            "title": "Standalone Story without Subtasks",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        }
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    assert await manager.get_next_devtest_task("graph-engineering") == 70
+
+    # Transition to blocked
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 70, "labels": ["status:blocked"]}],
+    )
+    assert await manager.get_next_devtest_task("graph-engineering") is None
+
+
+@pytest.mark.asyncio
+async def test_blocked_story_quarantine_prevents_standalone_fallback(tmp_path: Path):
+    """
+    Scenario: Blocked Story Quarantine Prevents Standalone Fallback
+      Given Active Story A (#90) has subtask #93 in 'status:blocked'
+      And Standalone Task #40 is in 'ready-for-dev'
+      When get_next_devtest_task is queried
+      Then it must return None (the pipeline is strictly halted on Story A; no fallback to Standalone #40).
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "title": "Story A",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["status:blocked"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 40,
+            "title": "Standalone Task",
+            "item_type": "STANDALONE",
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 0,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task is None
+
+
+@pytest.mark.asyncio
+async def test_oldest_planned_story_tiebreaking_sequence_and_created_at(tmp_path: Path):
+    """
+    Scenario: Oldest Planned Story Promotion Order
+      Given no active story is open
+      And Planned Story B (#95, created_at=2000, sequence=2)
+      And Planned Story C (#96, created_at=1000, sequence=1)
+      When get_next_devtest_task runs
+      Then Story C (#96) must be promoted first due to earlier created_at.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 95,
+            "title": "Story B",
+            "item_type": "STORY",
+            "state": "PLANNED",
+            "sequence_order": 2,
+            "created_at": 2000.0,
+        },
+        {
+            "issue_number": 98,
+            "title": "Subtask B1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 95,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 96,
+            "title": "Story C",
+            "item_type": "STORY",
+            "state": "PLANNED",
+            "sequence_order": 1,
+            "created_at": 1000.0,
+        },
+        {
+            "issue_number": 99,
+            "title": "Subtask C1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 96,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    task = await manager.get_next_devtest_task("graph-engineering")
+    # Story C was created earlier (1000.0 vs 2000.0), so its subtask #99 is returned
+    assert task == 99
+
+    sdlc_items = await manager.get_sdlc_items("graph-engineering")
+    story_c = next(s for s in sdlc_items if s["issue_number"] == 96)
+    assert story_c["state"] == "ACTIVE"
+    story_b = next(s for s in sdlc_items if s["issue_number"] == 95)
+    assert story_b["state"] == "PLANNED"
+
+
+
 
 
 
