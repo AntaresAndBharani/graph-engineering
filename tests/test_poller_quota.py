@@ -275,27 +275,36 @@ async def test_scenario_poller_automatically_dispatches_once_throttle_clears(tmp
     monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", mock_verify_git_safety)
-    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_harness_execute)
+    monkeypatch.setattr("orchestrator.nodes.devtest.AsyncHarnessAdapter.execute", mock_harness_execute)
+    monkeypatch.setattr("orchestrator.harness.AsyncHarnessAdapter.execute", mock_harness_execute)
+    monkeypatch.setattr("shutil.which", lambda cmd: cmd)
+    monkeypatch.setattr("orchestrator.nodes.devtest.shutil.which", lambda cmd: cmd)
+    monkeypatch.setattr("orchestrator.harness.shutil.which", lambda cmd: cmd)
+
+    class MockProc:
+        def __init__(self, data=b"", returncode=0):
+            self._data = data
+            self.returncode = returncode
+        async def communicate(self):
+            return self._data, b""
+        async def wait(self):
+            return self.returncode
 
     # Also mock git and gh commands
     async def mock_create_subprocess_exec(*args, **kwargs):
-        proc = AsyncMock()
         if args and args[0] == "gh" and len(args) > 1 and args[1] == "pr" and args[2] == "list":
             import json
             pr_data = json.dumps([{"number": 101, "title": "feat: resolve #49", "labels": [], "headRefName": "feat/issue-49"}]).encode("utf-8")
-            proc.communicate.return_value = (pr_data, b"")
-        else:
-            proc.communicate.return_value = (b"", b"")
-        proc.returncode = 0
-        proc.wait.return_value = 0
-        return proc
+            return MockProc(data=pr_data)
+        return MockProc()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_create_subprocess_exec)
 
     # When next polling pass runs, the task is dispatched
     ran, msg = await run_devtest_node(project, config, state_manager)
-    assert ran is True
+    assert ran is True, f"Failed: {msg}"
     assert harness_dispatched is True
+
 
 
 @pytest.mark.asyncio
