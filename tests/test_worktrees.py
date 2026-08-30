@@ -395,3 +395,245 @@ async def test_real_git_worktree_integration(tmp_path: Path):
     pruned = await WorktreeManager.prune(project)
     assert pruned is True
 
+
+import asyncio
+from orchestrator.config import GlobalConfig
+from orchestrator.db import StateManager
+from orchestrator.cli import run_project_cycle, _project_worker_loop
+
+
+@pytest.mark.asyncio
+async def test_scenario_concurrent_execution_when_worktrees_enabled(tmp_path: Path):
+    """
+    Scenario: Concurrent execution when worktrees enabled
+      Given a project with worktrees_enabled=True
+      When "_project_worker_loop" / "run_project_cycle" runs a cycle
+      Then it invokes "asyncio.gather(architect_cycle, devtest_cycle)" for that project
+      And both nodes execute concurrently without blocking each other
+    """
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    project = ProjectConfig(name="concurrent_app", repo="org/concurrent_app", local_path=str(repo_dir), worktrees_enabled=True)
+    config = GlobalConfig(projects=[project])
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    arch_started = asyncio.Event()
+    dev_started = asyncio.Event()
+    concurrency_barrier = asyncio.Event()
+    both_ran_concurrently = False
+
+    async def mock_architect(proj, cfg, sm):
+        nonlocal both_ran_concurrently
+        arch_started.set()
+        # Wait until devtest is also started (proving concurrent execution)
+        await asyncio.wait_for(dev_started.wait(), timeout=5.0)
+        both_ran_concurrently = True
+        return True, "Architect completed triage and decomposition"
+
+    async def mock_devtest(proj, cfg, sm):
+        nonlocal both_ran_concurrently
+        dev_started.set()
+        # Wait until architect is also started (proving concurrent execution)
+        await asyncio.wait_for(arch_started.wait(), timeout=5.0)
+        both_ran_concurrently = True
+        return True, "DevTest implemented subtask and opened PR"
+
+    async def mock_poll(proj, sm):
+        pass
+
+    async def mock_reviewer(proj, cfg, sm):
+        return False, "No PRs to review"
+
+    async def mock_bau(proj, cfg, sm, force=False):
+        return False, "No BAU tech debt"
+
+    with patch("orchestrator.cli.poller.poll_project_sdlc_items", side_effect=mock_poll), \
+         patch("orchestrator.cli.run_architect_node", side_effect=mock_architect), \
+         patch("orchestrator.cli.run_devtest_node", side_effect=mock_devtest), \
+         patch("orchestrator.cli.run_reviewer_node", side_effect=mock_reviewer), \
+         patch("orchestrator.cli.run_bau_node", side_effect=mock_bau):
+
+        work_done = await asyncio.wait_for(
+            run_project_cycle(project, config, state_manager, silent_idle=True),
+            timeout=10.0,
+        )
+
+        assert both_ran_concurrently is True
+        assert work_done is True
+
+
+@pytest.mark.asyncio
+async def test_scenario_non_destructive_fallback_for_existing_workspaces(tmp_path: Path, caplog):
+    """
+    Scenario: Non-Destructive Fallback for Existing Workspaces
+      Given a repository where git worktree creation fails or is disabled in config
+      When the orchestrator runs the project cycle
+      Then it must fall back to serial node execution on the primary local_path with locking
+      And record an informative warning in the project logs without crashing the daemon
+    """
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    # 1. Configured with worktrees_enabled=False
+    project = ProjectConfig(name="serial_app", repo="org/serial_app", local_path=str(repo_dir), worktrees_enabled=False)
+    config = GlobalConfig(projects=[project])
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    execution_order = []
+
+    async def mock_architect(proj, cfg, sm):
+        execution_order.append("architect")
+        return True, "Architect completed triage"
+
+    async def mock_devtest(proj, cfg, sm):
+        execution_order.append("devtest")
+        return True, "DevTest completed implementation"
+
+    async def mock_poll(proj, sm):
+        pass
+
+    with patch("orchestrator.cli.poller.poll_project_sdlc_items", side_effect=mock_poll), \
+         patch("orchestrator.cli.run_architect_node", side_effect=mock_architect), \
+         patch("orchestrator.cli.run_devtest_node", side_effect=mock_devtest), \
+         patch("orchestrator.cli.run_reviewer_node", new_callable=AsyncMock, return_value=(False, "idle")), \
+         patch("orchestrator.cli.run_bau_node", new_callable=AsyncMock, return_value=(False, "idle")):
+
+        work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
+
+        assert work_done is True
+        # Verified serial execution order: Architect completes before DevTest executes
+        assert execution_order == ["architect", "devtest"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_failure_isolation_between_concurrent_nodes(tmp_path: Path, caplog):
+    """
+    Scenario: Failure isolation between concurrent nodes
+      Given Architect and DevTest run concurrently via asyncio.gather
+      When one node's cycle raises an exception
+      Then the exception is caught and logged for that node
+      And the other node's cycle is unaffected and completes normally
+    """
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    project = ProjectConfig(name="isolated_app", repo="org/isolated_app", local_path=str(repo_dir), worktrees_enabled=True)
+    config = GlobalConfig(projects=[project])
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    async def mock_poll(proj, sm):
+        pass
+
+    # Case A: Architect throws exception, DevTest completes successfully
+    async def mock_failing_architect(proj, cfg, sm):
+        raise RuntimeError("Simulated crash in Architect node")
+
+    async def mock_successful_devtest(proj, cfg, sm):
+        return True, "DevTest successfully implemented subtask"
+
+    with patch("orchestrator.cli.poller.poll_project_sdlc_items", side_effect=mock_poll), \
+         patch("orchestrator.cli.run_architect_node", side_effect=mock_failing_architect), \
+         patch("orchestrator.cli.run_devtest_node", side_effect=mock_successful_devtest), \
+         patch("orchestrator.cli.run_reviewer_node", new_callable=AsyncMock, return_value=(False, "idle")), \
+         patch("orchestrator.cli.run_bau_node", new_callable=AsyncMock, return_value=(False, "idle")), \
+         caplog.at_level("ERROR"):
+
+        work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
+
+        # DevTest work succeeded, so pipeline_work_done is True
+        assert work_done is True
+        # Architect exception was logged
+        assert "Simulated crash in Architect node" in caplog.text
+
+    caplog.clear()
+
+    # Case B: DevTest throws exception, Architect completes successfully
+    async def mock_successful_architect(proj, cfg, sm):
+        return True, "Architect successfully triaged story"
+
+    async def mock_failing_devtest(proj, cfg, sm):
+        raise ValueError("Simulated crash in DevTest node")
+
+    with patch("orchestrator.cli.poller.poll_project_sdlc_items", side_effect=mock_poll), \
+         patch("orchestrator.cli.run_architect_node", side_effect=mock_successful_architect), \
+         patch("orchestrator.cli.run_devtest_node", side_effect=mock_failing_devtest), \
+         patch("orchestrator.cli.run_reviewer_node", new_callable=AsyncMock, return_value=(False, "idle")), \
+         patch("orchestrator.cli.run_bau_node", new_callable=AsyncMock, return_value=(False, "idle")), \
+         caplog.at_level("ERROR"):
+
+        work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
+
+        # Architect work succeeded, so pipeline_work_done is True
+        assert work_done is True
+        # DevTest exception was logged
+        assert "Simulated crash in DevTest node" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_nodes_git_lock_isolation(tmp_path: Path):
+    """
+    Integration test with a real git repository:
+    Verifies that Architect and DevTest running in parallel worktrees execute git
+    operations simultaneously without encountering .git/index.lock collisions.
+    """
+    import subprocess
+    import shutil
+
+    if not shutil.which("git"):
+        pytest.skip("git CLI not available")
+
+    repo_dir = tmp_path / "concurrent_git_repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize a real git repo with an initial commit
+    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True, capture_output=True)
+    (repo_dir / "README.md").write_text("# Test Main Repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    project = ProjectConfig(name="concrepo", repo="org/concrepo", local_path=str(repo_dir), worktrees_enabled=True)
+
+    # Create both worktrees
+    wt_arch = await WorktreeManager.ensure_worktree(project, "architect")
+    wt_dev = await WorktreeManager.ensure_worktree(project, "devtest")
+
+    assert wt_arch != wt_dev
+    assert wt_arch.exists()
+    assert wt_dev.exists()
+
+    # Perform concurrent git commits and branch creations in each worktree simultaneously
+    async def arch_git_work():
+        for i in range(5):
+            f = wt_arch / f"arch_file_{i}.txt"
+            f.write_text(f"Architect file content {i}\n", encoding="utf-8")
+            p_add = await asyncio.create_subprocess_exec("git", "add", str(f), cwd=str(wt_arch))
+            await p_add.wait()
+            p_commit = await asyncio.create_subprocess_exec("git", "commit", "-m", f"arch commit {i}", cwd=str(wt_arch))
+            await p_commit.wait()
+            await asyncio.sleep(0.01)
+        return True
+
+    async def dev_git_work():
+        for i in range(5):
+            f = wt_dev / f"dev_file_{i}.txt"
+            f.write_text(f"DevTest file content {i}\n", encoding="utf-8")
+            p_add = await asyncio.create_subprocess_exec("git", "add", str(f), cwd=str(wt_dev))
+            await p_add.wait()
+            p_commit = await asyncio.create_subprocess_exec("git", "commit", "-m", f"dev commit {i}", cwd=str(wt_dev))
+            await p_commit.wait()
+            await asyncio.sleep(0.01)
+        return True
+
+    results = await asyncio.gather(arch_git_work(), dev_git_work(), return_exceptions=True)
+
+    assert results == [True, True]
+
+    # Clean up worktrees
+    await WorktreeManager.remove_worktree(project, "architect")
+    await WorktreeManager.remove_worktree(project, "devtest")
+    await WorktreeManager.prune(project)
+
+

@@ -114,7 +114,9 @@ async def run_project_cycle(
     silent_idle: bool = False,
 ) -> bool:
     """
-    Executes a single sequential pass across all enabled nodes for a project.
+    Executes a single pass across enabled nodes for a project.
+    When worktrees are enabled (default), executes Architect and DevTest concurrently via asyncio.gather
+    with complete failure isolation, falling back to serial execution when worktrees are disabled.
     Returns True if a development pipeline node (Architect, DevTest, Reviewer, BAU) executed active work,
     requiring an immediate follow-up pass.
     Returns False if all development nodes were idle (even if the supervisor completed a watchdog audit).
@@ -141,56 +143,146 @@ async def run_project_cycle(
         if await state_manager.is_stop_requested():
             return pipeline_work_done
         force_sup = node_name == "supervisor"
-        ran, msg = await run_supervisor_node(project, config, state_manager, force=force_sup)
-        if ran:
-            console.print(f"  {prefix} [bold green]Supervisor:[/bold green] {msg}")
-        elif not silent_idle:
-            console.print(f"  {prefix} [dim]Supervisor: {msg}[/dim]")
+        try:
+            ran, msg = await run_supervisor_node(project, config, state_manager, force=force_sup)
+            if ran:
+                console.print(f"  {prefix} [bold green]Supervisor:[/bold green] {msg}")
+            elif not silent_idle:
+                console.print(f"  {prefix} [dim]Supervisor: {msg}[/dim]")
+        except Exception as e:
+            _logger.error("[%s:supervisor] Unhandled exception in supervisor cycle: %s", project.name, e, exc_info=True)
+            console.print(f"  {prefix} [bold red]Supervisor Error:[/bold red] {e}")
 
-    # 2. Architect Node (Active development work)
-    if node_name is None or node_name == "architect":
+    # 2 & 3. Architect and DevTest Node Execution
+    if node_name == "architect":
         if await state_manager.is_stop_requested():
             return pipeline_work_done
-        ran, msg = await run_architect_node(project, config, state_manager)
-        if ran:
-            pipeline_work_done = True
-            console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
-        elif not silent_idle:
-            console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
-
-    # 3. DevTest Node (Active development work)
-    if node_name is None or node_name == "devtest":
+        try:
+            ran, msg = await run_architect_node(project, config, state_manager)
+            if ran:
+                pipeline_work_done = True
+                console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
+            elif not silent_idle:
+                console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
+        except Exception as e:
+            _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, e, exc_info=True)
+            console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {e}")
+    elif node_name == "devtest":
         if await state_manager.is_stop_requested():
             return pipeline_work_done
-        ran, msg = await run_devtest_node(project, config, state_manager)
-        if ran:
-            pipeline_work_done = True
-            console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
-        elif not silent_idle:
-            console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
+        try:
+            ran, msg = await run_devtest_node(project, config, state_manager)
+            if ran:
+                pipeline_work_done = True
+                console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
+            elif not silent_idle:
+                console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
+        except Exception as e:
+            _logger.error("[%s:devtest] Unhandled exception in devtest cycle: %s", project.name, e, exc_info=True)
+            console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {e}")
+    elif node_name is None:
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
+
+        worktrees_enabled = getattr(project, "worktrees_enabled", True)
+        if worktrees_enabled:
+            # Level 2 Intra-Project Concurrency: run Architect and DevTest concurrently via asyncio.gather
+            async def _run_architect_cycle() -> tuple[bool, str]:
+                try:
+                    return await run_architect_node(project, config, state_manager)
+                except Exception as ex:
+                    _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, ex, exc_info=True)
+                    console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {ex}")
+                    return False, f"Error: {ex}"
+
+            async def _run_devtest_cycle() -> tuple[bool, str]:
+                try:
+                    return await run_devtest_node(project, config, state_manager)
+                except Exception as ex:
+                    _logger.error("[%s:devtest] Unhandled exception in devtest cycle: %s", project.name, ex, exc_info=True)
+                    console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {ex}")
+                    return False, f"Error: {ex}"
+
+            results = await asyncio.gather(_run_architect_cycle(), _run_devtest_cycle(), return_exceptions=True)
+
+            arch_res = results[0]
+            if isinstance(arch_res, Exception):
+                _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, arch_res, exc_info=True)
+                console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {arch_res}")
+            else:
+                arch_ran, arch_msg = arch_res
+                if arch_ran:
+                    pipeline_work_done = True
+                    console.print(f"  {prefix} [bold green]Architect:[/bold green] {arch_msg}")
+                elif not silent_idle and not arch_msg.startswith("Error:"):
+                    console.print(f"  {prefix} [dim]Architect: {arch_msg}[/dim]")
+
+            dev_res = results[1]
+            if isinstance(dev_res, Exception):
+                _logger.error("[%s:devtest] Unhandled exception in devtest cycle: %s", project.name, dev_res, exc_info=True)
+                console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {dev_res}")
+            else:
+                dev_ran, dev_msg = dev_res
+                if dev_ran:
+                    pipeline_work_done = True
+                    console.print(f"  {prefix} [bold green]DevTest:[/bold green] {dev_msg}")
+                elif not silent_idle and not dev_msg.startswith("Error:"):
+                    console.print(f"  {prefix} [dim]DevTest: {dev_msg}[/dim]")
+        else:
+            # Safe serial fallback on primary local_path with locking when worktrees are disabled
+            try:
+                ran, msg = await run_architect_node(project, config, state_manager)
+                if ran:
+                    pipeline_work_done = True
+                    console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
+                elif not silent_idle:
+                    console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
+            except Exception as ex:
+                _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, ex, exc_info=True)
+                console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {ex}")
+
+            if not await state_manager.is_stop_requested():
+                try:
+                    ran, msg = await run_devtest_node(project, config, state_manager)
+                    if ran:
+                        pipeline_work_done = True
+                        console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
+                    elif not silent_idle:
+                        console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
+                except Exception as ex:
+                    _logger.error("[%s:devtest] Unhandled exception in devtest cycle: %s", project.name, ex, exc_info=True)
+                    console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {ex}")
 
     # 4. Reviewer / Gatekeeper Node (Active development work)
     if node_name is None or node_name in ("reviewer", "review"):
         if await state_manager.is_stop_requested():
             return pipeline_work_done
-        ran, msg = await run_reviewer_node(project, config, state_manager)
-        if ran:
-            pipeline_work_done = True
-            console.print(f"  {prefix} [bold green]Reviewer:[/bold green] {msg}")
-        elif not silent_idle:
-            console.print(f"  {prefix} [dim]Reviewer: {msg}[/dim]")
+        try:
+            ran, msg = await run_reviewer_node(project, config, state_manager)
+            if ran:
+                pipeline_work_done = True
+                console.print(f"  {prefix} [bold green]Reviewer:[/bold green] {msg}")
+            elif not silent_idle:
+                console.print(f"  {prefix} [dim]Reviewer: {msg}[/dim]")
+        except Exception as e:
+            _logger.error("[%s:reviewer] Unhandled exception in reviewer cycle: %s", project.name, e, exc_info=True)
+            console.print(f"  {prefix} [bold red]Reviewer Error:[/bold red] {e}")
 
     # 5. BAU Maintenance Node (Daily tech-debt & enhancement consolidation)
     if node_name is None or node_name in ("bau", "maintenance"):
         if await state_manager.is_stop_requested():
             return pipeline_work_done
         force_bau = node_name in ("bau", "maintenance")
-        ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
-        if ran:
-            pipeline_work_done = True
-            console.print(f"  {prefix} [bold green]BAU:[/bold green] {msg}")
-        elif not silent_idle:
-            console.print(f"  {prefix} [dim]BAU: {msg}[/dim]")
+        try:
+            ran, msg = await run_bau_node(project, config, state_manager, force=force_bau)
+            if ran:
+                pipeline_work_done = True
+                console.print(f"  {prefix} [bold green]BAU:[/bold green] {msg}")
+            elif not silent_idle:
+                console.print(f"  {prefix} [dim]BAU: {msg}[/dim]")
+        except Exception as e:
+            _logger.error("[%s:bau] Unhandled exception in bau cycle: %s", project.name, e, exc_info=True)
+            console.print(f"  {prefix} [bold red]BAU Error:[/bold red] {e}")
 
     return pipeline_work_done
 
