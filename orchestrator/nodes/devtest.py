@@ -14,7 +14,11 @@ from rich.console import Console
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import get_project_log_path
+from orchestrator.logging import (
+    ProjectLogBufferManager,
+    format_story_lock_dispatch_log,
+    get_project_log_path,
+)
 from orchestrator import poller
 from orchestrator.nodes.reviewer import check_pr_ci_status
 from orchestrator.poller import check_dispatch_quota, fetch_issue_by_number, fetch_open_prs
@@ -1014,6 +1018,36 @@ async def run_devtest_node(
             "labels": [trigger],
         }],
     )
+
+    # Resolve parent story ID if this subtask is under an active locked story
+    parent_id = None
+    try:
+        sdlc_items = await state_manager.get_sdlc_items(project.name)
+        item_lookup = {item["issue_number"]: item for item in sdlc_items}
+        if issue_id in item_lookup and item_lookup[issue_id].get("parent_issue_id"):
+            parent_id = item_lookup[issue_id]["parent_issue_id"]
+    except Exception:
+        pass
+
+    if parent_id is None:
+        body_text = target_issue.get("body", "")
+        m = re.search(r"Parent:\s*#(\d+)", body_text, re.IGNORECASE)
+        if m:
+            parent_id = int(m.group(1))
+
+    if parent_id is None:
+        try:
+            active_locked_id = await state_manager.get_active_locked_story_id(project.name)
+            if active_locked_id is not None and active_locked_id != issue_id:
+                parent_id = active_locked_id
+        except Exception:
+            pass
+
+    if parent_id is not None:
+        lock_log = format_story_lock_dispatch_log(parent_id, issue_id)
+        console.print(f"  [bold cyan][{project.name}:devtest][/bold cyan] [bold green]{lock_log}[/bold green]")
+        _logger.info(lock_log)
+        ProjectLogBufferManager.add_line(f"[{project.name}:devtest] [INFO] {lock_log}", project_name=project.name, node_name="devtest")
 
     # 2. Destructive Git Safety Check
     is_safe, safety_msg = await verify_git_safety(project.local_path, project.repo)

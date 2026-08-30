@@ -101,7 +101,7 @@ async def test_scenario_hierarchical_sdlc_tree_rendering_multi_child(tmp_path: P
         row0 = widget.get_row_at(0)
         assert row0[0] == "#454"
         assert row0[1] == "Email Password Setup"
-        assert row0[2] == "architect-processed"
+        assert row0[2] == "[LOCKED] architect-processed"
         assert row0[3] == "-"
 
         # Row 1: Subtask #455 (First child -> ├─ prefix)
@@ -390,5 +390,104 @@ async def test_apply_keyed_diff_crud_and_ordering():
         assert table.row_count == 2
         assert table.get_row("r2") == ["Val3-Updated", "Val4"]
         assert table.get_row("r3") == ["Val5", "Val6"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_sdlc_widget_shows_active_lock(tmp_path: Path):
+    """
+    Scenario: SDLC widget shows the active lock
+      Given Story #90 is the currently active locked story
+      When the SDLCProgressWidget renders its table
+      Then the row for Story #90 must display a "[LOCKED]" badge
+      And no other concurrently open story row displays the badge.
+    """
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "Active Locked Story A",
+            "state": "OPEN",
+            "labels": "architect-processed",
+        },
+        {
+            "issue_number": 93,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Subtask A1",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+            "parent_issue_id": 90,
+        },
+        {
+            "issue_number": 94,
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "title": "Subtask A2",
+            "state": "OPEN",
+            "labels": "queued",
+            "parent_issue_id": 90,
+        },
+        {
+            "issue_number": 95,
+            "item_type": "STORY",
+            "sequence_order": 2,
+            "title": "Concurrently Open Story B",
+            "state": "OPEN",
+            "labels": "architect-processed",
+        },
+        {
+            "issue_number": 98,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Subtask B1",
+            "state": "OPEN",
+            "labels": "queued",
+            "parent_issue_id": 95,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("lock-test-proj", items)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="lock-test-proj")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+        assert widget.row_count == 5
+
+        # Row 0: Story #90 (Active Locked Story)
+        row0 = widget.get_row_at(0)
+        assert row0[0] == "#90"
+        assert row0[1] == "Active Locked Story A"
+        assert "[LOCKED]" in row0[2]
+        assert row0[2] == "[LOCKED] architect-processed"
+
+        # Row 1: Subtask #93 (No locked badge)
+        row1 = widget.get_row_at(1)
+        assert row1[0] == "#93"
+        assert "[LOCKED]" not in row1[2]
+
+        # Row 2: Subtask #94 (No locked badge)
+        row2 = widget.get_row_at(2)
+        assert row2[0] == "#94"
+        assert "[LOCKED]" not in row2[2]
+
+        # Row 3: Story #95 (Concurrently open story -> NO locked badge)
+        row3 = widget.get_row_at(3)
+        assert row3[0] == "#95"
+        assert row3[1] == "Concurrently Open Story B"
+        assert "[LOCKED]" not in row3[2]
+        assert row3[2] == "architect-processed"
+
+        # Row 4: Subtask #98 (No locked badge)
+        row4 = widget.get_row_at(4)
+        assert row4[0] == "#98"
+        assert "[LOCKED]" not in row4[2]
+
 
 

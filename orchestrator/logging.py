@@ -328,6 +328,22 @@ class TextualLogHandler(logging.Handler):
             self.handleError(record)
 
 
+def format_story_lock_dispatch_log(
+    parent_id: int | str,
+    subtask_id: int | str,
+    project_name: Optional[str] = None,
+) -> str:
+    """
+    Formats a structured Story Lock dispatch log line.
+    Format: "Story Lock Active: Parent #<parent_id>. Dispatched Subtask #<subtask_id>"
+    or with project prefix: "[<project_name>:devtest] Story Lock Active: Parent #<parent_id>. Dispatched Subtask #<subtask_id>"
+    """
+    msg = f"Story Lock Active: Parent #{parent_id}. Dispatched Subtask #{subtask_id}"
+    if project_name:
+        return f"[{project_name}:devtest] {msg}"
+    return msg
+
+
 def strip_ansi(text: str) -> str:
     """Removes ANSI escape codes from text."""
     if not text:

@@ -543,3 +543,94 @@ async def test_sequential_pipeline_autonomous_story_promotion_e2e(tmp_path: Path
     assert ran is True
     assert dispatched_target == 98
 
+
+@pytest.mark.asyncio
+async def test_scenario_story_lock_acquisition_observable_in_terminal_logs(tmp_path: Path, monkeypatch, caplog):
+    """
+    Scenario: Story Lock acquisition is observable in terminal logs
+      Given get_next_devtest_task returns subtask #93 under active Story #90
+      When DevTest dispatches the harness for #93
+      Then the terminal log must contain "Story Lock Active: Parent #90. Dispatched Subtask #93".
+    """
+    import logging
+    from orchestrator.harness import AsyncHarnessAdapter
+    from orchestrator.logging import ProjectLogBufferManager
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.worktree import WorktreeManager
+
+    ProjectLogBufferManager.reset()
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    config = GlobalConfig()
+
+    items = [
+        {"issue_number": 90, "title": "Active Story #90", "state": "OPEN", "item_type": "STORY", "sequence_order": 1, "labels": ["architect-processed"]},
+        {"issue_number": 93, "parent_issue_id": 90, "title": "Subtask #93", "state": "OPEN", "item_type": "SUBTASK", "sequence_order": 1, "labels": ["ready-for-dev"]},
+        {"issue_number": 94, "parent_issue_id": 90, "title": "Subtask #94", "state": "OPEN", "item_type": "SUBTASK", "sequence_order": 2, "labels": ["queued"]},
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # Verify get_next_devtest_task returns subtask #93 under active Story #90
+    resolved_id = await state_manager.get_next_devtest_task("graph-engineering")
+    assert resolved_id == 93
+
+    async def mock_fetch_issue_by_number(repo, issue_number):
+        return {
+            "number": issue_number,
+            "title": f"Subtask #{issue_number}",
+            "body": f"Description for subtask #{issue_number}.\n\nParent: #90",
+            "labels": [{"name": "ready-for-dev"}],
+        }
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", mock_fetch_issue_by_number)
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "Safety verified.")))
+    monkeypatch.setattr(WorktreeManager, "ensure_worktree", AsyncMock(return_value=tmp_path))
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", AsyncMock(return_value=0))
+
+    class MockProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+        async def communicate(self):
+            return b"", b""
+
+    async def mock_subprocess_exec(*cmd, **kw):
+        mock_p = MockProc()
+        if "status" in cmd and "--porcelain" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"M test.py\n", b""))
+        elif "pr" in cmd and "create" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"https://github.com/AntaresAndBharani/graph-engineering/pull/93\n", b""))
+        else:
+            mock_p.communicate = AsyncMock(return_value=(b"", b""))
+        return mock_p
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_pr_ci_status", AsyncMock(return_value=("PASS", "100% green")))
+
+    with caplog.at_level(logging.INFO):
+        ran, msg = await run_devtest_node(project, config, state_manager)
+
+    assert ran is True
+
+    # Terminal log assertions
+    expected_log_line = "Story Lock Active: Parent #90. Dispatched Subtask #93"
+
+    # 1. Standard logger records contain the expected message
+    matching_records = [r for r in caplog.records if expected_log_line in r.message]
+    assert len(matching_records) > 0, f"Expected '{expected_log_line}' in log records, got: {[r.message for r in caplog.records]}"
+
+    # 2. ProjectLogBufferManager in-memory buffer contains the expected message
+    proj_logs = ProjectLogBufferManager.get_project_logs("graph-engineering", node_name="devtest")
+    assert any(expected_log_line in line for line in proj_logs)
+
+
