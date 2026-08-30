@@ -4,11 +4,8 @@ from pathlib import Path
 from pydantic import ValidationError
 import pytest
 from orchestrator.config import (
-    DEFAULT_HARNESS_QUOTAS,
-    GlobalConfig,
     HarnessConfig,
     HarnessQuotaConfig,
-    LabelConfig,
     ProjectConfig,
     QuotaSettings,
     SettingsConfig,
@@ -298,6 +295,131 @@ def test_harness_quota_config_validation_errors():
     # Buffer minutes of 0 is allowed
     qs = QuotaSettings(buffer_minutes=0)
     assert qs.buffer_minutes == 0
+
+
+def test_project_config_worktree_defaults(tmp_path: Path):
+    """
+    Scenario: New config fields have safe defaults
+      Given a ProjectConfig loaded without any worktree-related keys
+      When the config is parsed
+      Then "max_planned_stories" defaults to 2
+      And "worktrees_enabled" defaults to True
+      And "worktree_dir" defaults to None
+    """
+    proj = ProjectConfig(
+        name="alpha",
+        repo="my-org/alpha",
+        local_path=str(tmp_path),
+    )
+    assert proj.max_planned_stories == 2
+    assert proj.worktrees_enabled is True
+    assert proj.worktree_dir is None
+
+
+def test_project_config_worktree_overrides_from_yaml(tmp_path: Path):
+    """
+    Scenario: Config fields are overridable per project
+      Given a project YAML entry with "max_planned_stories: 5" and "worktrees_enabled: false"
+      When the config is loaded
+      Then ProjectConfig.max_planned_stories equals 5
+      And ProjectConfig.worktrees_enabled equals False
+    """
+    yaml_file = tmp_path / "worktree_override.yaml"
+    yaml_file.write_text(
+        f"""
+version: 2
+projects:
+  - name: "alpha"
+    repo: "my-org/alpha"
+    local_path: "{tmp_path.as_posix()}"
+    max_planned_stories: 5
+    worktrees_enabled: false
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert len(loaded.projects) == 1
+    proj = loaded.projects[0]
+    assert proj.max_planned_stories == 5
+    assert proj.worktrees_enabled is False
+    assert proj.worktree_dir is None
+
+
+def test_project_config_worktree_dir_path_expansion(tmp_path: Path):
+    """
+    Scenario: worktree_dir resolves like other paths
+      Given a project YAML entry with "worktree_dir: ~/custom/worktrees"
+      When the config is loaded
+      Then the resolved path uses the existing resolve_path() home/env expansion behavior consistent with local_path
+    """
+    yaml_file = tmp_path / "worktree_dir.yaml"
+    yaml_file.write_text(
+        f"""
+version: 2
+projects:
+  - name: "alpha"
+    repo: "my-org/alpha"
+    local_path: "{tmp_path.as_posix()}"
+    worktree_dir: "~/custom/worktrees"
+  - name: "beta"
+    repo: "my-org/beta"
+    local_path: "{tmp_path.as_posix()}"
+    worktree_dir: "$HOME/beta_worktrees"
+  - name: "gamma"
+    repo: "my-org/gamma"
+    local_path: "{tmp_path.as_posix()}"
+    worktree_dir: "%USERPROFILE%/gamma_worktrees"
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert len(loaded.projects) == 3
+
+    alpha = loaded.projects[0]
+    assert isinstance(alpha.worktree_dir, Path)
+    assert alpha.worktree_dir == (Path.home() / "custom" / "worktrees").resolve()
+
+    beta = loaded.projects[1]
+    assert isinstance(beta.worktree_dir, Path)
+    assert beta.worktree_dir == (Path.home() / "beta_worktrees").resolve()
+
+    gamma = loaded.projects[2]
+    assert isinstance(gamma.worktree_dir, Path)
+    assert gamma.worktree_dir == (Path.home() / "gamma_worktrees").resolve()
+
+
+def test_settings_config_worktree_defaults_and_overrides(tmp_path: Path):
+    """
+    Scenario: SettingsConfig supports worktree & lookahead settings with safe defaults
+    """
+    # Safe defaults
+    settings = SettingsConfig()
+    assert settings.max_planned_stories == 2
+    assert settings.worktrees_enabled is True
+    assert settings.worktree_dir is None
+    assert settings.resolved_worktree_dir is None
+
+    # Overrides via YAML
+    yaml_file = tmp_path / "settings_worktree.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+settings:
+  max_planned_stories: 4
+  worktrees_enabled: false
+  worktree_dir: "~/global/worktrees"
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+    assert loaded.settings.max_planned_stories == 4
+    assert loaded.settings.worktrees_enabled is False
+    assert loaded.settings.worktree_dir == "~/global/worktrees"
+    assert loaded.settings.resolved_worktree_dir == (Path.home() / "global" / "worktrees").resolve()
+
 
 
 

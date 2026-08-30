@@ -15,6 +15,9 @@ settings:
   db_path: "~/.config/orchestrator/state.db"
   log_dir: "~/.config/orchestrator/logs"
   log_level: "INFO"
+  max_planned_stories: 2              # Maximum planned stories in lookahead window
+  worktrees_enabled: true             # Enable isolated Git worktrees for concurrent devtest tasks
+  worktree_dir: null                  # Custom base directory for worktrees (null uses default project path)
 
 # Standard Repository Workflow Taxonomy
 managed_labels:
@@ -128,6 +131,9 @@ projects:
     repo: "my-org/project-alpha"
     local_path: "~/workspaces/project-alpha"  # Cross-platform path expansion (supports ~, $HOME, %USERPROFILE%, or relative paths)
     enabled: true
+    max_planned_stories: 2                   # Optional per-project lookahead cap override
+    worktrees_enabled: true                  # Optional per-project worktree toggle override
+    worktree_dir: null                       # Optional custom worktree directory (supports ~, $HOME, %USERPROFILE%)
     context_files:
       - ".graph/architecture.md"
       - ".graph/testing-standards.md"
