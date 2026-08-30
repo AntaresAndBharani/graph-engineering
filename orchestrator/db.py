@@ -870,6 +870,7 @@ class StateManager:
                 SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND item_type = 'STORY' AND state != 'CLOSED' AND state != 'MERGED'
+                  AND UPPER(state) NOT IN ('PLANNED', 'STATUS:PLANNED')
                 ORDER BY sequence_order ASC, issue_number ASC
                 LIMIT 1
                 """,
