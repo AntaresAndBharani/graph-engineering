@@ -11,6 +11,8 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
 from orchestrator.poller import fetch_open_prs
+from orchestrator import poller
+
 
 
 async def check_pr_ci_status(repo: str, pr_number: int) -> tuple[str, str]:
@@ -140,6 +142,12 @@ async def resolve_pr_merge_conflicts(
 
     model = node_cfg.conflict_model or "gemini-3.7-flash-low"
     effort = node_cfg.conflict_effort
+
+    if state_manager is not None:
+        allowed, q_res = await poller.check_dispatch_quota(project, "reviewer", config, state_manager, harness_name=harness_name)
+        if not allowed:
+            await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+            return False, f"Quota throttled for harness '{harness_name}' (Ready in {q_res.formatted_eta})."
 
     console.print(f"  [{project.name}:conflict-resolver] [bold cyan]⚡ Resolving Merge Conflicts via {harness_name}/{model}[/bold cyan]")
 

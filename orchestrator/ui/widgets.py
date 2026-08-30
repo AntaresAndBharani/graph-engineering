@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 from typing import Any, Dict, List, Optional
 
 from textual.widgets import DataTable
 
+from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
+from orchestrator.quota import QuotaManager
 
 
 class SDLCProgressWidget(DataTable):
@@ -162,3 +165,167 @@ class AnomalyAlertsWidget(DataTable):
             error_msg = str(row.get("error_message", "-"))
 
             self.add_row(time_str, node_name, error_type, error_msg)
+
+
+class HarnessQuotaWidget(DataTable):
+    """
+    Read-only DataTable widget rendering global harness quota capacities,
+    rolling window limits, progress bars, OK/THROTTLED statuses with countdown,
+    and by-project / by-node percentage breakdowns from local SQLite StateManager.
+    """
+
+    TABLE_COLUMNS = [
+        "Harness",
+        "Capacity",
+        "Window",
+        "Status",
+        "By Project",
+        "By Node",
+    ]
+
+    def __init__(
+        self,
+        config: Optional[GlobalConfig] = None,
+        state_manager: Optional[StateManager] = None,
+        quota_manager: Optional[QuotaManager] = None,
+        project_name: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.config = config or GlobalConfig()
+        self.state_manager = state_manager
+        self.quota_manager = quota_manager
+        self.project_name = project_name
+        self._render_lock = asyncio.Lock()
+
+    async def on_mount(self) -> None:
+        """Initializes table configuration and renders initial quota metrics."""
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        if not self.columns:
+            self.add_columns(*self.TABLE_COLUMNS)
+        await self._render_rows()
+
+    async def update_quotas(
+        self,
+        config: Optional[GlobalConfig] = None,
+        state_manager: Optional[StateManager] = None,
+        quota_manager: Optional[QuotaManager] = None,
+    ) -> None:
+        """
+        Asynchronously queries QuotaManager for quota capacity and breakdowns,
+        and updates the table rows. Non-blocking to the Textual UI event loop.
+        """
+        if config is not None:
+            self.config = config
+        if state_manager is not None:
+            self.state_manager = state_manager
+        if quota_manager is not None:
+            self.quota_manager = quota_manager
+        await self._render_rows()
+
+    async def update_project(self, project_name: Optional[str] = None) -> None:
+        """Optional hook to filter or update project context."""
+        self.project_name = project_name
+        await self.update_quotas()
+
+    @staticmethod
+    def _format_tokens(tokens: int) -> str:
+        """Formats integer token count into compact string (e.g. 120k, 5.0M)."""
+        if tokens >= 1_000_000:
+            val = tokens / 1_000_000
+            return f"{val:.1f}M"
+        elif tokens >= 1_000:
+            val = tokens / 1_000
+            return f"{int(val)}k" if val.is_integer() else f"{val:.1f}k"
+        else:
+            return str(tokens)
+
+    @staticmethod
+    def _render_progress_bar(used: int, limit: int, width: int = 16) -> str:
+        """Renders a visual capacity progress bar [████████░░░░░░░░]."""
+        if limit <= 0:
+            return f"[{'░' * width}]"
+        fraction = min(1.0, max(0.0, used / limit))
+        filled = int(round(fraction * width))
+        empty = max(0, width - filled)
+        return f"[{'█' * filled}{'░' * empty}]"
+
+    async def _render_rows(self) -> None:
+        """Renders harness quota rows into the DataTable."""
+        async with self._render_lock:
+            if not self.columns:
+                return
+            self.clear()
+
+            if not self.quota_manager:
+                self.add_row("-", "No quota data", "-", "-", "-", "-")
+                return
+
+            harnesses = getattr(self.config, "quota", None)
+            harness_dict = harnesses.harnesses if harnesses else {}
+            if not harness_dict:
+                self.add_row("-", "No harnesses configured", "-", "-", "-", "-")
+                return
+
+            for harness_name in sorted(harness_dict.keys()):
+                quota_cfg = harness_dict[harness_name]
+                window_hours = quota_cfg.window_hours
+                limit = quota_cfg.window_token_limit
+
+                try:
+                    res = await self.quota_manager.check_harness_capacity(harness_name)
+                    breakdown = await self.quota_manager.get_informative_breakdown(harness_name)
+                except Exception:
+                    res = None
+                    breakdown = {"by_project": {}, "by_node": {}}
+
+                # 1. Window format
+                w_str = f"{int(window_hours) if window_hours.is_integer() else window_hours}h Window"
+
+                # 2. Capacity progress bar and token limits
+                used = res.used if res else 0
+                remaining = res.remaining if res else limit
+                progress_bar = self._render_progress_bar(used, limit)
+                capacity_str = f"{progress_bar} {self._format_tokens(remaining)} / {self._format_tokens(limit)}"
+
+                # 3. Status string with badge & ETA
+                if res and not res.allowed:
+                    status_str = f"[bold red]THROTTLED ({self._format_tokens(res.remaining)} / {self._format_tokens(res.limit)} - Ready in {res.formatted_eta})[/bold red]"
+                elif res:
+                    pct_left = round((res.remaining / res.limit) * 100) if res.limit > 0 else 100
+                    status_str = f"[bold green]OK ({self._format_tokens(res.remaining)} / {self._format_tokens(res.limit)} - {pct_left}% left)[/bold green]"
+                else:
+                    status_str = "[dim]UNKNOWN[/dim]"
+
+                # 4. By-project breakdown
+                by_project = breakdown.get("by_project", {})
+                if by_project:
+                    project_parts = [
+                        f'"{p}": {int(pct)}%' if isinstance(pct, (int, float)) and (pct == int(pct)) else f'"{p}": {pct}%'
+                        for p, pct in by_project.items()
+                    ]
+                    project_str = ", ".join(project_parts)
+                else:
+                    project_str = "-"
+
+                # 5. By-node breakdown
+                by_node = breakdown.get("by_node", {})
+                if by_node:
+                    node_parts = [
+                        f'"{n}": {int(pct)}%' if isinstance(pct, (int, float)) and (pct == int(pct)) else f'"{n}": {pct}%'
+                        for n, pct in by_node.items()
+                    ]
+                    node_str = ", ".join(node_parts)
+                else:
+                    node_str = "-"
+
+                self.add_row(
+                    harness_name,
+                    capacity_str,
+                    w_str,
+                    status_str,
+                    project_str,
+                    node_str,
+                    key=harness_name,
+                )
