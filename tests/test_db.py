@@ -616,14 +616,18 @@ async def test_rolling_window_sum_timezone_safety(tmp_path: Path):
     # 5-hour window sum should be Event 1 + Event 2 = 100,000 + 250,000 = 350,000
     usage_5h = await manager.get_window_token_usage("claude", window_hours=5.0)
     assert usage_5h == 350000
+    # Also verify get_window_token_sum alias
+    assert await manager.get_window_token_sum("claude", window_hours=5.0) == 350000
 
     # 2-hour window sum should be Event 1 only = 100,000
     usage_2h = await manager.get_window_token_usage("claude", window_hours=2.0)
     assert usage_2h == 100000
+    assert await manager.get_window_token_sum("claude", window_hours=2.0) == 100000
 
     # 12-hour window sum should be all 4 events = 1,850,000
     usage_12h = await manager.get_window_token_usage("claude", window_hours=12.0)
     assert usage_12h == 1850000
+    assert await manager.get_window_token_sum("claude", window_hours=12.0) == 1850000
 
 
 @pytest.mark.asyncio
@@ -743,6 +747,10 @@ async def test_usage_breakdown_by_project_and_node(tmp_path: Path):
 
     # Also accessible via "nodes" alias
     assert breakdown["nodes"]["devtest"] == 110000
+
+    # Also verify get_window_breakdown alias
+    alias_breakdown = await manager.get_window_breakdown("antigravity", window_hours=1.0)
+    assert alias_breakdown == breakdown
 
 
 @pytest.mark.asyncio
