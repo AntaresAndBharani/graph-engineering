@@ -37,10 +37,11 @@ async def sync_parent_subtask_links(
         return 0
 
     # 1. Fetch parent issue details
+    # 1. Fetch parent issue details (including comments)
     proc_parent = await asyncio.create_subprocess_exec(
         "gh", "issue", "view", str(parent_id),
         "--repo", repo,
-        "--json", "body,labels,title",
+        "--json", "body,labels,title,comments",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -65,15 +66,43 @@ async def sync_parent_subtask_links(
         stderr=asyncio.subprocess.PIPE,
     )
     stdout_s, _ = await proc_search.communicate()
-    if proc_search.returncode != 0 or not stdout_s:
-        return 0
+    results = []
+    if proc_search.returncode == 0 and stdout_s:
+        try:
+            results = json.loads(stdout_s.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
 
-    try:
-        results = json.loads(stdout_s.decode("utf-8", errors="replace"))
-        children = [c for c in results if c.get("number") != parent_id]
-    except Exception:
-        return 0
+    found_subtask_ids = {c.get("number") for c in results if c.get("number") != parent_id}
 
+    # Also discover subtask IDs mentioned in parent triage comments
+    for comment in parent_data.get("comments", []):
+        c_body = comment.get("body", "")
+        for m in re.finditer(r"#(\d+)", c_body):
+            cid = int(m.group(1))
+            if cid != parent_id:
+                found_subtask_ids.add(cid)
+
+    children_dict = {c.get("number"): c for c in results if c.get("number") in found_subtask_ids}
+
+    # Fetch details for any subtask IDs found in comments but missed by search
+    for sub_id in sorted(found_subtask_ids - set(children_dict.keys())):
+        try:
+            p_sub = await asyncio.create_subprocess_exec(
+                "gh", "issue", "view", str(sub_id),
+                "--repo", repo,
+                "--json", "number,title,state",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out_s, _ = await p_sub.communicate()
+            if p_sub.returncode == 0 and out_s:
+                s_data = json.loads(out_s.decode("utf-8", errors="replace"))
+                children_dict[sub_id] = s_data
+        except Exception:
+            pass
+
+    children = list(children_dict.values())
     if not children:
         return 0
 

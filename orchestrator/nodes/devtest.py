@@ -374,7 +374,7 @@ async def _advance_parent_and_unlock_next_subtask(
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    # 4. Search for all child subtasks referencing Parent: #<parent_id>
+    # 4. Discover all child subtasks referencing Parent: #<parent_id> or listed in parent body/comments
     proc_children = await asyncio.create_subprocess_exec(
         "gh", "issue", "list",
         "--repo", project.repo,
@@ -385,33 +385,75 @@ async def _advance_parent_and_unlock_next_subtask(
         stderr=asyncio.subprocess.PIPE,
     )
     stdout_c, _ = await proc_children.communicate()
-    children = []
+    results = []
     if proc_children.returncode == 0 and stdout_c:
         try:
-            all_res = json.loads(stdout_c.decode("utf-8", errors="replace"))
-            children = [c for c in all_res if c.get("number") != parent_id]
+            results = json.loads(stdout_c.decode("utf-8", errors="replace"))
         except Exception:
             pass
 
+    found_subtask_ids = {c.get("number") for c in results if c.get("number") != parent_id}
+
+    # Also discover subtask IDs from parent body checklist
+    for mark, sid in re.findall(r"-\s*\[([ xX])\]\s*#(\d+)", updated_body):
+        cid = int(sid)
+        if cid != parent_id:
+            found_subtask_ids.add(cid)
+
+    # Also discover subtask IDs from parent comments
+    for comment in parent_data.get("comments", []):
+        c_body = comment.get("body", "")
+        for m in re.finditer(r"#(\d+)", c_body):
+            cid = int(m.group(1))
+            if cid != parent_id:
+                found_subtask_ids.add(cid)
+
+    children_dict = {c.get("number"): c for c in results if c.get("number") in found_subtask_ids}
+
+    # Fetch details for any subtask IDs not returned by search
+    for sid in sorted(found_subtask_ids - set(children_dict.keys())):
+        try:
+            p_sub = await asyncio.create_subprocess_exec(
+                "gh", "issue", "view", str(sid),
+                "--repo", project.repo,
+                "--json", "number,title,state,labels",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out_s, _ = await p_sub.communicate()
+            if p_sub.returncode == 0 and out_s:
+                s_data = json.loads(out_s.decode("utf-8", errors="replace"))
+                children_dict[sid] = s_data
+        except Exception:
+            pass
+
+    children = list(children_dict.values())
     if not children:
         return
 
     children.sort(key=lambda x: x.get("number", 0))
 
-    # Check if any open subtasks with 'queued' exist
+    # Check for unchecked items in parent checklist
+    unchecked_ids = [
+        int(sid) for mark, sid in re.findall(r"-\s*\[([ xX])\]\s*#(\d+)", updated_body)
+        if mark.strip() == ""
+    ]
+
+    # Check if any open subtasks with 'queued' or pending review exist
     queued_children = []
     for c in children:
         c_state = str(c.get("state", "")).upper()
         if c_state != "CLOSED":
             c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
-            if "queued" in c_labels or "status:queued" in c_labels:
+            if any(lbl in c_labels for lbl in ("queued", "status:queued", "status:pending-review")) or c.get("number") in unchecked_ids:
                 queued_children.append(c)
 
     if queued_children:
         next_child = queued_children[0]
         next_id = next_child["number"]
-        queued_lbl = "status:queued" if "status:queued" in [l.get("name") if isinstance(l, dict) else str(l) for l in next_child.get("labels", [])] else "queued"
-        ready_lbl = "status:ready-for-dev" if queued_lbl == "status:queued" else "ready-for-dev"
+        curr_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in next_child.get("labels", [])]
+        queued_lbl = "status:queued" if "status:queued" in curr_labels else ("status:pending-review" if "status:pending-review" in curr_labels else "queued")
+        ready_lbl = "status:ready-for-dev" if queued_lbl in ("status:queued", "status:pending-review") else "ready-for-dev"
 
         p_promote = await asyncio.create_subprocess_exec(
             "gh", "issue", "edit", str(next_id),
@@ -431,8 +473,8 @@ async def _advance_parent_and_unlock_next_subtask(
             stderr=asyncio.subprocess.PIPE,
         )
         await p_comment.wait()
-    else:
-            # Check if 100% of all children are now CLOSED
+    elif not unchecked_ids:
+        # Check if 100% of all children are now CLOSED
         all_closed = all(str(c.get("state", "")).upper() == "CLOSED" for c in children)
         if all_closed:
             p_edit_parent = await asyncio.create_subprocess_exec(
