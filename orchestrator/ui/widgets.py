@@ -418,3 +418,4 @@ class HarnessQuotaWidget(DataTable):
                 )
 
             _apply_keyed_diff(self, target_rows)
+

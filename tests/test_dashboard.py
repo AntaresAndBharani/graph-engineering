@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import pytest
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent
 
 from orchestrator.config import (
     GlobalConfig,
@@ -1525,3 +1525,4 @@ async def test_widgets_empty_state_transitions(tmp_path: Path):
         assert "No active SDLC items" in str(sdlc.get_row_at(0)[1])
         assert alerts.row_count == 1
         assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
+
