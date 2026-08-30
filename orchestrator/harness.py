@@ -86,15 +86,29 @@ def calculate_backoff_delay(attempt: int, config: HarnessRetryConfig) -> float:
 
 class AsyncHarnessAdapter:
     _active_processes: set[asyncio.subprocess.Process] = set()
-    _stream_listeners: set[Callable[[Optional[str], str], None]] = set()
+    _stream_listeners: set[
+        Callable[[Optional[str], Optional[str], str], None]
+        | Callable[[Optional[str], str], None]
+        | Callable[[str], None]
+    ] = set()
 
     @classmethod
-    def register_stream_listener(cls, listener: Callable[[Optional[str], str], None]) -> None:
+    def register_stream_listener(
+        cls,
+        listener: Callable[[Optional[str], Optional[str], str], None]
+        | Callable[[Optional[str], str], None]
+        | Callable[[str], None],
+    ) -> None:
         """Registers a callback to receive live real-time output stream lines."""
         cls._stream_listeners.add(listener)
 
     @classmethod
-    def unregister_stream_listener(cls, listener: Callable[[Optional[str], str], None]) -> None:
+    def unregister_stream_listener(
+        cls,
+        listener: Callable[[Optional[str], Optional[str], str], None]
+        | Callable[[Optional[str], str], None]
+        | Callable[[str], None],
+    ) -> None:
         """Unregisters a stream listener callback."""
         cls._stream_listeners.discard(listener)
 
@@ -206,6 +220,7 @@ class AsyncHarnessAdapter:
         log_file: Path,
         console_prefix: Optional[str] = None,
         project_name: Optional[str] = None,
+        node_name: Optional[str] = None,
     ) -> tuple[int, str]:
         """
         Runs a single subprocess attempt, streaming stdout/stderr to disk and console,
@@ -249,9 +264,12 @@ class AsyncHarnessAdapter:
                                     for listener in list(AsyncHarnessAdapter._stream_listeners):
                                         try:
                                             try:
-                                                listener(project_name, formatted_line)
+                                                listener(project_name, node_name, formatted_line)
                                             except TypeError:
-                                                listener(formatted_line)
+                                                try:
+                                                    listener(project_name, formatted_line)
+                                                except TypeError:
+                                                    listener(formatted_line)
                                         except Exception:
                                             pass
                         elif cleaned.strip():
@@ -260,9 +278,12 @@ class AsyncHarnessAdapter:
                                     for listener in list(AsyncHarnessAdapter._stream_listeners):
                                         try:
                                             try:
-                                                listener(project_name, subline)
+                                                listener(project_name, node_name, subline)
                                             except TypeError:
-                                                listener(subline)
+                                                try:
+                                                    listener(project_name, subline)
+                                                except TypeError:
+                                                    listener(subline)
                                         except Exception:
                                             pass
 
@@ -329,7 +350,13 @@ class AsyncHarnessAdapter:
 
         try:
             returncode, captured_output = await self._execute_once(
-                cmd, cwd, env, log_file, console_prefix, project_name=eff_project_name
+                cmd,
+                cwd,
+                env,
+                log_file,
+                console_prefix,
+                project_name=eff_project_name,
+                node_name=eff_node_name,
             )
         except TypeError:
             returncode, captured_output = await self._execute_once(
@@ -408,7 +435,13 @@ class AsyncHarnessAdapter:
 
             try:
                 returncode, captured_output = await self._execute_once(
-                    cmd, cwd, env, log_file, console_prefix, project_name=eff_project_name
+                    cmd,
+                    cwd,
+                    env,
+                    log_file,
+                    console_prefix,
+                    project_name=eff_project_name,
+                    node_name=eff_node_name,
                 )
             except TypeError:
                 returncode, captured_output = await self._execute_once(
