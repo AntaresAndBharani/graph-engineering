@@ -7,7 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Added **DevTest E2E Remote CI Verification & Auto-Merge (`orchestrator/nodes/devtest.py`, `tests/test_devtest_refactor.py`)**: Equipped the 3Amigos DevTest Node with end-to-end task completion capabilities. Upon implementing subtasks or remediating refactor PRs, DevTest validates remote GitHub Actions CI checks (`check_pr_ci_status`). If CI is 100% Green, DevTest approves the PR and directly executes squash-and-merge (`gh pr merge --squash --delete-branch`) into `main`, closes the parent issue, and synchronizes SDLC memory to `MERGED`. If CI fails, DevTest flags the PR with `needs-refactor` for autonomous remediation.
 - Added `architect-approved` and `needs-refactor` to `DEFAULT_MANAGED_LABELS` in `orchestrator/config.py` to ensure complete workflow taxonomy synchronization across local and remote repositories.
+
 
 
 ## [2.0.0] - 2026-08-30

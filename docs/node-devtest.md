@@ -21,11 +21,12 @@ flowchart TD
         RunTests -->|Pass| Commit["Commit & Push Feature Branch"]
     end
     
-    Commit --> DetectPR{"PR Created?"}
-    DetectPR -->|Existing / Agent Opened| Sync["Sync PR Labels: Add 'needs-architect-review'"]
-    DetectPR -->|Not Opened| CreatePR["Create PR using gh pr create"]
-    
-    Sync & CreatePR --> Complete["Mark Issue as 'dev-implemented', Remove 'ready-for-dev'"]
+    Commit --> CreatePR["Open or Detect Pull Request"]
+    CreatePR --> CheckCI{"Remote CI Status?"}
+    CheckCI -->|PASS 100% Green| AutoMerge["Auto-Merge into main (--squash --delete-branch)"]
+    AutoMerge --> CloseIssue["Close Issue & Mark 'dev-implemented'"]
+    CheckCI -->|FAIL| RefactorLabel["Flag PR with 'needs-refactor'"]
+    CheckCI -->|PENDING / Manual| ReviewLabel["Sync PR Label: 'needs-architect-review'"]
 ```
 
 ---
@@ -41,9 +42,11 @@ flowchart TD
    - Executes via the configured harness adapter (`antigravity`, `claude`, or `devin`).
    - Configured with extended print timeouts (`--print-timeout 45m`) for long multi-step compilation and testing runs.
 
-3. **Autonomous PR Detection**:
-   - If the AI harness autonomously branches (`feat/issue-<id>`), commits, and creates a Pull Request via GitHub CLI, the DevTest node automatically discovers the open PR.
-   - Automatically synchronizes PR metadata: attaches **`needs-architect-review`** and transitions the subtask issue to **`dev-implemented`**.
+3. **Autonomous E2E Verification & Auto-Merge**:
+   - If the AI harness autonomously branches (`feat/issue-<id>`), commits, and creates a Pull Request via GitHub CLI (or via fallback commit/push), DevTest validates remote GitHub Actions CI checks (`check_pr_ci_status`).
+   - If CI checks pass **100% Green** and `auto_merge_approved: true`, DevTest approves the PR and immediately executes **squash-and-merge** into `main` (`gh pr merge --squash --delete-branch`), closes the parent issue, and records the item as `MERGED` in SDLC memory.
+   - If remote CI fails, DevTest tags the PR with **`needs-refactor`** with details on failing checks for autonomous remediation.
+   - If manual review is explicitly configured (`auto_merge_approved: false`), attaches **`needs-architect-review`**.
 
 4. **Context-Aware Conflict Resolution (Blackboard Pattern)**:
    - Queries the local SQLite Blackboard (`pr_artifacts` table) before execution.
