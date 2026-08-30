@@ -1840,11 +1840,11 @@ async def test_dashboard_harness_stream_line_routing_with_project_tag(tmp_path: 
         # Check buffer manager
         ge_buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("graph-engineering")
         assert ge_buf is not None
-        assert any("Running unit tests..." in line for line in ge_buf)
+        assert any("Running unit tests..." in (item[1] if isinstance(item, tuple) else item) for item in ge_buf)
 
         other_buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("other-proj")
         assert other_buf is not None
-        assert any("Other project tests..." in line for line in other_buf)
+        assert any("Other project tests..." in (item[1] if isinstance(item, tuple) else item) for item in other_buf)
 
         # Check RichLog in UI (only graph-engineering should be rendered)
         rendered = [line.text for line in log_view.lines]

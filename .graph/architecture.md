@@ -124,7 +124,7 @@ graph TD
 1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`)**:
    - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), quota configuration structures (`HarnessQuotaConfig`, `QuotaSettings`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
    - Strictly isolated from concrete execution logic, database calls, and network I/O.
-   - Provides pure path normalization, environment resolution functions (`resolve_path`), in-memory bounded project-scoped log buffering with disk-tailing fallback (`ProjectLogBufferManager`), and bounded log streaming (`TextualLogHandler`).
+   - Provides pure path normalization, environment resolution functions (`resolve_path`), in-memory bounded project-scoped log buffering with `(node_name, line)` tuple storage, independent node filtering, and per-node disk-tailing fallback (`ProjectLogBufferManager`), and bounded log streaming (`TextualLogHandler`).
 
 2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`, `orchestrator/worktree.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).

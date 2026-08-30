@@ -167,7 +167,7 @@ class DashboardApp(App):
 
         buf = ProjectLogBufferManager.PROJECT_BUFFERS.get(project_name) if project_name else None
         if buf and len(buf) > 0:
-            lines = list(buf)
+            lines = [item[1] if isinstance(item, tuple) else item for item in buf]
         else:
             disk_lines = (
                 ProjectLogBufferManager.tail_latest_project_logs(
@@ -224,7 +224,8 @@ class DashboardApp(App):
             project_name = None
 
         line_project = project_name or ProjectLogBufferManager.extract_project_name(line)
-        self.buffer_manager.add_line(line, project_name=line_project)
+        line_node = ProjectLogBufferManager.extract_node_name(line)
+        self.buffer_manager.add_line(line, project_name=line_project, node_name=line_node)
 
         if self.selected_project and line_project and line_project != self.selected_project:
             return
