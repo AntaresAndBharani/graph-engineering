@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graph-orchestrator"
-version = "0.1.0"
+version = "2.0.0"
 description = "Decoupled, Agnostic Multi-Agent CLI Orchestrator for Engineering Pipelines"
 readme = "README.md"
 requires-python = ">=3.11"

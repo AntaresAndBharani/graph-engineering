@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-30
+
 ### Changed
 - Refactored `orchestrator/db.py` to remove speculative `get_window_token_sum` and `get_window_breakdown` alias methods, keeping the `StateManager` public API aligned 1:1 with the canonical `TokenUsageReader` Protocol (PR #69 review remediation).
 - Refactored `check_dispatch_quota` and all Application Pipeline Nodes (`architect`, `reviewer`, `devtest`, `bau`) to pass the node's explicitly resolved `harness_name` (e.g., `research_harness`, `conflict_harness`, or primary implementation harness) as the single source of truth for quota capacity gating, preventing cross-harness throttling mismatches. Removed unused `extract_token_counts` alias in `orchestrator/quota.py` and cleaned up `orchestrator/db.py` (PR #66 review remediation).

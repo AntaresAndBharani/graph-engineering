@@ -16,4 +16,4 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
