@@ -393,3 +393,97 @@ async def test_scenario_single_pass_bulk_pr_and_ci_rollup_display(tmp_path: Path
     assert stored_455["pr_status"] == "OPEN"
     assert stored_455["pr_ci_details"] == "PASS"
 
+
+@pytest.mark.asyncio
+async def test_scenario_bulk_pr_and_ci_rollup_variations(tmp_path: Path, monkeypatch):
+    """
+    Tests poll_project_sdlc_items with various PR statuses (MERGED, CLOSED, OPEN)
+    and CI check conclusions (FAIL, RUNNING, None).
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="multi-state-project",
+        repo="AntaresAndBharani/multi-state-project",
+        local_path=tmp_path / "multi-state-project",
+    )
+
+    mock_issues = [
+        {
+            "number": 10,
+            "title": "Subtask: Failing CI",
+            "state": "OPEN",
+            "labels": [{"name": "dev-implemented"}],
+            "body": "Subtask\nParent: #1",
+        },
+        {
+            "number": 20,
+            "title": "Subtask: Running CI",
+            "state": "OPEN",
+            "labels": [{"name": "dev-implemented"}],
+            "body": "Subtask\nParent: #1",
+        },
+        {
+            "number": 30,
+            "title": "Subtask: Merged PR",
+            "state": "CLOSED",
+            "labels": [{"name": "dev-implemented"}],
+            "body": "Subtask\nParent: #1",
+        },
+    ]
+
+    mock_prs = [
+        {
+            "number": 101,
+            "title": "feat: failing check",
+            "headRefName": "feat/issue-10",
+            "body": "Closes #10",
+            "state": "OPEN",
+            "statusCheckRollup": [
+                {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}
+            ],
+        },
+        {
+            "number": 102,
+            "title": "feat: running check",
+            "headRefName": "feat/issue-20",
+            "body": "Closes #20",
+            "state": "OPEN",
+            "statusCheckRollup": [
+                {"name": "test", "status": "IN_PROGRESS", "conclusion": ""}
+            ],
+        },
+        {
+            "number": 103,
+            "title": "feat: merged PR",
+            "headRefName": "feat/issue-30",
+            "body": "Closes #30",
+            "state": "MERGED",
+            "statusCheckRollup": [],
+        },
+    ]
+
+    monkeypatch.setattr(poller, "fetch_all_open_issues", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=mock_prs))
+
+    items = await poller.poll_project_sdlc_items(project, state_manager)
+    assert len(items) == 3
+
+    item_10 = next(i for i in items if i["issue_number"] == 10)
+    assert item_10["linked_pr"] == 101
+    assert item_10["pr_status"] == "OPEN"
+    assert item_10["pr_ci_details"] == "FAIL"
+
+    item_20 = next(i for i in items if i["issue_number"] == 20)
+    assert item_20["linked_pr"] == 102
+    assert item_20["pr_status"] == "OPEN"
+    assert item_20["pr_ci_details"] == "RUNNING"
+
+    item_30 = next(i for i in items if i["issue_number"] == 30)
+    assert item_30["linked_pr"] == 103
+    assert item_30["pr_status"] == "MERGED"
+    assert item_30["pr_ci_details"] is None
+
+
