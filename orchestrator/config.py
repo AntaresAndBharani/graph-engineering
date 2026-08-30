@@ -56,12 +56,11 @@ class NodeConfig(BaseModel):
     conflict_effort: Optional[str] = None
 
 
-
 def resolve_path(v: str | Path) -> Path:
     """
     Robustly expands paths across platforms, supporting:
     - Tilde (~) expansion
-    - POSIX $HOME / ${HOMEy variables even when running in Windows shells
+    - POSIX $HOME / ${HOME} variables even when running in Windows shells
     - Windows %USERPROFILE% / %APPDATA% variables on Linux/Windows
     - Any custom environment variables ($VAR, %VAR%)
     - Relative paths resolved against current working directory

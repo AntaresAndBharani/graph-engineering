@@ -15,14 +15,19 @@ from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
-from orchestrator.ui.widgets import AnomalyAlertsWidget, HarnessQuotaWidget, SDLCProgressWidget
+from orchestrator.quota import QuotaManager
+from orchestrator.ui.widgets import (
+    AnomalyAlertsWidget,
+    HarnessQuotaWidget,
+    SDLCProgressWidget,
+)
 
 
 class DashboardApp(App):
     """
     Read-only Async Textual TUI Observability Dashboard for graph-orchestrator watch.
     Displays a live alphabetically-sorted projects status table and multi-pane bottom split
-    with SDLCProgressWidget and TabbedContent hosting RichLog, AnomalyAlertsWidget, and HarnessQuotaWidget.
+    with SDLCProgressWidget and TabbedContent hosting RichLog, HarnessQuotaWidget, and AnomalyAlertsWidget.
     """
 
     CSS = """
@@ -75,12 +80,14 @@ class DashboardApp(App):
         config: Optional[GlobalConfig] = None,
         state_manager: Optional[StateManager] = None,
         log_handler: Optional[TextualLogHandler] = None,
+        quota_manager: Optional[QuotaManager] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.config = config or GlobalConfig()
         self.state_manager = state_manager
         self.log_handler = log_handler
+        self.quota_manager = quota_manager
         self.selected_project: Optional[str] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
@@ -96,10 +103,15 @@ class DashboardApp(App):
             with TabbedContent(id="tabs"):
                 with TabPane("Logs", id="tab_logs"):
                     yield RichLog(id="log_view", highlight=True, markup=True, max_lines=1000)
+                with TabPane("Quota Limits", id="tab_quotas"):
+                    yield HarnessQuotaWidget(
+                        id="quota_widget",
+                        config=self.config,
+                        state_manager=self.state_manager,
+                        quota_manager=self.quota_manager,
+                    )
                 with TabPane("Alerts (24h)", id="tab_alerts"):
                     yield AnomalyAlertsWidget(id="alerts_widget", state_manager=self.state_manager, hours=24.0)
-                with TabPane("Quotas", id="tab_quotas"):
-                    yield HarnessQuotaWidget(id="quota_widget", config=self.config, state_manager=self.state_manager)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -210,7 +222,11 @@ class DashboardApp(App):
         else:
             try:
                 quota_widget = self.query_one(HarnessQuotaWidget)
-                await quota_widget.update_quotas()
+                await quota_widget.update_quotas(
+                    config=self.config,
+                    state_manager=self.state_manager,
+                    quota_manager=self.quota_manager,
+                )
             except Exception:
                 pass
 

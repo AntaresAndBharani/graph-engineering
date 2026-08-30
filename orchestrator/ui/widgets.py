@@ -187,17 +187,16 @@ class HarnessQuotaWidget(DataTable):
         self,
         config: Optional[GlobalConfig] = None,
         state_manager: Optional[StateManager] = None,
+        quota_manager: Optional[QuotaManager] = None,
         project_name: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.config = config or GlobalConfig()
         self.state_manager = state_manager
+        self.quota_manager = quota_manager
         self.project_name = project_name
-        self.quota_manager: Optional[QuotaManager] = None
         self._render_lock = asyncio.Lock()
-        if self.state_manager is not None:
-            self.quota_manager = QuotaManager(self.config, self.state_manager)
 
     async def on_mount(self) -> None:
         """Initializes table configuration and renders initial quota metrics."""
@@ -211,17 +210,18 @@ class HarnessQuotaWidget(DataTable):
         self,
         config: Optional[GlobalConfig] = None,
         state_manager: Optional[StateManager] = None,
+        quota_manager: Optional[QuotaManager] = None,
     ) -> None:
         """
-        Asynchronously queries StateManager/QuotaManager for quota capacity and breakdowns,
+        Asynchronously queries QuotaManager for quota capacity and breakdowns,
         and updates the table rows. Non-blocking to the Textual UI event loop.
         """
         if config is not None:
             self.config = config
         if state_manager is not None:
             self.state_manager = state_manager
-        if self.state_manager is not None:
-            self.quota_manager = QuotaManager(self.config, self.state_manager)
+        if quota_manager is not None:
+            self.quota_manager = quota_manager
         await self._render_rows()
 
     async def update_project(self, project_name: Optional[str] = None) -> None:
@@ -258,12 +258,9 @@ class HarnessQuotaWidget(DataTable):
                 return
             self.clear()
 
-            if not self.state_manager:
+            if not self.quota_manager:
                 self.add_row("-", "No quota data", "-", "-", "-", "-")
                 return
-
-            if self.quota_manager is None:
-                self.quota_manager = QuotaManager(self.config, self.state_manager)
 
             harnesses = getattr(self.config, "quota", None)
             harness_dict = harnesses.harnesses if harnesses else {}
@@ -332,6 +329,3 @@ class HarnessQuotaWidget(DataTable):
                     node_str,
                     key=harness_name,
                 )
-
-
-
