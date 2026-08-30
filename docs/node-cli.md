@@ -151,6 +151,22 @@ orchestrator supervisor status -p <project_name>
 
 ---
 
+### `orchestrator quota`
+Commands for inspecting global multi-window harness token capacity, consumption velocity, and replenishment ETAs.
+
+```bash
+# View global token quota status and breakdown across all configured harnesses
+orchestrator quota status
+
+# Filter by a specific harness
+orchestrator quota status --harness claude
+```
+
+**Pre-flight Quota Gating on `orchestrator run`**:
+When running `orchestrator run --issue <number>`, the pre-flight gate calculates whether sufficient token runway exists for the target node's assigned harness. If insufficient capacity remains, execution halts with exit code `2` and displays a detailed deficit and replenishment countdown without mutating issue state.
+
+---
+
 ## 🔁 Transient Upstream Error Retry Engine
 
 The `AsyncHarnessAdapter` integrates an in-memory automatic retry engine with exponential backoff and randomized jitter to handle transient upstream API errors (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502/504 Bad Gateway/Timeout, connection resets).

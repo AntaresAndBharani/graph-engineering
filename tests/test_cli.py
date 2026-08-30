@@ -433,5 +433,49 @@ projects:
     assert "Replenishment:" in result.stdout
 
 
+def test_run_command_clears_stale_stop_signal(tmp_path: Path):
+    """Asserts that manual orchestrator run clears stale stop_requested flags in state.db."""
+    from orchestrator.db import StateManager
+    db_path = tmp_path / "state.db"
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "test-proj"
+    repo: "org/test-proj"
+    local_path: "{posix_path}"
+    nodes:
+      reviewer:
+        enabled: true
+        label_trigger: "architect-approved"
+        """,
+        encoding="utf-8",
+    )
+
+    async def prep():
+        sm = StateManager(db_path)
+        await sm.init_db()
+        await sm.request_stop()
+        assert await sm.is_stop_requested() is True
+
+    asyncio.run(prep())
+
+    result = runner.invoke(app, ["run", "-p", "test-proj", "-n", "reviewer", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert "Reviewer: No PRs labeled 'architect-approved'" in result.stdout
+
+    async def verify():
+        sm = StateManager(db_path)
+        assert await sm.is_stop_requested() is False
+
+    asyncio.run(verify())
+
+
+
 
 
