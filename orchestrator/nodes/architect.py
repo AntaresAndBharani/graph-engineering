@@ -15,7 +15,7 @@ from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
-from orchestrator.poller import fetch_issues_with_label, fetch_open_prs
+from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
 
 console = Console()
 
@@ -159,6 +159,10 @@ async def _sync_architecture_plane(
     if not harness_cfg:
         return False, f"Research harness '{harness_name}' not found."
 
+    allowed, q_res = await check_dispatch_quota(project, "architect", config, state_manager, harness_name=harness_name)
+    if not allowed:
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
+
     lock_acquired = await state_manager.acquire_lock(
         issue_id="architecture_sync",
         repo=project.repo,
@@ -261,6 +265,10 @@ async def _review_pr_architecture(
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not configured."
+
+    allowed, q_res = await check_dispatch_quota(project, "architect", config, state_manager, harness_name=harness_name)
+    if not allowed:
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
     retry_cfg = getattr(harness_cfg, "retry", None)
     max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
@@ -440,6 +448,10 @@ async def _triage_story(
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
+
+    allowed, q_res = await check_dispatch_quota(project, "architect", config, state_manager, harness_name=harness_name)
+    if not allowed:
+        return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
     retry_cfg = getattr(harness_cfg, "retry", None)
     max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0

@@ -102,6 +102,7 @@ graph TD
     subgraph Layer 2: Infrastructure & External Adapters
         HarnessAdapter["Harness Adapter (`orchestrator/harness.py`)"]
         SQLiteManager["State & Blackboard Manager (`orchestrator/db.py`)"]
+        QuotaEngine["Quota & Runway Gating Engine (`orchestrator/quota.py`)"]
         GitHubPoller["Zero-Token GitHub Poller (`orchestrator/poller.py`)"]
         Housekeeping["Label Provisioner (`orchestrator/housekeeping.py`)"]
         ReloaderWatcher["Source Watcher (`orchestrator/reloader.py`)"]
@@ -121,12 +122,13 @@ graph TD
 ### Separation of Concerns
 
 1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`)**:
-   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
+   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), quota configuration structures (`HarnessQuotaConfig`, `QuotaSettings`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
    - Strictly isolated from concrete execution logic, database calls, and network I/O.
    - Provides pure path normalization, environment resolution functions (`resolve_path`), and bounded log streaming (`TextualLogHandler`).
 
-2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
+2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
+   - Implements multi-window rolling quota calculations, velocity tracking, runway gating, and replenishment ETA projections (`QuotaManager`), decoupled from persistence through the typed `TokenUsageReader` protocol.
    - Implements asynchronous process execution, process tree lifecycle, ANSI-sanitized log streaming, and harness-level telemetry anomaly event production (`AsyncHarnessAdapter` writing retry/timeout anomalies to `anomaly_events`).
    - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_all_open_issues`, `fetch_open_prs`, `sync_repository_labels`).
    - Manages dynamic file modification inspection (`SourceWatcher`).
@@ -173,6 +175,7 @@ graph-engineering/
 │   ├── housekeeping.py              # GitHub label provisioning and taxonomy synchronization
 │   ├── logging.py                   # Unified file and console logging with ANSI sanitization & TextualLogHandler
 │   ├── poller.py                    # Zero-token GitHub CLI/GraphQL query abstraction
+│   ├── quota.py                     # Multi-window rolling token quota, burn velocity & replenishment ETA engine
 │   ├── reloader.py                  # Hot-reloading watcher and module re-importer
 │   ├── ui/                          # Presentation & TUI dashboard package
 │   │   ├── __init__.py              # Subpackage exports
@@ -196,6 +199,7 @@ graph-engineering/
 │   ├── test_logging.py              # Log rotation and ANSI strip tests
 │   ├── test_nodes.py                # Node workflow execution and boundary tests
 │   ├── test_project_pause.py        # Per-project pause/resume lifecycle tests
+│   ├── test_quota.py                # QuotaManager, velocity, runway gating, and token parser tests
 │   ├── test_reloader.py             # Hot reloading and source watcher tests
 │   ├── test_stop.py                 # Graceful daemon shutdown tests
 │   ├── test_supervisor_po.py        # Supervisor PO-proxy evaluation tests
@@ -216,13 +220,14 @@ graph-engineering/
 
 ## 🎨 Design Patterns, State Management & Dependency Injection
 
-### 1. Decoupled Artifact Blackboard Pattern (`pr_artifacts`, `po_tracking`, `sdlc_items` & `anomaly_events`)
+### 1. Decoupled Artifact Blackboard Pattern (`pr_artifacts`, `po_tracking`, `sdlc_items`, `anomaly_events` & `token_usage_events`)
 To prevent brittle multi-agent state machines and communication loss between asynchronous nodes, the system implements an **Artifact Blackboard** pattern stored in SQLite WAL:
-- **Routing vs. State**: GitHub Labels act as the event-driven *Router* (`poller.py`), while SQLite acts as the *Blackboard* (`pr_artifacts`, `po_tracking`, `sdlc_items`, `anomaly_events`).
+- **Routing vs. State**: GitHub Labels act as the event-driven *Router* (`poller.py`), while SQLite acts as the *Blackboard* (`pr_artifacts`, `po_tracking`, `sdlc_items`, `anomaly_events`, `token_usage_events`).
 - **Context Sharing (PRs)**: When `ReviewerNode` evaluates a PR that has passing code reviews but git merge conflicts, it writes an `APPROVED_WITH_CONFLICT` decision artifact to the blackboard. `DevTestNode` reads the blackboard and performs pure conflict resolution without repeating code reviews.
 - **PO Issue Tracking & Hash Gating (`po_tracking`)**: When `SupervisorNode` evaluates an issue labeled `needs-po-review`, it records its SHA-256 body hash, readiness status (`PO_APPROVED` or `NEEDS_HUMAN_CLARIFICATION`), generated Gherkin AC, and detected blockers. Subsequent cycles use the stored hash to short-circuit unchanged issues with zero LLM tokens.
 - **Architect Triage Context Ingestion (`po_tracking`)**: When `ArchitectNode` evaluates an issue labeled `needs-triage`, it queries `get_po_tracking(repo, issue_number)` on the Blackboard. If a pre-approved Gherkin Acceptance Criteria artifact (`PO_APPROVED`) is found, it is injected directly into the triage prompt context, bypassing redundant requirement re-derivation and ensuring end-to-end alignment with the Product Owner's intent.
 - **SDLC Item & Telemetry Synchronization (`sdlc_items` & `anomaly_events`)**: Application Pipeline Nodes (Layer 3) act as primary producers writing active issue/subtask/PR statuses (`sync_project_sdlc_items`) and domain-level anomalies into SQLite WAL, while `AsyncHarnessAdapter` (Layer 2 Infrastructure) acts as a secondary/harness-level producer writing telemetry anomalies, transient retry exceptions, and SLA violation events (`record_anomaly_event`). The TUI presentation layer (Layer 4 widgets `SDLCProgressWidget` and `AnomalyAlertsWidget`) serves as a pure read-only consumer, maintaining Zero-HTTP UI latency and strict Clean Architecture decoupling.
+- **Token Usage Ledger & Multi-Window Quota Gating (`token_usage_events`)**: Execution harnesses record token consumption events into SQLite WAL (`record_token_usage_event`). `StateManager` provides zero-timezone-drift rolling-window summation (`get_window_token_usage`) and usage breakdown by project and node (`get_usage_breakdown`) to enforce global harness quota limits across multi-project workspaces.
 
 ```mermaid
 sequenceDiagram
@@ -312,6 +317,14 @@ The Reviewer node implements a two-tier conflict resolution strategy:
 
 ### 6. Dependency Injection via Composition Root
 Configuration is loaded once via `load_config()` at the presentation entry point (`cli.py`) and passed explicitly down the call hierarchy (`config`, `project`, `state_manager`). Modules never rely on global mutable singletons.
+
+### 7. Multi-Window Rolling Quota & Velocity Runway Gating Pattern (`QuotaManager` & `TokenUsageReader`)
+To protect against rate-limit throttling and API cost overruns across multi-project workspaces, the control plane enforces a proactive, multi-window quota gating engine (`QuotaManager` in Layer 2 Infrastructure):
+- **Decoupled State Access via Typed Protocol (`TokenUsageReader`)**: `QuotaManager` interacts with the SQLite state engine strictly through the `@runtime_checkable` `TokenUsageReader` Protocol (`get_window_token_usage`, `get_usage_breakdown`, `get_token_usage_events`), ensuring clean architectural decoupling and eliminating runtime duck-typing.
+- **Fail-Fast Composition**: `QuotaManager` strictly validates injected dependencies (`GlobalConfig` | `QuotaSettings` and `TokenUsageReader`), raising `TypeError` on invalid configurations instead of masking errors with silent defaults.
+- **Pure Function Extraction**: Core mathematical calculations (`calculate_required_runway`, `calculate_remaining`, `calculate_velocity`, `calculate_replenishment_eta`, `extract_token_usage`) are isolated as pure functions without database or subprocess side effects.
+- **Global Harness Pooling & Shared Gating**: Gating checks (`check_harness_capacity`) evaluate total consumption across all projects sharing the same AI execution harness (e.g. `claude`, `antigravity`, `devin`). If the remaining quota within the configured rolling window ($W_{\text{hours}}$) is insufficient for the required safety runway ($R_{\text{runway}} = \text{avg\_tokens\_per\_hour} \times \frac{\text{buffer\_minutes}}{60}$), the harness is throttled before subprocess dispatch.
+- **Replenishment Countdown ETA**: When throttled, `calculate_replenishment_eta()` computes the exact seconds remaining until aging token usage events roll out of the sliding window, providing precise countdown telemetry to the dashboard.
 
 ---
 

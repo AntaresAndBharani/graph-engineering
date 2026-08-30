@@ -100,6 +100,28 @@ harnesses:
     timeout_minutes: 60
     retry_on_failure: 1
 
+# Token Quota & Velocity Gating Settings
+# Configures rolling window limits and consumption rates per AI harness pool.
+quota:
+  buffer_minutes: 30                  # Pre-flight runway requirement before dispatching tasks
+  harnesses:
+    antigravity:
+      window_hours: 1.0               # 1-hour rolling window
+      window_token_limit: 2000000     # 2.0M tokens per window
+      avg_tokens_per_hour: 400000     # Baseline velocity estimate
+    claude:
+      window_hours: 5.0               # 5-hour rolling window
+      window_token_limit: 5000000     # 5.0M tokens per window
+      avg_tokens_per_hour: 300000     # Baseline velocity estimate
+    devin:
+      window_hours: 5.0               # 5-hour rolling window
+      window_token_limit: 2500000     # 2.5M tokens per window
+      avg_tokens_per_hour: 150000     # Baseline velocity estimate
+    openai:
+      window_hours: 1.0               # 1-hour rolling window
+      window_token_limit: 1500000     # 1.5M tokens per window
+      avg_tokens_per_hour: 300000     # Baseline velocity estimate
+
 # Managed Projects Registry
 projects:
   - name: "project-alpha"

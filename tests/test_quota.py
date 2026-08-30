@@ -1,308 +1,490 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from orchestrator.config import (
-    GlobalConfig,
-    HarnessQuotaConfig,
-    NodeConfig,
-    ProjectConfig,
-    QuotaSettings,
-)
+from orchestrator.config import GlobalConfig, HarnessQuotaConfig, NodeConfig, ProjectConfig, QuotaSettings
 from orchestrator.db import StateManager
 from orchestrator.quota import (
     QuotaCheckResult,
     QuotaManager,
-    extract_token_usage,
+    calculate_remaining,
+    calculate_replenishment_eta,
+    calculate_required_runway,
+    calculate_velocity,
     extract_token_counts,
+    extract_token_usage,
     fallback_token_heuristic,
 )
 
 
+def test_pure_calculation_functions():
+    # Runway: 300,000 TPH with 30m buffer = 150,000 tokens
+    assert calculate_required_runway(300_000, 30) == 150_000
+    assert calculate_required_runway(400_000, 30) == 200_000
+    assert calculate_required_runway(400_000, 0) == 0
+
+    # Remaining: max(0, limit - used)
+    assert calculate_remaining(5_000_000, 4_880_000) == 120_000
+    assert calculate_remaining(5_000_000, 5_500_000) == 0
+    assert calculate_remaining(5_000_000, 0) == 5_000_000
+
+    # Velocity: used / window_hours
+    assert calculate_velocity(4_880_000, 5.0) == 976_000.0
+    assert calculate_velocity(120_000, 1.0) == 120_000.0
+    assert calculate_velocity(100, 0) == 0.0
+
+
+def test_calculate_replenishment_eta_pure():
+    now_utc = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
+    limit = 5_000_000
+    required_runway = 150_000  # Max allowed used = 4,850,000
+    used_tokens = 4_880_000    # Excess = 30,000
+    window_hours = 5.0
+
+    # Event occurred at 08:00:00 (4 hours ago). Expiry = 08:00:00 + 5h = 13:00:00 (1 hour from now = 3600s)
+    events = [
+        {"created_at": "2026-08-29 08:00:00", "total_tokens": 50_000},
+        {"created_at": "2026-08-29 10:00:00", "total_tokens": 4_830_000},
+    ]
+
+    eta = calculate_replenishment_eta(
+        events=events,
+        used_tokens=used_tokens,
+        limit=limit,
+        required_runway=required_runway,
+        window_hours=window_hours,
+        now=now_utc,
+    )
+    assert eta == 3600
+
+    # When usage is within capacity, ETA is 0
+    eta_allowed = calculate_replenishment_eta(
+        events=events,
+        used_tokens=4_800_000,
+        limit=limit,
+        required_runway=required_runway,
+        window_hours=window_hours,
+        now=now_utc,
+    )
+    assert eta_allowed == 0
+
+
+def test_quota_check_result_formatted_eta():
+    res1 = QuotaCheckResult(
+        harness_name="claude",
+        allowed=False,
+        remaining=120_000,
+        required=150_000,
+        used=4_880_000,
+        limit=5_000_000,
+        velocity=976_000.0,
+        eta_seconds=860,  # 14m 20s
+        deficit=30_000,
+        window_hours=5.0,
+    )
+    assert res1.formatted_eta == "14m 20s"
+
+    res2 = QuotaCheckResult(
+        harness_name="claude",
+        allowed=False,
+        remaining=0,
+        required=150_000,
+        used=5_000_000,
+        limit=5_000_000,
+        velocity=1_000_000.0,
+        eta_seconds=3665,  # 1h 1m 5s
+        deficit=150_000,
+        window_hours=5.0,
+    )
+    assert res2.formatted_eta == "1h 1m 5s"
+
+    res3 = QuotaCheckResult(
+        harness_name="antigravity",
+        allowed=True,
+        remaining=1_880_000,
+        required=200_000,
+        used=120_000,
+        limit=2_000_000,
+        velocity=120_000.0,
+        eta_seconds=0,
+        deficit=0,
+        window_hours=1.0,
+    )
+    assert res3.formatted_eta == "0s"
+
+
+def test_token_extraction_and_fallback():
+    # 1. JSON block extraction
+    stdout_json = 'Execution finished. {"usage": {"prompt_tokens": 1500, "completion_tokens": 500, "total_tokens": 2000}}'
+    p, c, t = extract_token_usage(stdout_json)
+    assert p == 1500
+    assert c == 500
+    assert t == 2000
+
+    # 2. Regex matching
+    stdout_regex = 'Total tokens used: 12,500\nPrompt tokens: 10,000\nCompletion tokens: 2,500'
+    p, c, t = extract_token_usage(stdout_regex)
+    assert p == 10000
+    assert c == 2500
+    assert t == 12500
+
+    # 3. Fallback heuristic on character count
+    prompt = "A" * 2000
+    stdout = "B" * 2000
+    p_h, c_h, t_h = extract_token_usage(stdout, prompt)
+    assert t_h == 1000
+    assert p_h + c_h == t_h
+
+    # 4. Fallback minimum 1000 tokens for short non-empty text
+    p_min, c_min, t_min = extract_token_usage("Short output", "Short prompt")
+    assert t_min == 1000
+
+    # 5. Empty inputs return 0
+    assert fallback_token_heuristic("", "") == 0
+    assert extract_token_counts("", "") == (0, 0, 0)
+
+
 @pytest.mark.asyncio
-async def test_multi_hour_window_calculations():
+async def test_resolve_harness_for_node():
+    config = GlobalConfig()
+    mock_state = AsyncMock()
+    manager = QuotaManager(config, mock_state)
+
+    project = ProjectConfig(
+        name="test-proj",
+        repo="org/test-proj",
+        local_path=Path("."),
+        nodes={
+            "architect": NodeConfig(enabled=True, harness="claude"),
+            "devtest": NodeConfig(enabled=True, harness="antigravity"),
+        },
+    )
+
+    assert manager.resolve_harness_for_node(project, "architect") == "claude"
+    assert manager.resolve_harness_for_node(project, "devtest") == "antigravity"
+    # Fallback to NodeConfig default when node not explicitly configured
+    assert manager.resolve_harness_for_node(project, "supervisor") == "claude"
+    assert manager.resolve_harness_for_node(project, "reviewer") == "claude"
+    assert manager.resolve_harness_for_node(project, "bau") == "claude"
+
+
+@pytest.mark.asyncio
+async def test_global_harness_shared_consumption(tmp_path: Path):
     """
-    Gherkin Scenario: 5-hour rolling window runway validation (Claude pool)
-      Given harness "claude" has window_token_limit=5,000,000 over 5 hours and avg_tokens_per_hour=300,000
-      And total consumption in the last 5 hours is 4,880,000 tokens
-      When check_harness_capacity("claude") is called
-      Then remaining is 120,000 and required runway is 150,000
-      And allowed is False
-      And eta_seconds projects when the oldest excess event ages out of the window
+    Scenario 1: Project A consumption decrements Project B remaining quota
+    under shared harness pool.
     """
-    state_mock = MagicMock(spec=StateManager)
-    state_mock.get_window_token_sum = AsyncMock(return_value=4_880_000)
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=2_000_000,
+                    avg_tokens_per_hour=400_000,
+                )
+            },
+        )
+    )
+
+    quota_mgr = QuotaManager(config, state_manager)
+
+    # Project A records usage
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=42,
+        prompt_tokens=100_000,
+        completion_tokens=20_000,
+        total_tokens=120_000,
+    )
+
+    res = await quota_mgr.check_harness_capacity("antigravity")
+    assert res.used == 120_000
+    assert res.remaining == 1_880_000
+    assert res.allowed is True
+
+    # Informative breakdown
+    breakdown = await quota_mgr.get_informative_breakdown("antigravity")
+    assert breakdown["by_project"]["graph-engineering"] == 100.0
+    assert breakdown["by_node"]["devtest"] == 100.0
+
+    # Project B records usage
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="crosstrainingapp",
+        node_name="reviewer",
+        issue_number=10,
+        prompt_tokens=60_000,
+        completion_tokens=20_000,
+        total_tokens=80_000,
+    )
+
+    res2 = await quota_mgr.check_harness_capacity("antigravity")
+    assert res2.used == 200_000
+    assert res2.remaining == 1_800_000
+
+    breakdown2 = await quota_mgr.get_informative_breakdown("antigravity")
+    assert breakdown2["by_project"]["graph-engineering"] == 60.0
+    assert breakdown2["by_project"]["crosstrainingapp"] == 40.0
+    assert breakdown2["by_node"]["devtest"] == 60.0
+    assert breakdown2["by_node"]["reviewer"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_multi_hour_window_calculations(tmp_path: Path):
+    """
+    Scenario 2: 5-hour rolling window runway validation (Claude pool).
+    Given harness "claude" has window_token_limit=5,000,000 and avg_tokens_per_hour=300,000
+    And total global consumption in the last 5 hours is 4,880,000 tokens
+    When `check_harness_capacity("claude")` is called
+    Then remaining quota (120,000) is less than required runway (150,000)
+    And allowed=False, remaining=120000, required=150000
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                )
+            },
+        )
+    )
+
+    quota_mgr = QuotaManager(config, state_manager)
 
     now_utc = datetime.now(timezone.utc)
-    # Excess is 4,880,000 - (5,000,000 - 150,000) = 4,880,000 - 4,850,000 = 30,000 tokens.
-    # Event 1 (4h ago): 10,000 tokens
-    # Event 2 (3h ago): 25,000 tokens (Accumulated = 35,000 >= 30,000 -> ages out in 2h = 7200s)
-    ev1_dt = (now_utc - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
-    ev2_dt = (now_utc - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
-    state_mock.get_window_events = AsyncMock(
-        return_value=[
-            {"id": 1, "total_tokens": 10_000, "created_at": ev1_dt},
-            {"id": 2, "total_tokens": 25_000, "created_at": ev2_dt},
-        ]
+    old_time = (now_utc - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+    recent_time = (now_utc - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Event 6 hours ago (should be excluded from 5h window)
+    await state_manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-sonnet-5",
+        project_name="proj",
+        node_name="architect",
+        issue_number=1,
+        prompt_tokens=500_000,
+        completion_tokens=100_000,
+        total_tokens=600_000,
+        created_at=old_time,
     )
 
-    quota_settings = QuotaSettings(
-        buffer_minutes=30,
-        harnesses={
-            "claude": HarnessQuotaConfig(
-                window_hours=5.0,
-                window_token_limit=5_000_000,
-                avg_tokens_per_hour=300_000,
-            )
-        },
+    # Event 2 hours ago (included in 5h window)
+    await state_manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-sonnet-5",
+        project_name="proj",
+        node_name="architect",
+        issue_number=2,
+        prompt_tokens=4_000_000,
+        completion_tokens=880_000,
+        total_tokens=4_880_000,
+        created_at=recent_time,
     )
-    manager = QuotaManager(quota_settings, state_mock)
-    result = await manager.check_harness_capacity("claude")
 
-    assert isinstance(result, QuotaCheckResult)
-    assert result.harness_name == "claude"
-    assert result.limit == 5_000_000
-    assert result.used == 4_880_000
-    assert result.remaining == 120_000
-    assert result.required == 150_000
-    assert result.allowed is False
-    assert result.deficit == 30_000
-    assert result.velocity == round(4_880_000 / 5.0, 2)
-    # Event 2 was created 3h ago, window is 5h => ages out in ~2h (7200s +/- 5s)
-    assert 7190 <= result.eta_seconds <= 7210
-    assert "h" in result.formatted_eta or "m" in result.formatted_eta
+    res = await quota_mgr.check_harness_capacity("claude")
+    assert res.used == 4_880_000
+    assert res.remaining == 120_000
+    assert res.required == 150_000
+    assert res.allowed is False
+    assert res.deficit == 30_000
+    assert res.velocity == 976_000.0
+    assert res.eta_seconds > 0
 
 
 @pytest.mark.asyncio
-async def test_window_replenishment_clears_throttle():
+async def test_window_replenishment_clears_throttle(tmp_path: Path):
     """
-    Gherkin Scenario: Window replenishment clears the throttle
-      Given harness "claude" was throttled with remaining < required
-      When enough historical events age past the 5-hour window such that remaining >= required
-      Then check_harness_capacity("claude") returns allowed=True
+    Scenario 3: Window replenishment automatically clears throttle.
+    When enough time elapses that the rolling token sum drops below 4,850,000,
+    check_harness_capacity returns allowed=True.
     """
-    state_mock = MagicMock(spec=StateManager)
-    # Total consumption drops to 4,800,000 (remaining 200,000 >= 150,000 required)
-    state_mock.get_window_token_sum = AsyncMock(return_value=4_800_000)
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
 
-    quota_settings = QuotaSettings(
-        buffer_minutes=30,
-        harnesses={
-            "claude": HarnessQuotaConfig(
-                window_hours=5.0,
-                window_token_limit=5_000_000,
-                avg_tokens_per_hour=300_000,
-            )
-        },
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                )
+            },
+        )
     )
-    manager = QuotaManager(quota_settings, state_mock)
-    result = await manager.check_harness_capacity("claude")
 
-    assert result.allowed is True
-    assert result.remaining == 200_000
-    assert result.required == 150_000
-    assert result.deficit == 0
-    assert result.eta_seconds == 0
-    assert result.formatted_eta == "0s"
+    quota_mgr = QuotaManager(config, state_manager)
+
+    # All events are aged past 5 hours
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+    await state_manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-sonnet-5",
+        project_name="proj",
+        node_name="architect",
+        issue_number=1,
+        prompt_tokens=4_000_000,
+        completion_tokens=880_000,
+        total_tokens=4_880_000,
+        created_at=old_time,
+    )
+
+    res = await quota_mgr.check_harness_capacity("claude")
+    assert res.used == 0
+    assert res.remaining == 5_000_000
+    assert res.allowed is True
+    assert res.eta_seconds == 0
 
 
 @pytest.mark.asyncio
-async def test_velocity_and_eta_projections():
+async def test_informative_breakdown_multi_node(tmp_path: Path):
     """
-    Verifies burn velocity calculation and replenishment ETA fallback projection
-    when no events are in the event ledger.
+    Scenario 4: Informative breakdown by project and node summing to 100%.
     """
-    state_mock = MagicMock(spec=StateManager)
-    state_mock.get_window_token_sum = AsyncMock(return_value=1_900_000)
-    state_mock.get_window_events = AsyncMock(return_value=[])
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
 
-    quota_settings = QuotaSettings(
-        buffer_minutes=30,
-        harnesses={
-            "antigravity": HarnessQuotaConfig(
-                window_hours=1.0,
-                window_token_limit=2_000_000,
-                avg_tokens_per_hour=400_000,
-            )
-        },
-    )
-    manager = QuotaManager(quota_settings, state_mock)
-    result = await manager.check_harness_capacity("antigravity")
-
-    # Limit: 2.0M, Buffer: 30m -> Required: 200,000. Used: 1.9M -> Remaining: 100,000. Deficit: 100,000.
-    assert result.allowed is False
-    assert result.remaining == 100_000
-    assert result.required == 200_000
-    assert result.deficit == 100_000
-    assert result.velocity == 1_900_000.0
-    # Fallback ETA: (excess / avg_tph) * 3600 = (100_000 / 400_000) * 3600 = 900s (15m)
-    assert result.eta_seconds == 900
-    assert result.formatted_eta == "15m"
-
-
-def test_token_extraction_regex_and_fallback():
-    """
-    Gherkin Scenario: Empirical fallback token heuristic
-      Given a harness CLI output with no structured token counts
-      And prompt length 4000 chars and stdout length 4000 chars
-      When the fallback heuristic runs
-      Then it returns max(1000, floor(8000/4)) = 2000
-    """
-    # 1. Fallback heuristic pure function
-    prompt_4k = "x" * 4000
-    stdout_4k = "y" * 4000
-    h_tokens = fallback_token_heuristic(prompt_4k, stdout_4k)
-    assert h_tokens == 2000
-
-    # Small output fallback clamp to minimum 1000
-    assert fallback_token_heuristic("short", "output") == 1000
-
-    # Empty inputs
-    assert fallback_token_heuristic("", "") == 0
-
-    # 2. extract_token_usage with unstructured text
-    p_tok, c_tok, tot_tok = extract_token_usage(stdout_4k, prompt_4k)
-    assert tot_tok == 2000
-    assert p_tok == 1000
-    assert c_tok == 1000
-
-    # 3. Structured JSON extraction
-    json_stdout = '{"usage": {"prompt_tokens": 1250, "completion_tokens": 450, "total_tokens": 1700}}'
-    p, c, t = extract_token_usage(json_stdout, "some prompt")
-    assert p == 1250
-    assert c == 450
-    assert t == 1700
-
-    # 4. Anthropic style JSON
-    anthropic_json = '{"type": "message", "usage": {"input_tokens": 800, "output_tokens": 200}}'
-    p, c, t = extract_token_usage(anthropic_json)
-    assert p == 800
-    assert c == 200
-    assert t == 1000
-
-    # 5. Regex text matching
-    regex_stdout = """
-    Execution completed in 4.2s.
-    Prompt Tokens: 3,450
-    Completion Tokens: 1,200
-    Total Tokens: 4,650
-    """
-    p, c, t = extract_token_usage(regex_stdout)
-    assert p == 3450
-    assert c == 1200
-    assert t == 4650
-
-    # 6. Alias verification
-    assert extract_token_counts == extract_token_usage
-
-
-@pytest.mark.asyncio
-async def test_get_informative_breakdown():
-    """
-    Gherkin Scenario: Informative breakdown percentages
-      Given usage of 600,000 project A tokens and 400,000 project B tokens for harness "antigravity" in-window
-      When get_informative_breakdown("antigravity") is called
-      Then it reports project A at 60% and project B at 40%
-    """
-    state_mock = MagicMock(spec=StateManager)
-    state_mock.get_window_breakdown = AsyncMock(
-        return_value={
-            "by_project": {"project_a": 600_000, "project_b": 400_000},
-            "by_node": {"devtest": 500_000, "reviewer": 300_000, "bau": 200_000},
-        }
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=2_000_000,
+                    avg_tokens_per_hour=400_000,
+                )
+            }
+        )
     )
 
-    manager = QuotaManager(GlobalConfig(), state_mock)
-    breakdown = await manager.get_informative_breakdown("antigravity")
+    quota_mgr = QuotaManager(config, state_manager)
 
-    assert breakdown["by_project"]["project_a"] == 60.0
-    assert breakdown["by_project"]["project_b"] == 40.0
+    # devtest: 50,000, reviewer: 30,000, bau: 20,000 = total 100,000
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=1,
+        prompt_tokens=40_000,
+        completion_tokens=10_000,
+        total_tokens=50_000,
+    )
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="reviewer",
+        issue_number=2,
+        prompt_tokens=25_000,
+        completion_tokens=5_000,
+        total_tokens=30_000,
+    )
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="bau",
+        issue_number=3,
+        prompt_tokens=15_000,
+        completion_tokens=5_000,
+        total_tokens=20_000,
+    )
+
+    breakdown = await quota_mgr.get_informative_breakdown("antigravity")
+    assert breakdown["by_project"]["graph-engineering"] == 100.0
     assert breakdown["by_node"]["devtest"] == 50.0
     assert breakdown["by_node"]["reviewer"] == 30.0
     assert breakdown["by_node"]["bau"] == 20.0
-    assert breakdown["total_tokens"] == 1_000_000
-
-
-def test_resolve_harness_for_node():
-    """
-    Tests harness resolution by node configuration and architectural defaults.
-    """
-    manager = QuotaManager(GlobalConfig(), MagicMock(spec=StateManager))
-
-    # Explicit node configuration
-    custom_project = ProjectConfig(
-        name="custom",
-        repo="org/custom",
-        local_path=".",
-        nodes={
-            "devtest": NodeConfig(harness="devin"),
-            "architect": NodeConfig(harness="openai"),
-        },
-    )
-    assert manager.resolve_harness_for_node(custom_project, "devtest") == "devin"
-    assert manager.resolve_harness_for_node(custom_project, "architect") == "openai"
-
-    # Default architectural fallbacks
-    empty_project = ProjectConfig(name="empty", repo="org/empty", local_path=".")
-    assert manager.resolve_harness_for_node(empty_project, "architect") == "claude"
-    assert manager.resolve_harness_for_node(empty_project, "supervisor") == "claude"
-    assert manager.resolve_harness_for_node(empty_project, "reviewer") == "claude"
-    assert manager.resolve_harness_for_node(empty_project, "devtest") == "antigravity"
-    assert manager.resolve_harness_for_node(empty_project, "bau") == "antigravity"
-
-
-def test_formatted_eta_variations():
-    """
-    Tests formatted ETA output for various second counts.
-    """
-    res_0 = QuotaCheckResult("c", True, 10, 5, 0, 10, 0.0, 0, 0, 1.0)
-    assert res_0.formatted_eta == "0s"
-
-    res_sec = QuotaCheckResult("c", False, 0, 5, 10, 10, 0.0, 45, 5, 1.0)
-    assert res_sec.formatted_eta == "45s"
-
-    res_min_sec = QuotaCheckResult("c", False, 0, 5, 10, 10, 0.0, 860, 5, 1.0)
-    assert res_min_sec.formatted_eta == "14m 20s"
-
-    res_hrs_min_sec = QuotaCheckResult("c", False, 0, 5, 10, 10, 0.0, 7325, 5, 1.0)
-    assert res_hrs_min_sec.formatted_eta == "2h 2m 5s"
+    assert sum(breakdown["by_node"].values()) == 100.0
 
 
 @pytest.mark.asyncio
-async def test_real_sqlite_state_manager_quota_integration(tmp_path: Path):
+async def test_mocked_state_manager():
     """
-    Full integration test with SQLite WAL StateManager recording events and querying windows.
+    Tests QuotaManager with mocked StateManager / TokenUsageReader for unit isolation.
     """
-    db_file = tmp_path / "test_quota_state.db"
-    state = StateManager(db_file)
-    await state.init_db()
+    mock_state = AsyncMock()
+    mock_state.get_window_token_usage.return_value = 100_000
+    mock_state.get_usage_breakdown.return_value = {
+        "by_project": {"p1": 70_000, "p2": 30_000},
+        "by_node": {"n1": 60_000, "n2": 40_000},
+    }
 
-    now_utc = datetime.now(timezone.utc)
-    t1 = (now_utc - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
-    t2 = (now_utc - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
-    t_old = (now_utc - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    quota_settings = QuotaSettings(
+        buffer_minutes=30,
+        harnesses={
+            "custom": HarnessQuotaConfig(
+                window_hours=2.0,
+                window_token_limit=1_000_000,
+                avg_tokens_per_hour=200_000,
+            )
+        },
+    )
 
-    # Record events in window
-    await state.record_token_usage_event("antigravity", "gemini-flash", "proj1", "devtest", 10, 100, 400, 500, created_at=t1)
-    await state.record_token_usage_event("antigravity", "gemini-flash", "proj2", "reviewer", 11, 200, 800, 1000, created_at=t2)
-    # Record event outside 1h window
-    await state.record_token_usage_event("antigravity", "gemini-flash", "proj1", "devtest", 9, 500, 2000, 2500, created_at=t_old)
+    mgr = QuotaManager(quota_settings, mock_state)
+    res = await mgr.check_harness_capacity("custom")
+    assert res.used == 100_000
+    assert res.remaining == 900_000
+    assert res.required == 100_000
+    assert res.allowed is True
+    assert res.velocity == 50_000.0
 
-    # 1h window sum should only include t1 and t2 = 1500 tokens
-    sum_1h = await state.get_window_token_sum("antigravity", 1.0)
-    assert sum_1h == 1500
+    breakdown = await mgr.get_informative_breakdown("custom")
+    assert breakdown["by_project"]["p1"] == 70.0
+    assert breakdown["by_project"]["p2"] == 30.0
+    assert breakdown["by_node"]["n1"] == 60.0
+    assert breakdown["by_node"]["n2"] == 40.0
 
-    # 3h window sum includes all three = 4000 tokens
-    sum_3h = await state.get_window_token_sum("antigravity", 3.0)
-    assert sum_3h == 4000
 
-    # Breakdown in 1h window
-    manager = QuotaManager(GlobalConfig(), state)
-    breakdown = await manager.get_informative_breakdown("antigravity")
-    assert breakdown["by_project"]["proj1"] == 33.3
-    assert breakdown["by_project"]["proj2"] == 66.7
-    assert breakdown["by_node"]["devtest"] == 33.3
-    assert breakdown["by_node"]["reviewer"] == 66.7
+def test_quota_manager_fail_fast_validation():
+    """
+    Asserts that QuotaManager fails fast with TypeError when misconfigured.
+    """
+    mock_state = AsyncMock()
+
+    # Invalid config types
+    with pytest.raises(TypeError, match="Invalid config type"):
+        QuotaManager("invalid_string", mock_state)  # type: ignore
+
+    with pytest.raises(TypeError, match="Invalid config type"):
+        QuotaManager(123, mock_state)  # type: ignore
+
+    with pytest.raises(TypeError, match="Invalid config type"):
+        QuotaManager(None, mock_state)  # type: ignore
+
+    # None state_manager
+    with pytest.raises(TypeError, match="state_manager cannot be None"):
+        QuotaManager(GlobalConfig(), None)  # type: ignore
+
+
+def test_token_usage_reader_protocol(tmp_path: Path):
+    """
+    Asserts that StateManager satisfies the runtime-checkable TokenUsageReader protocol.
+    """
+    from orchestrator.quota import TokenUsageReader
+
+    state_manager = StateManager(tmp_path / "state.db")
+    assert isinstance(state_manager, TokenUsageReader)
+

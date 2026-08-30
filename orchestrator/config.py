@@ -274,4 +274,3 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
             q_data["harnesses"] = merged_harnesses
 
     return GlobalConfig(**raw_data)
-
