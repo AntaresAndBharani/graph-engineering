@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import time
 import pytest
@@ -442,6 +443,329 @@ async def test_anomaly_events_record_and_24h_window_query(tmp_path: Path):
     # Query with 48h window -> old anomaly is included
     filtered_48h = await manager.get_recent_anomalies("alpha", hours=48.0)
     assert len(filtered_48h) == 2
+
+
+@pytest.mark.asyncio
+async def test_token_usage_events_schema_and_indexes(tmp_path: Path):
+    """
+    Verifies token_usage_events table schema, column types, default created_at,
+    and indices: idx_token_usage_harness_time and idx_token_usage_project_node.
+    """
+    import aiosqlite
+
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    # Initial creation and idempotency test
+    await manager.init_db()
+    await manager.init_db()
+
+    async with aiosqlite.connect(manager.db_path) as db:
+        # Check token_usage_events table
+        cursor = await db.execute("PRAGMA table_info(token_usage_events);")
+        columns = await cursor.fetchall()
+        col_map = {col[1]: {"type": col[2].upper(), "pk": col[5], "notnull": col[3]} for col in columns}
+
+        expected_cols = {
+            "id": "INTEGER",
+            "harness_name": "TEXT",
+            "model_name": "TEXT",
+            "project_name": "TEXT",
+            "node_name": "TEXT",
+            "issue_number": "INTEGER",
+            "prompt_tokens": "INTEGER",
+            "completion_tokens": "INTEGER",
+            "total_tokens": "INTEGER",
+            "created_at": "TIMESTAMP",
+        }
+        for name, expected_type in expected_cols.items():
+            assert name in col_map, f"Missing column {name} in token_usage_events"
+            assert col_map[name]["type"] == expected_type, f"Column {name} expected type {expected_type}, got {col_map[name]['type']}"
+
+        assert col_map["id"]["pk"] == 1
+        assert col_map["harness_name"]["notnull"] == 1
+        assert col_map["model_name"]["notnull"] == 1
+        assert col_map["project_name"]["notnull"] == 1
+        assert col_map["node_name"]["notnull"] == 1
+        assert col_map["issue_number"]["notnull"] == 0
+        assert col_map["prompt_tokens"]["notnull"] == 1
+        assert col_map["completion_tokens"]["notnull"] == 1
+        assert col_map["total_tokens"]["notnull"] == 1
+
+        # Check indexes
+        cursor = await db.execute("PRAGMA index_list(token_usage_events);")
+        indexes = await cursor.fetchall()
+        idx_names = [idx[1] for idx in indexes]
+        assert "idx_token_usage_harness_time" in idx_names
+        assert "idx_token_usage_project_node" in idx_names
+
+
+@pytest.mark.asyncio
+async def test_record_token_usage_event_scenario(tmp_path: Path):
+    """
+    Scenario: Recording a token usage event
+      Given a harness "antigravity" execution completes for project "graph-engineering" node "devtest"
+      When record_token_usage_event is called with prompt_tokens=1000, completion_tokens=500, total_tokens=1500
+      Then a row is inserted into token_usage_events with created_at in UTC
+      And project_name="graph-engineering" and node_name="devtest" are stored
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=52,
+        prompt_tokens=1000,
+        completion_tokens=500,
+        total_tokens=1500,
+    )
+
+    events = await manager.get_token_usage_events("antigravity")
+    assert len(events) == 1
+    event = events[0]
+    assert event["harness_name"] == "antigravity"
+    assert event["model_name"] == "gemini-3.7-flash"
+    assert event["project_name"] == "graph-engineering"
+    assert event["node_name"] == "devtest"
+    assert event["issue_number"] == 52
+    assert event["prompt_tokens"] == 1000
+    assert event["completion_tokens"] == 500
+    assert event["total_tokens"] == 1500
+    assert isinstance(event["created_at"], str)
+
+    # Verify created_at parses as UTC ISO datetime
+    created_dt = datetime.strptime(event["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    assert abs((now_utc - created_dt).total_seconds()) < 60
+
+
+@pytest.mark.asyncio
+async def test_rolling_window_sum_timezone_safety(tmp_path: Path):
+    """
+    Scenario: Rolling window sum is timezone-safe
+      Given events exist at various UTC timestamps for harness "claude"
+      When get_window_token_usage("claude", window_hours=5.0) is called
+      Then only events with created_at >= (utcnow - 5 hours) are summed
+      And the calculation is unaffected by local machine timezone
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Event 1: 1 hour ago (within 5h window) -> 100,000 tokens
+    t1 = now_utc - timedelta(hours=1)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="architect",
+        issue_number=10,
+        prompt_tokens=80000,
+        completion_tokens=20000,
+        total_tokens=100000,
+        created_at=t1,
+    )
+
+    # Event 2: 4 hours ago (within 5h window) -> 250,000 tokens
+    t2 = now_utc - timedelta(hours=4)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="crosstrainingapp",
+        node_name="devtest",
+        issue_number=20,
+        prompt_tokens=200000,
+        completion_tokens=50000,
+        total_tokens=250000,
+        created_at=t2,
+    )
+
+    # Event 3: 5.5 hours ago (OUTSIDE 5h window) -> 500,000 tokens
+    t3 = now_utc - timedelta(hours=5, minutes=30)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="bau",
+        issue_number=5,
+        prompt_tokens=400000,
+        completion_tokens=100000,
+        total_tokens=500000,
+        created_at=t3,
+    )
+
+    # Event 4: 10 hours ago (OUTSIDE 5h window) -> 1,000,000 tokens
+    t4 = now_utc - timedelta(hours=10)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="other-app",
+        node_name="reviewer",
+        issue_number=1,
+        prompt_tokens=800000,
+        completion_tokens=200000,
+        total_tokens=1000000,
+        created_at=t4,
+    )
+
+    # 5-hour window sum should be Event 1 + Event 2 = 100,000 + 250,000 = 350,000
+    usage_5h = await manager.get_window_token_usage("claude", window_hours=5.0)
+    assert usage_5h == 350000
+
+    # 2-hour window sum should be Event 1 only = 100,000
+    usage_2h = await manager.get_window_token_usage("claude", window_hours=2.0)
+    assert usage_2h == 100000
+
+    # 12-hour window sum should be all 4 events = 1,850,000
+    usage_12h = await manager.get_window_token_usage("claude", window_hours=12.0)
+    assert usage_12h == 1850000
+
+
+@pytest.mark.asyncio
+async def test_global_pooling_across_projects(tmp_path: Path):
+    """
+    Scenario: Global pooling across projects
+      Given project "graph-engineering" records 120000 tokens for harness "antigravity"
+      And project "crosstrainingapp" records 80000 tokens for the same harness
+      When get_window_token_usage("antigravity", window_hours=1.0) is called
+      Then the returned sum is 200000
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=101,
+        prompt_tokens=100000,
+        completion_tokens=20000,
+        total_tokens=120000,
+    )
+
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="crosstrainingapp",
+        node_name="reviewer",
+        issue_number=202,
+        prompt_tokens=60000,
+        completion_tokens=20000,
+        total_tokens=80000,
+    )
+
+    usage = await manager.get_window_token_usage("antigravity", window_hours=1.0)
+    assert usage == 200000
+
+
+@pytest.mark.asyncio
+async def test_usage_breakdown_by_project_and_node(tmp_path: Path):
+    """
+    Scenario: Usage breakdown by project and node
+      Given multiple events recorded across projects and nodes for harness "antigravity"
+      When get_usage_breakdown("antigravity", window_hours=1.0) is called
+      Then it returns token totals keyed by project_name
+      And token totals keyed by node_name
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Event 1: graph-engineering / devtest: 60,000 tokens
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=1,
+        prompt_tokens=50000,
+        completion_tokens=10000,
+        total_tokens=60000,
+    )
+
+    # Event 2: graph-engineering / reviewer: 40,000 tokens
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="reviewer",
+        issue_number=2,
+        prompt_tokens=30000,
+        completion_tokens=10000,
+        total_tokens=40000,
+    )
+
+    # Event 3: crosstrainingapp / devtest: 50,000 tokens
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="crosstrainingapp",
+        node_name="devtest",
+        issue_number=3,
+        prompt_tokens=40000,
+        completion_tokens=10000,
+        total_tokens=50000,
+    )
+
+    # Event 4: other harness event (should be excluded from antigravity breakdown)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="architect",
+        issue_number=4,
+        prompt_tokens=70000,
+        completion_tokens=30000,
+        total_tokens=100000,
+    )
+
+    breakdown = await manager.get_usage_breakdown("antigravity", window_hours=1.0)
+
+    # By project: graph-engineering = 100,000 (60k+40k), crosstrainingapp = 50,000
+    assert "by_project" in breakdown
+    assert breakdown["by_project"]["graph-engineering"] == 100000
+    assert breakdown["by_project"]["crosstrainingapp"] == 50000
+
+    # Also accessible via "projects" alias
+    assert breakdown["projects"]["graph-engineering"] == 100000
+
+    # By node: devtest = 110,000 (60k+50k), reviewer = 40,000
+    assert "by_node" in breakdown
+    assert breakdown["by_node"]["devtest"] == 110000
+    assert breakdown["by_node"]["reviewer"] == 40000
+
+    # Also accessible via "nodes" alias
+    assert breakdown["nodes"]["devtest"] == 110000
+
+
+@pytest.mark.asyncio
+async def test_token_usage_empty_and_isolation(tmp_path: Path):
+    """
+    Verifies that querying an empty database or non-existent harness returns 0 / empty dicts.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Empty window sum returns 0
+    assert await manager.get_window_token_usage("nonexistent") == 0
+
+    # Empty breakdown returns empty dicts
+    breakdown = await manager.get_usage_breakdown("nonexistent")
+    assert breakdown["by_project"] == {}
+    assert breakdown["by_node"] == {}
+
+    # Empty raw events list
+    events = await manager.get_token_usage_events("nonexistent")
+    assert events == []
+
 
 
 

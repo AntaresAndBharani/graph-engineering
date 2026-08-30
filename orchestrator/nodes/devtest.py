@@ -68,7 +68,7 @@ async def _remediate_refactor_pr(
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
 
-    allowed, q_res = await poller.check_dispatch_quota(project, "devtest", config, state_manager)
+    allowed, q_res = await poller.check_dispatch_quota(project, "devtest", config, state_manager, harness_name=harness_name)
     if not allowed:
         return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
@@ -252,7 +252,8 @@ async def run_devtest_node(
     # Phase 1: Remediate PRs with 'needs-refactor'
     refactor_prs = await fetch_open_prs(project.repo, label="needs-refactor", limit=1)
     if refactor_prs:
-        allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager)
+        harness_name = node_cfg.harness or "antigravity"
+        allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager, harness_name=harness_name)
         if not allowed:
             return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
         target_pr = refactor_prs[0]
@@ -279,7 +280,8 @@ async def run_devtest_node(
         return False, f"No PRs labeled 'needs-refactor' and no issues labeled '{trigger}'. Idle (0 tokens)."
 
     # Pre-Flight Quota Gating (Pure local SQLite calculation, 0 LLM tokens)
-    allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager)
+    harness_name = node_cfg.harness or "antigravity"
+    allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager, harness_name=harness_name)
     if not allowed:
         return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 

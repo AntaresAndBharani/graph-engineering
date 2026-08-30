@@ -149,20 +149,6 @@ orchestrator supervisor status -p <project_name>
 
 ---
 
-### `orchestrator quota status`
-Displays a formatted Rich table breakdown of harness window token limits, rolling usage, burn velocity, project/node distributions, and replenishment countdowns (when throttled).
-
-```bash
-orchestrator quota status [-c CONFIG] [-H/--harness HARNESS]
-```
-
-**Options**:
-- `-c, --config PATH`: Path to custom `config.yaml` file.
-- `-H, --harness TEXT`: Filter status output to a specific harness (e.g. `antigravity`, `claude`, `devin`).
-
----
-
-
 ## 🔁 Transient Upstream Error Retry Engine
 
 The `AsyncHarnessAdapter` integrates an in-memory automatic retry engine with exponential backoff and randomized jitter to handle transient upstream API errors (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502/504 Bad Gateway/Timeout, connection resets).
