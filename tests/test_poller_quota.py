@@ -176,7 +176,17 @@ async def test_scenario_poller_defers_dispatch_without_github_mutation_when_thro
         proc.wait.return_value = 0
         return proc
 
-    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", mock_fetch_issues)
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": 49,
+            "title": "feat(poller,harness): pre-flight quota gating",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+        }],
+    )
+    mock_issue = {"number": 49, "title": "feat(poller,harness): pre-flight quota gating", "body": "Issue body", "labels": [{"name": "ready-for-dev"}]}
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", AsyncMock(return_value=mock_issue))
     monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_create_subprocess_exec)
 
@@ -272,7 +282,17 @@ async def test_scenario_poller_automatically_dispatches_once_throttle_clears(tmp
         harness_dispatched = True
         return 0
 
-    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", mock_fetch_issues)
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": 49,
+            "title": "feat(poller,harness): pre-flight quota gating",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+        }],
+    )
+    mock_issue = {"number": 49, "title": "feat(poller,harness): pre-flight quota gating", "body": "Issue body", "labels": [{"name": "ready-for-dev"}]}
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", AsyncMock(return_value=mock_issue))
     monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", mock_verify_git_safety)
     monkeypatch.setattr("orchestrator.nodes.devtest.AsyncHarnessAdapter.execute", mock_harness_execute)
