@@ -412,6 +412,7 @@ async def _watch_daemon_tui(
     config_path: Optional[Path],
 ) -> None:
     from orchestrator.logging import TextualLogHandler
+    from orchestrator.quota import QuotaManager
     from orchestrator.ui.dashboard import DashboardApp
 
     try:
@@ -441,10 +442,12 @@ async def _watch_daemon_tui(
     # Startup label synchronization
     await sync_all_projects_labels(config.projects, config.managed_labels)
 
+    quota_manager = QuotaManager(config, state_manager)
     app_instance = DashboardApp(
         config=config,
         state_manager=state_manager,
         log_handler=textual_handler,
+        quota_manager=quota_manager,
     )
 
     if not enabled_projects:
