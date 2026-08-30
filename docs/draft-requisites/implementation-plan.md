@@ -1,44 +1,53 @@
+The proposed Story Locking mechanism correctly identifies the fatal flaw of blind `limit=1` polling, but the architectural boundaries assigned to `run_devtest_node` in the draft review are flawed. In a decoupled orchestrator, the agent node (`orchestrator/nodes/devtest.py`) must remain a stateless executor. It should not query SQLite or fetch specific issues from GitHub. The orchestration layer (`orchestrator/cli.py` and `orchestrator/poller.py`) must handle queue resolution and pass the strictly locked issue into the node.
+
 ### Phase 1: Functional & DX (Developer Experience) Review
 
-**Workflow Analysis & Multi-Node Observability Journey**
-With the introduction of dual-level parallelism, the 1:1 relationship between a project and an active node no longer exists. A single project (e.g., `crosstrainingapp`) can concurrently execute the `architect` and `devtest` nodes. The current `ProjectStatusTable` forces a single row per project, leading to "state clobbering" where one node overwrites the other's status, making it impossible to isolate the log streams for concurrent workers.
+**Workflow Analysis & Multi-Agent Node Flow**
 
-To resolve this, the TUI must transition to a **Compound Row Strategy**. If a project has multiple active nodes, the table dynamically spawns a distinct row for each node (e.g., `crosstrainingapp | architect` and `crosstrainingapp | devtest`). When an operator selects a specific node's row, the `RichLog` pane dynamically filters the project's memory buffer to tail *only* that node's execution stream, while the `SDLCProgressWidget` remains anchored to the overarching project.
+1. **Bulk Ingestion:** `orchestrator/poller.py` fetches all open issues and updates the local SQLite replica (`orchestrator/db.py`).
+2. **Queue Resolution (The Lock):** `orchestrator/cli.py` calls `db.get_next_devtest_task(project.name)`. The database enforces the Story Lock by returning the lowest ID subtask belonging to the lowest ID active story.
+3. **Targeted Fetch:** `orchestrator/cli.py` fetches the exact issue payload from GitHub using `fetch_issue_by_number(target_id)`.
+4. **Stateless Execution:** `orchestrator/nodes/devtest.py` receives the exact issue, executes the harness, merges the PR, and returns a completion status.
 
 **Edge Cases & Resilience Strategy**
 
-* **Idle Project Fallback:** If a project has zero active nodes, the UI must not hide the project entirely. It must render a single row (e.g., `crosstrainingapp | Idle`) so the operator can still select it to view the SDLC backlog and global project logs.
-* **Rapid Row Thrashing:** As nodes complete tasks and spin up/down, rows will dynamically appear and disappear. To prevent the user's cursor from wildly jumping, the `row_key` must be a stable composite (`f"{project_name}::{node_name}"`), utilizing in-place Textual updates to preserve layout stability.
-* **Global Node Artifacts:** Framework-level logs emitted outside a specific node (e.g., `orchestrator/poller.py` or database migrations) should be categorized under a virtual `SYSTEM` node so they are visible when an `Idle` row is selected.
+* **Blocked Pipeline Deadlocks:** If a subtask transitions to `status:blocked` (e.g., repeated CI failures), the SQLite query must exclude it. However, to prevent DevTest from jumping to Story B, the query must still see Story A as the active lock. DevTest will gracefully idle, logging `[WARN] Project locked on blocked Story #90. Awaiting operator intervention.`
+* **Standalone Issue Contention:** Standalone bugs (`item_type='STANDALONE'`) must not interrupt an active Story. The query logic must prioritize: `(1) Subtasks of active stories -> (2) Planned stories -> (3) Standalone tasks`.
+* **Database Concurrency:** Multiple async loops querying `get_next_devtest_task` simultaneously must use `aiosqlite` with `PRAGMA read_uncommitted = true` or WAL mode to prevent locking overhead during rapid polling.
 
 **Acceptance Criteria (BDD Format)**
 
 ```gherkin
-Scenario: Dynamic multi-row rendering for concurrent nodes
-  Given the "crosstrainingapp" project has both "architect" and "devtest" nodes active
-  When the periodic UI refresh executes
-  Then the ProjectStatusTable must render two distinct rows for the project
-  And Row 1 must display "crosstrainingapp" with Active Node "architect"
-  And Row 2 must display "crosstrainingapp" with Active Node "devtest".
+Scenario: SQLite enforces strict Story Lock workload resolution
+  Given SQLite contains active Story A with Subtasks #93 and #94 in "ready-for-dev"
+  And active Story B with Subtask #98 in "ready-for-dev"
+  When the concurrency loop queries "get_next_devtest_task"
+  Then the database must return ONLY Subtask #93
+  And Subtask #98 must be completely ignored until Story A is closed.
 
-Scenario: Node-isolated log tailing upon row selection
-  Given the ProjectStatusTable displays a row for "graph-engineering | devtest"
-  When the operator highlights this specific row
-  Then the RichLog pane must clear and hydrate using ONLY log records emitted by the "devtest" node
-  And live incoming logs from the concurrent "architect" node must be suppressed from this specific view.
+Scenario: Centralized concurrency loop injects locked issue into node
+  Given "get_next_devtest_task" returns target ID #93
+  When "orchestrator/cli.py" processes the project cycle
+  Then it must fetch issue #93 directly via "fetch_issue_by_number"
+  And it must pass the explicit issue payload to "DevTestNode.execute"
+  And the node must not perform independent GitHub polling.
 
-Scenario: Graceful idle state representation
-  Given all nodes for "crosstrainingapp" complete their tasks and transition to idle
-  When the orchestrator state syncs
-  Then the table must collapse any multi-node rows into a single "crosstrainingapp | Idle" row
-  And selecting this row must display the aggregate historical logs for the entire project.
+Scenario: Pipeline halts on blocked active story
+  Given Story A is locked and its next subtask #93 is labeled "status:blocked"
+  When the concurrency loop attempts to fetch the next task
+  Then the query must return None
+  And the orchestrator must log a terminal warning requiring operator intervention
+  And it must NOT unlock or transition to Story B.
 
 ```
 
 **CLI UX Guidelines**
 
-* **Visual Hierarchy in Table:** To avoid repeating the repository name endlessly, use dimming or indentation for sibling node rows (e.g., `crosstrainingapp | devtest`, ` ├─ architect`).
-* **Log Tab Scoping:** Dynamically update the Textual tab or pane border to explicitly state the active filter: `Logs [Scope: crosstrainingapp | devtest]`.
+* **Active Lock Broadcasting:** Terminal output via `orchestrator/logging.py` must explicitly state the lock constraint to reassure the operator:
+* `[INFO] [graph-engineering] Story Lock Active: Parent #90. Dispatched Subtask #93 to devtest.`
+* `[WARN] [crosstrainingapp] Story Lock Blocked: Parent #450 requires manual intervention on Subtask #452.`
+
+
 
 ---
 
@@ -48,47 +57,63 @@ Scenario: Graceful idle state representation
 
 | File Path | Action | Description / Responsibility |
 | --- | --- | --- |
-| `orchestrator/ui/widgets.py` | **Modify** | Update `sync_projects()` in `ProjectStatusTable` to accept a list of `(project, node_state)` tuples and manage composite `row_key`s. |
-| `orchestrator/ui/dashboard.py` | **Modify** | Update `DataTable.RowHighlighted` handler to extract `node_name` from the composite key and pass it to the log hydrator. |
-| `orchestrator/logging.py` | **Modify** | Update `ProjectLogBufferManager` to store logs as a tuple `(node_name, log_line)` to support instantaneous read-time filtering. |
-| `orchestrator/db.py` | **Modify** | Update state fetching methods to return a list of active workers per project rather than a flattened project state. |
+| `orchestrator/db.py` | **Modify** | Implement hardened `get_next_devtest_task` utilizing CTEs (Common Table Expressions) to definitively lock the active parent story. |
+| `orchestrator/cli.py` | **Modify** | Update `run_project_cycle` to query the specific locked ID from the database and pass it directly to the DevTest node. |
+| `orchestrator/poller.py` | **Modify** | Remove any generic `fetch_issues_with_label(limit=1)` calls tied to DevTest execution routes. |
+| `tests/test_db.py` | **Modify** | Add unit tests verifying CTE query logic under cross-story contention scenarios. |
 
 **Technical Constraints & Safeguards**
 
-* **Memory Efficiency:** Do not create separate nested deques for every possible node, as this fractures memory limits. Maintain the single `collections.deque(maxlen=500)` per project in `ProjectLogBufferManager`, but store tuples: `deque[(str, str)]` (Node, Line). Filter via list comprehension at read time (`[line for n, line in buffer if n == target_node]`).
-* **Textual DOM Indexing:** When generating `row_key`s, use a strict delimiter (e.g., `::`) so `dashboard.py` can reliably execute `project, node = row_key.split("::")`.
+* **Architectural Boundary Enforcement:** `orchestrator/nodes/devtest.py` must not import `orchestrator/db.py` or query queues. It remains a pure function: `execute(issue, gh, harness) -> NodeResult`.
+* **Query Performance:** The sorting logic requires a composite index to avoid table scans: `CREATE INDEX idx_sdlc_lock ON sdlc_items(pipeline_status, parent_issue_id, sequence_order);`.
 
 **Execution Steps**
 
-1. **Enhance Log Memory Structures (`orchestrator/logging.py`)**
-* Modify `ProjectLogBufferManager.append` to accept `node_name` alongside `project_name` and `line`.
-* Update the internal storage to append `(node_name, line)` to the project's deque.
-* Update `get_logs(project_name, node_name=None)` to return the filtered list of lines if a specific node is requested, or all lines if `node_name` is `"Idle"` or `None`.
+1. **Database Query Hardening (`orchestrator/db.py`)**
+* Inject the required composite indices during `init_db()`.
+* Implement `get_next_devtest_task(project_name: str) -> int | None` using a CTE to isolate the lock:
+```sql
+WITH ActiveStory AS (
+    SELECT issue_number AS active_story_id
+    FROM sdlc_items
+    WHERE project_name = ?
+      AND item_type = 'STORY'
+      AND UPPER(state) NOT IN ('CLOSED', 'MERGED')
+      AND (labels LIKE '%architect-processed%' OR labels LIKE '%status:in-progress%' OR UPPER(state) = 'OPEN')
+    ORDER BY sequence_order ASC, issue_number ASC
+    LIMIT 1
+)
+SELECT issue_number
+FROM sdlc_items
+WHERE project_name = ?
+  AND parent_issue_id = (SELECT active_story_id FROM ActiveStory)
+  AND UPPER(state) NOT IN ('CLOSED', 'MERGED')
+  AND (labels LIKE '%ready-for-dev%' OR labels LIKE '%status:ready-for-dev%')
+ORDER BY sequence_order ASC, issue_number ASC
+LIMIT 1;
+```
 
+2. **Concurrency Loop Refactor (`orchestrator/cli.py`)**
+* In `_project_worker_loop`, invoke `locked_id = await db.get_next_devtest_task(project.name)`.
+* If `locked_id` is returned, call `gh.get_issue(locked_id)`.
+* Pass the exact issue payload to `devtest_node.execute(issue)`.
 
-2. **Refactor State Extraction (`orchestrator/db.py`)**
-* Ensure the polling data structure passed to the UI returns a flattened list of active entities. If a project has two active nodes, it must yield two dictionary payloads, one for each active node context. If zero, yield one payload with `"active_node": "Idle"`.
+3. **Node Cleanup (`orchestrator/nodes/devtest.py`)**
+* Strip any internal queue management or label-based blind fetching.
+* Ensure `promote_next_planned_story()` strictly validates `parent_issue_id` matching before promoting siblings to `ready-for-dev`.
 
-
-3. **Implement Composite Row Keys (`orchestrator/ui/widgets.py`)**
-* In `ProjectStatusTable.sync_projects()`, construct `row_key = f"{p['name']}::{p.get('active_node', 'Idle')}"`.
-* Execute `self.update_cell()` for existing keys and `self.add_row()` for new keys.
-* Remove stale keys (e.g., when a node transitions from active to idle).
-
-
-4. **Wire Node-Aware Routing (`orchestrator/ui/dashboard.py`)**
-* In the `RowHighlighted` event handler, split the `row_key.value` to extract `selected_project` and `selected_node`.
-* Update the `SDLCProgressWidget` using `selected_project`.
-* Hydrate the `RichLog` by passing both `selected_project` and `selected_node` to the buffer manager. Update the pane title/border to reflect the isolated scope.
+4. **Testing Verification (`tests/test_db.py` & `tests/test_cli.py`)**
+* Write `test_db_enforces_story_lock_over_chronological_ids`: Seed DB with Story A (ID 90, Subtasks 95, 96) and Story B (ID 85, Subtasks 88, 89). Assert that if Story A is `in-progress`, Subtask 95 is returned, ignoring the numerically lower Subtask 88.
+* Verify the CLI loop accurately passes the locked issue payload to the mocked DevTest node.
 
 ---
 
 ## 🔗 GitHub Reference
-- **GitHub Issue:** [Issue #101](https://github.com/AntaresAndBharani/graph-engineering/issues/101)
+- **GitHub Issue:** [Issue #109](https://github.com/AntaresAndBharani/graph-engineering/issues/109)
 - **Label:** `needs-triage`
 
 ## 🔨 Subtasks
-- [ ] feat(logging): ProjectLogBufferManager with (node_name, line) tuples and node-scoped disk tailing
-- [ ] feat(harness): AsyncHarnessAdapter stream listener with (project_name, node_name, line)
-- [ ] feat(ui): compound row rendering in #projects_table and node-isolated RichLog hydration in DashboardApp
-- [ ] test(ui, logging): unit and integration tests for multi-node rows and log stream filtering
+- [ ] feat(db): StateManager.get_next_devtest_task CTE query with strict Story Lock and standalone fallback
+- [ ] feat(devtest): deterministic locked issue dispatch in run_devtest_node Phase 3
+- [ ] feat(logging, ui): terminal log broadcasting and SDLC widget visual indicator for active Story Lock
+- [ ] test(db, devtest): unit and integration tests for CTE story locking, blocked stories, and non-contention
