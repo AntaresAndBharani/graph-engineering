@@ -16,6 +16,7 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
 from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
+from orchestrator.worktree import WorktreeManager
 
 console = Console()
 
@@ -205,6 +206,8 @@ async def _sync_architecture_plane(
         f"4. Commit changes: `git add .graph/architecture.md && git commit -m 'docs(architecture): update architectural standards'`.\n"
     )
 
+    exec_cwd = await WorktreeManager.ensure_worktree(project, "architect")
+
     adapter = AsyncHarnessAdapter(
         harness_name,
         harness_cfg,
@@ -214,7 +217,7 @@ async def _sync_architecture_plane(
     )
     exit_code = await adapter.execute(
         prompt=prompt,
-        cwd=project.local_path,
+        cwd=exec_cwd,
         log_file=log_file,
         model=model,
         effort=effort,
@@ -316,6 +319,8 @@ async def _review_pr_architecture(
         f"     `gh pr edit {pr_number} --repo '{project.repo}' --remove-label '{review_trigger}' --add-label 'needs-refactor'`\n"
     )
 
+    exec_cwd = await WorktreeManager.ensure_worktree(project, "architect")
+
     adapter = AsyncHarnessAdapter(
         harness_name,
         harness_cfg,
@@ -327,7 +332,7 @@ async def _review_pr_architecture(
     try:
         exit_code = await adapter.execute(
             prompt=prompt,
-            cwd=project.local_path,
+            cwd=exec_cwd,
             log_file=log_file,
             model=node_cfg.model,
             effort=node_cfg.effort,
@@ -357,20 +362,30 @@ def build_triage_prompt(
     output_label: str,
     processed_label: str,
     po_record: Optional[Dict[str, Any]] = None,
+    has_active_story: bool = False,
+    queued_label: str = "queued",
 ) -> str:
     """
     Constructs the triage and decomposition prompt for the Architect harness.
     Incorporates pre-approved Gherkin Acceptance Criteria from the Blackboard when available.
+    Adjusts subtask labeling and parent story state based on active-story concurrency.
     """
     context_note = ""
     if project.context_files:
         context_note = f"Read the project context files in your workspace: {', '.join(project.context_files)}."
 
     po_ac_context = ""
-    decomposition_instruction = (
-        f"     - Create Subtask 1 (Active): `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
-        f"     - Create Subtasks 2..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label 'queued'`.\n"
-    )
+    target_parent_label = "planned" if has_active_story else processed_label
+
+    if has_active_story:
+        decomposition_instruction = (
+            f"     - An active story is currently running in this project. Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
+        )
+    else:
+        decomposition_instruction = (
+            f"     - Create Subtask 1 (Active): `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+            f"     - Create Subtasks 2..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
+        )
 
     if po_record and po_record.get("status") == "PO_APPROVED" and po_record.get("gherkin_ac"):
         gherkin_ac = str(po_record["gherkin_ac"]).strip()
@@ -380,10 +395,15 @@ def build_triage_prompt(
             f"```gherkin\n{gherkin_ac}\n```\n"
             f"CRITICAL: Do NOT re-derive acceptance criteria from scratch. Incorporate and decompose directly from these pre-approved Gherkin criteria into subtasks.\n"
         )
-        decomposition_instruction = (
-            f"     - Create Subtask 1 (Active) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
-            f"     - Create Subtasks 2..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label 'queued'`.\n"
-        )
+        if has_active_story:
+            decomposition_instruction = (
+                f"     - An active story is currently running in this project. Create all Subtasks 1..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
+            )
+        else:
+            decomposition_instruction = (
+                f"     - Create Subtask 1 (Active) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+                f"     - Create Subtasks 2..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
+            )
 
     prompt = (
         f"You are the Principal Architect operating autonomously in non-interactive batch mode.\n"
@@ -406,8 +426,8 @@ def build_triage_prompt(
         f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Requirements are ambiguous. Flagging for PO review with questions: <clarification questions>'`\n"
         f"   - **Case 6: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable subtasks following 3-amigos and INVEST principles:\n"
         f"{decomposition_instruction}"
-        f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
-        f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
+        f"     - Update the parent story to '{target_parent_label}' and remove '{trigger}':\n"
+        f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{target_parent_label}'`\n"
         f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
     )
     return prompt
@@ -426,6 +446,18 @@ async def _triage_story(
     trigger = node_cfg.label_trigger or "needs-triage"
     output_label = node_cfg.label_output or "ready-for-dev"
     processed_label = node_cfg.processed_label or "architect-processed"
+    queued_label = node_cfg.queued_label or "queued"
+
+    # Zero-token lookahead pre-gate check: evaluate planned stories capacity
+    max_planned = getattr(project, "max_planned_stories", None)
+    if max_planned is None:
+        max_planned = getattr(config.settings, "max_planned_stories", 2)
+
+    planned_count = await state_manager.count_planned_stories(project.name)
+    if planned_count >= max_planned:
+        notice = f"[{project.name}|architect] Lookahead limit reached ({planned_count}/{max_planned}). Pausing decomposition."
+        console.print(f"  [yellow]{notice}[/yellow]")
+        return False, notice
 
     issues = await fetch_issues_with_label(project.repo, trigger, limit=1)
     if not issues:
@@ -478,6 +510,11 @@ async def _triage_story(
     # Ingest pre-approved Gherkin AC from Blackboard if available
     po_record = await state_manager.get_po_tracking(project.repo, issue_id)
 
+    # Evaluate active story state for queueing
+    active_story = await state_manager.get_active_story(project.name)
+    has_active_story = (active_story is not None)
+    target_parent_label = "planned" if has_active_story else processed_label
+
     prompt = build_triage_prompt(
         project=project,
         issue_id=issue_id,
@@ -486,11 +523,15 @@ async def _triage_story(
         output_label=output_label,
         processed_label=processed_label,
         po_record=po_record,
+        has_active_story=has_active_story,
+        queued_label=queued_label,
     )
 
     console.print(f"\n  [bold magenta]⚡ [{project.name}:architect][/bold magenta] [bold white]Evaluating User Story #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
     console.print(f"  [dim]• Target: {project.repo} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
     console.print(f"  [dim]• Scope: Issue Classification, 3-Amigos Triage & INVEST Subtask Decomposition[/dim]")
+
+    exec_cwd = await WorktreeManager.ensure_worktree(project, "architect")
 
     adapter = AsyncHarnessAdapter(
         harness_name,
@@ -502,7 +543,7 @@ async def _triage_story(
     )
     exit_code = await adapter.execute(
         prompt=prompt,
-        cwd=project.local_path,
+        cwd=exec_cwd,
         log_file=log_file,
         model=node_cfg.model,
         effort=node_cfg.effort,
@@ -544,7 +585,7 @@ async def _triage_story(
             await p2.wait()
         return False, f"Architect execution failed on issue #{issue_id} (exit code {exit_code})."
 
-    linked_count = await sync_parent_subtask_links(project.repo, issue_id, processed_label, trigger)
+    linked_count = await sync_parent_subtask_links(project.repo, issue_id, target_parent_label, trigger)
 
     if shutil.which("gh"):
         proc_view = await asyncio.create_subprocess_exec(
@@ -573,22 +614,28 @@ async def _triage_story(
                     "title": issue_title,
                     "state": "CLOSED",
                     "labels": current_labels,
+                    "item_type": "STORY",
                 }],
             )
             await state_manager.release_lock(issue_id, project.repo, "architect")
             return True, f"Architect node verified issue #{issue_id} was already satisfied and closed it."
 
-        if linked_count > 0 or processed_label in current_labels:
+        if linked_count > 0 or target_parent_label in current_labels or "planned" in current_labels or processed_label in current_labels:
+            story_state = "PLANNED" if (has_active_story or "planned" in current_labels) else "OPEN"
+            assigned_label = "planned" if (has_active_story or "planned" in current_labels) else processed_label
             await state_manager.sync_project_sdlc_items(
                 project.name,
                 [{
                     "issue_number": issue_id,
                     "title": issue_title,
-                    "state": "OPEN",
-                    "labels": [processed_label],
+                    "state": story_state,
+                    "labels": [assigned_label],
+                    "item_type": "STORY",
                 }],
             )
             await state_manager.release_lock(issue_id, project.repo, "architect")
+            if has_active_story or "planned" in current_labels:
+                return True, f"Architect node triaged and queued issue #{issue_id} behind active story into {linked_count} subtask(s) ('{assigned_label}')."
             return True, f"Architect node triaged and decomposed issue #{issue_id} into {linked_count} linked subtask(s) ('{output_label}')."
 
         if trigger not in current_labels:
@@ -678,5 +725,8 @@ async def run_architect_node(
     )
     if triage_ran:
         return True, triage_msg
+
+    if "Lookahead limit reached" in triage_msg:
+        return False, triage_msg
 
     return False, "No architecture sync due, no PRs awaiting architectural review, no issues to triage. Idle (0 tokens)."

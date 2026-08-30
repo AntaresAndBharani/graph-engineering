@@ -164,6 +164,7 @@ DEFAULT_MANAGED_LABELS: List[LabelConfig] = [
     LabelConfig(name="architect-processed", color="D4C5F9", description="Architect decomposition complete"),
     LabelConfig(name="tech-debt", color="FBCA04", description="Technical debt or non-blocking improvement"),
     LabelConfig(name="enhancement", color="A2EEEF", description="New feature request or enhancement"),
+    LabelConfig(name="planned", color="D4C5F9", description="Story queued in lookahead buffer behind active story"),
 ]
 
 DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {

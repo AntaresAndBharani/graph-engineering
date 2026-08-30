@@ -55,10 +55,14 @@ To maximize reasoning depth while drastically minimizing token costs:
 - **Approved**: Labels `architect-approved`, signaling the `Reviewer` node to verify CI and auto-merge.
 - **Refactoring Required**: Posts detailed review comments and returns the task to `DevTest` with `needs-refactor`.
 
-### 3. Story Triage & INVEST Decomposition (`needs-triage`)
+### 3. Story Triage, INVEST Decomposition & Lookahead Gating (`needs-triage`)
+- **Zero-Token Lookahead Gating**: Queries SQLite WAL state (`StateManager.count_planned_stories`) before dispatching AI harnesses. If the planned stories count reaches `max_planned_stories` (default `2`), decomposition is paused with zero token consumption.
+- **Isolated Worktree Execution**: Operates inside an isolated git worktree (`.graph/worktrees/architect_<project>`) managed by `WorktreeManager`, preserving DevTest and primary workspace integrity.
+- **Active-Story Concurrency Awareness**:
+  - If no active story is currently running: Subtask 1 is labeled `ready-for-dev` (active) and Subtasks 2..N are labeled `queued`.
+  - If an active story is currently running: All subtasks (1..N) are labeled `queued` and the parent story is labeled `planned` and recorded in `PLANNED` state.
 - Ingests pre-approved **Gherkin Acceptance Criteria** from the `po_tracking` Blackboard table when available (status `PO_APPROVED`), preventing redundant requirement re-derivation.
 - Decomposes complex user stories into minimal, testable technical subtasks following INVEST principles.
-- Each child subtask is created with **Gherkin acceptance criteria** and labeled **`ready-for-dev`**.
 - Links the parent story (`Parent: #<issue_id>`) and synchronizes the parent checklist.
 
 ---
