@@ -106,6 +106,7 @@ class StateManager:
                     state TEXT NOT NULL,
                     labels TEXT,
                     linked_pr INTEGER,
+                    created_at REAL,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (project_name, issue_number)
                 );
@@ -120,8 +121,13 @@ class StateManager:
                     await db.execute("ALTER TABLE sdlc_items ADD COLUMN item_type TEXT DEFAULT 'SUBTASK';")
                 if "sequence_order" not in cols:
                     await db.execute("ALTER TABLE sdlc_items ADD COLUMN sequence_order INTEGER DEFAULT 0;")
+                if "created_at" not in cols:
+                    await db.execute("ALTER TABLE sdlc_items ADD COLUMN created_at REAL DEFAULT NULL;")
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sdlc_parent ON sdlc_items(project_name, parent_issue_id);"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sdlc_lookahead ON sdlc_items(project_name, state, created_at);"
             )
             await db.execute(
                 """
@@ -799,6 +805,8 @@ class StateManager:
                 linked_pr = item.get("linked_pr")
                 linked_pr_val = int(linked_pr) if linked_pr is not None else None
                 updated_at = float(item.get("updated_at", now))
+                raw_created = item.get("created_at")
+                created_at_val = float(raw_created) if raw_created is not None else updated_at
                 parent_issue_id = item.get("parent_issue_id")
                 parent_val = int(parent_issue_id) if parent_issue_id is not None else None
                 item_type = str(item.get("item_type") or "SUBTASK").upper()
@@ -806,8 +814,8 @@ class StateManager:
 
                 await db.execute(
                     """
-                    INSERT INTO sdlc_items (project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO sdlc_items (project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_name, issue_number) DO UPDATE SET
                         parent_issue_id = COALESCE(excluded.parent_issue_id, sdlc_items.parent_issue_id),
                         item_type = excluded.item_type,
@@ -816,9 +824,10 @@ class StateManager:
                         state = excluded.state,
                         labels = excluded.labels,
                         linked_pr = excluded.linked_pr,
+                        created_at = COALESCE(sdlc_items.created_at, excluded.created_at),
                         updated_at = excluded.updated_at
                     """,
-                    (project_name, issue_number, parent_val, item_type, sequence_order, title, state, labels_str, linked_pr_val, updated_at),
+                    (project_name, issue_number, parent_val, item_type, sequence_order, title, state, labels_str, linked_pr_val, created_at_val, updated_at),
                 )
             await db.commit()
 
@@ -832,7 +841,7 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ?
                 ORDER BY issue_number ASC
@@ -840,7 +849,13 @@ class StateManager:
                 (project_name,),
             )
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            items = []
+            for row in rows:
+                r = dict(row)
+                if "status" not in r:
+                    r["status"] = r.get("state")
+                items.append(r)
+            return items
 
     async def get_active_story(self, project_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -852,7 +867,7 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND item_type = 'STORY' AND state != 'CLOSED' AND state != 'MERGED'
                 ORDER BY sequence_order ASC, issue_number ASC
@@ -861,7 +876,12 @@ class StateManager:
                 (project_name,),
             )
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            if row:
+                res = dict(row)
+                if "status" not in res:
+                    res["status"] = res.get("state")
+                return res
+            return None
 
     async def get_pending_subtasks(self, project_name: str, parent_id: int) -> List[Dict[str, Any]]:
         """
@@ -873,7 +893,7 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND parent_issue_id = ?
                 ORDER BY sequence_order ASC, issue_number ASC
@@ -881,7 +901,13 @@ class StateManager:
                 (project_name, parent_id),
             )
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            items = []
+            for row in rows:
+                r = dict(row)
+                if "status" not in r:
+                    r["status"] = r.get("state")
+                items.append(r)
+            return items
 
     async def get_next_queued_subtask(self, project_name: str, parent_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -893,7 +919,7 @@ class StateManager:
             await db.execute("PRAGMA busy_timeout=5000;")
             cursor = await db.execute(
                 """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, updated_at
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
                 FROM sdlc_items
                 WHERE project_name = ? AND parent_issue_id = ? AND state != 'CLOSED' AND state != 'MERGED'
                   AND (labels LIKE '%queued%' OR labels LIKE '%status:queued%')
@@ -903,7 +929,84 @@ class StateManager:
                 (project_name, parent_id),
             )
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            if row:
+                res = dict(row)
+                if "status" not in res:
+                    res["status"] = res.get("state")
+                return res
+            return None
+
+    async def count_planned_stories(self, project_name: str) -> int:
+        """
+        Counts the number of planned stories/items with status 'PLANNED' for a given project.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*)
+                FROM sdlc_items
+                WHERE project_name = ? AND (UPPER(state) = 'PLANNED' OR UPPER(state) = 'STATUS:PLANNED')
+                """,
+                (project_name,),
+            )
+            row = await cursor.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
+    async def get_oldest_planned_story(self, project_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the oldest planned story with status 'PLANNED' (earliest created_at timestamp)
+        for a given project.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order, title, state, labels, linked_pr, created_at, updated_at
+                FROM sdlc_items
+                WHERE project_name = ? AND (UPPER(state) = 'PLANNED' OR UPPER(state) = 'STATUS:PLANNED')
+                ORDER BY COALESCE(created_at, updated_at) ASC, sequence_order ASC, issue_number ASC
+                LIMIT 1
+                """,
+                (project_name,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                res = dict(row)
+                if "status" not in res:
+                    res["status"] = res.get("state")
+                return res
+            return None
+
+    async def promote_planned_story(
+        self,
+        project_name: str,
+        story_id: int | str,
+        new_status: str = "ACTIVE",
+    ) -> bool:
+        """
+        Promotes a planned story's status to 'ACTIVE' (or specified new_status) in an atomic WAL transaction.
+        Returns True if the story was found and updated, False otherwise.
+        """
+        issue_number = int(story_id)
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                UPDATE sdlc_items
+                SET state = ?, updated_at = ?
+                WHERE project_name = ? AND issue_number = ?
+                """,
+                (new_status, now, project_name, issue_number),
+            )
+            updated = cursor.rowcount > 0
+            await db.commit()
+            return updated
 
     async def record_anomaly_event(
         self,
