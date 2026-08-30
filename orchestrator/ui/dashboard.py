@@ -87,11 +87,7 @@ class DashboardApp(App):
         self.config = config or GlobalConfig()
         self.state_manager = state_manager
         self.log_handler = log_handler
-        self.quota_manager = quota_manager or (
-            QuotaManager(self.config, self.state_manager)
-            if self.state_manager is not None
-            else None
-        )
+        self.quota_manager = quota_manager
         self.selected_project: Optional[str] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None

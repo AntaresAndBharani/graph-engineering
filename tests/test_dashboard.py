@@ -1036,7 +1036,8 @@ async def test_harness_quota_widget_ok_and_throttled_states(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_dashboard_app_composes_quota_tab(tmp_path: Path):
     """
-    Asserts DashboardApp mounts HarnessQuotaWidget inside TabbedContent with Quota Limits tab.
+    Asserts DashboardApp mounts HarnessQuotaWidget inside TabbedContent with Quota Limits tab,
+    passing injected quota_manager without self-constructing one when None.
     """
     db_path = tmp_path / "state.db"
     state_manager = StateManager(db_path)
@@ -1054,8 +1055,19 @@ async def test_dashboard_app_composes_quota_tab(tmp_path: Path):
         ),
     )
 
+    # 1. Without quota_manager passed to DashboardApp
+    app_no_mgr = DashboardApp(config=config, state_manager=state_manager)
+    assert app_no_mgr.quota_manager is None
+    async with app_no_mgr.run_test() as _:
+        quota_widget_no_mgr = app_no_mgr.query_one("#quota_widget", HarnessQuotaWidget)
+        assert quota_widget_no_mgr.quota_manager is None
+        assert quota_widget_no_mgr.row_count == 1
+        assert "No quota data" in str(quota_widget_no_mgr.get_row_at(0)[1])
+
+    # 2. With injected quota_manager
     quota_mgr = QuotaManager(config, state_manager)
     app = DashboardApp(config=config, state_manager=state_manager, quota_manager=quota_mgr)
+    assert app.quota_manager is quota_mgr
 
     async with app.run_test() as _:
         quota_widget = app.query_one("#quota_widget", HarnessQuotaWidget)
