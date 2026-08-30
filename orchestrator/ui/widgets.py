@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from textual.widgets import DataTable
+from textual.widgets.data_table import (
+    CellDoesNotExist,
+    ColumnDoesNotExist,
+    DuplicateKey,
+    RowDoesNotExist,
+)
 
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
@@ -35,16 +41,16 @@ def _apply_keyed_diff(
     for k in existing_keys - target_keys:
         try:
             table.remove_row(k)
-        except Exception:
+        except (RowDoesNotExist, KeyError):
             pass
 
     # 2. Add or update rows in-place
     col_keys = list(table.columns.keys())
     for row_key, values in target_rows:
-        if row_key not in table.rows:
+        if row_key not in existing_keys and row_key not in table.rows:
             try:
                 table.add_row(*values, key=row_key)
-            except Exception:
+            except (DuplicateKey, KeyError):
                 pass
         else:
             for col_idx, new_val in enumerate(values):
@@ -52,12 +58,12 @@ def _apply_keyed_diff(
                     col_key = col_keys[col_idx]
                     try:
                         curr_val = table.get_cell(row_key, col_key)
-                    except Exception:
+                    except (CellDoesNotExist, RowDoesNotExist, ColumnDoesNotExist, KeyError):
                         curr_val = None
                     if curr_val != new_val:
                         try:
                             table.update_cell(row_key, col_key, new_val)
-                        except Exception:
+                        except (CellDoesNotExist, RowDoesNotExist, ColumnDoesNotExist, KeyError):
                             pass
 
 

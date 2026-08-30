@@ -1217,6 +1217,163 @@ async def test_dashboard_interactive_log_controls_and_auto_scroll_toggle(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_dashboard_inplace_projects_table_diffing_preserves_cursor_and_selection(tmp_path: Path, mocker):
+    """
+    Scenario: Non-Destructive In-Place Project Table Updates & Cursor Persistence
+    Given the TUI dashboard is active with multiple registered projects ("crosstrainingapp", "graph-engineering")
+    And the operator has used arrow keys to highlight row 1 ("graph-engineering")
+    When periodic 2-second background refresh cycles execute
+    Then the dashboard updates cell values in-place using keyed cell mutation (without calling table.clear())
+    And the table cursor remains locked on row 1 ("graph-engineering")
+    And no spurious "RowHighlighted" event resetting to row 0 is triggered.
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=str(tmp_path)),
+            ProjectConfig(name="graph-engineering", repo="org/graph-engineering", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+        assert table.row_count == 2
+        assert table.get_row_at(0)[0] == "crosstrainingapp"
+        assert table.get_row_at(1)[0] == "graph-engineering"
+
+        # Navigate down to row 1 ("graph-engineering")
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert table.cursor_row == 1
+        assert app.selected_project == "graph-engineering"
+
+        # Spy on DataTable.clear() to ensure it is NEVER called during refresh cycles
+        clear_spy = mocker.spy(table, "clear")
+
+        # Mutate state in SQLite:
+        # - "crosstrainingapp": acquire active lock (DevTest, Issue #10)
+        # - "graph-engineering": pause project
+        await state_manager.acquire_lock(issue_id=10, repo="org/crosstrainingapp", node_type="DevTest")
+        await state_manager.pause_project("graph-engineering")
+
+        # Simulate multiple periodic 2-second background refresh passes
+        for _ in range(3):
+            await app.update_projects_table()
+            await pilot.pause()
+
+        # Verify clear was NEVER called
+        clear_spy.assert_not_called()
+
+        # Verify in-place cell updates
+        row0 = table.get_row("crosstrainingapp")
+        assert "DevTest" in str(row0[2])
+        assert "Issue #10" in str(row0[5])
+
+        row1 = table.get_row("graph-engineering")
+        assert "Paused" in str(row1[3])
+
+        # Assert cursor remains locked on row 1 ("graph-engineering")
+        assert table.cursor_row == 1
+        assert app.selected_project == "graph-engineering"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reactive_and_stable_project_selection_for_child_panes(tmp_path: Path, mocker):
+    """
+    Scenario: Reactive & Stable Project Selection for Child Panes
+    Given the operator navigates from "crosstrainingapp" to "graph-engineering"
+    When the operator explicitly presses the Down arrow key
+    Then the RowHighlighted event sets selected_project to "graph-engineering"
+    And SDLCProgressWidget and AnomalyAlertsWidget update their views for "graph-engineering"
+    And subsequent background polling passes maintain "graph-engineering" as the active context without unnecessary re-query when state is unchanged.
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=str(tmp_path)),
+            ProjectConfig(name="graph-engineering", repo="org/graph-engineering", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Seed SDLC items & anomalies for both projects
+    await state_manager.sync_project_sdlc_items(
+        "crosstrainingapp",
+        [{"issue_number": 1, "title": "Cross Item", "labels": "ready-for-dev", "linked_pr": None}],
+    )
+    await state_manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 71, "title": "In-Place Diffing", "labels": "in-progress", "linked_pr": 72}],
+    )
+    await state_manager.record_anomaly_event(
+        project_name="graph-engineering",
+        node_name="devtest",
+        error_type="HarnessTimeout",
+        error_message="Test timeout",
+        issue_number=71,
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        alerts_widget = app.query_one("#alerts_widget", AnomalyAlertsWidget)
+        table.focus()
+
+        # Move Down to row 1 ("graph-engineering")
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert app.selected_project == "graph-engineering"
+        assert sdlc_widget.row_count == 1
+        assert sdlc_widget.get_row("71")[1] == "In-Place Diffing"
+        assert sdlc_widget.get_row("71")[3] == "#72"
+
+        assert alerts_widget.row_count == 1
+        assert alerts_widget.get_row_at(0)[2] == "HarnessTimeout"
+
+        # Spy on get_sdlc_items and get_recent_anomalies to assert decoupling / caching
+        sdlc_spy = mocker.spy(state_manager, "get_sdlc_items")
+        anomaly_spy = mocker.spy(state_manager, "get_recent_anomalies")
+
+        # Execute periodic 2s refresh cycles when state is unchanged
+        for _ in range(3):
+            await app.update_projects_table()
+            await pilot.pause()
+
+        # Both spies should NOT have been called during background ticks since state fingerprint was unchanged
+        sdlc_spy.assert_not_called()
+        anomaly_spy.assert_not_called()
+
+        assert app.selected_project == "graph-engineering"
+        assert table.cursor_row == 1
+
+        # Now mutate state for graph-engineering
+        await state_manager.sync_project_sdlc_items(
+            "graph-engineering",
+            [
+                {"issue_number": 71, "title": "In-Place Diffing", "labels": "in-progress", "linked_pr": 72},
+                {"issue_number": 75, "title": "New Story", "labels": "ready-for-dev", "linked_pr": None},
+            ],
+        )
+
+        # Trigger refresh pass
+        await app.update_projects_table()
+        await pilot.pause()
+
+        # Because fingerprint changed, SDLC items re-queried and updated in child pane
+        assert sdlc_spy.call_count >= 1
+        assert sdlc_widget.row_count == 2
+        assert sdlc_widget.get_row("75")[1] == "New Story"
+        assert app.selected_project == "graph-engineering"
+        assert table.cursor_row == 1
+
+
+@pytest.mark.asyncio
 async def test_sdlc_progress_widget_keyed_inplace_diffing_preserves_cursor(tmp_path: Path, mocker):
     """
     Scenario: Non-Destructive SDLC Progress Widget
