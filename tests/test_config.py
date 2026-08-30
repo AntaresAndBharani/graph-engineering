@@ -133,12 +133,12 @@ harnesses:
 
 def test_default_quota_config_available_with_no_user_overrides(tmp_path: Path):
     """
-    Scenario: Default quota config is available with no user overrides
-      Given a config.yaml with no "quota" section
-      When load_config() runs
-      Then quota.buffer_minutes defaults to 30
-      And quota.harnesses contains "antigravity", "claude", "devin", "openai" with
-          the documented window_hours/window_token_limit/avg_tokens_per_hour
+    Scenario: Default harness quota definitions load
+      Given a config.yaml with no explicit `quota` section
+      When configuration is loaded via `load_config()`
+      Then `QuotaSettings` defaults to buffer_minutes=30
+      And harnesses "antigravity", "claude", "devin", "openai" have their documented
+          window_hours, window_token_limit, and avg_tokens_per_hour defaults
     """
     yaml_file = tmp_path / "default_quota_config.yaml"
     yaml_file.write_text(
@@ -177,11 +177,11 @@ settings:
 
 def test_partial_user_override_preserves_other_harness_defaults(tmp_path: Path):
     """
-    Scenario: Partial user override preserves other harness defaults
-      Given a config.yaml overriding only quota.harnesses.claude.window_token_limit
-      When load_config() runs
-      Then claude's window_token_limit reflects the override
-      And antigravity/devin/openai retain their default quota values
+    Scenario: Override a harness quota window
+      Given config.yaml sets `quota.harnesses.claude.window_token_limit: 3000000`
+      When configuration is loaded
+      Then `GlobalConfig.quota.harnesses["claude"].window_token_limit == 3000000`
+      And unspecified fields retain their documented defaults
     """
     yaml_file = tmp_path / "partial_override_config.yaml"
     yaml_file.write_text(
@@ -191,7 +191,7 @@ quota:
   buffer_minutes: 45
   harnesses:
     claude:
-      window_token_limit: 8000000
+      window_token_limit: 3000000
         """,
         encoding="utf-8",
     )
@@ -201,7 +201,7 @@ quota:
 
     # Claude was partially overridden: window_token_limit updated, window_hours & avg_tokens_per_hour retained
     claude = loaded.quota.harnesses["claude"]
-    assert claude.window_token_limit == 8_000_000
+    assert claude.window_token_limit == 3_000_000
     assert claude.window_hours == 5.0
     assert claude.avg_tokens_per_hour == 300_000
 
@@ -220,6 +220,29 @@ quota:
     assert openai.window_hours == 1.0
     assert openai.window_token_limit == 1_500_000
     assert openai.avg_tokens_per_hour == 300_000
+
+
+def test_invalid_quota_values_raise_validation_error(tmp_path: Path):
+    """
+    Scenario: Invalid quota values are rejected
+      Given config.yaml sets a negative `window_hours` for a harness
+      When configuration is loaded
+      Then Pydantic validation raises a descriptive error at load time (fail fast, not at dispatch time)
+    """
+    yaml_file = tmp_path / "invalid_quota_config.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    claude:
+      window_hours: -1.0
+        """,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        load_config(yaml_file)
 
 
 def test_custom_harness_quota_merged(tmp_path: Path):
