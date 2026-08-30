@@ -28,9 +28,50 @@ def parse_iso_timestamp(ts: Any) -> float:
     return time.time()
 
 
-def extract_linked_pr(issue_number: int, prs: List[Dict[str, Any]]) -> Optional[int]:
+def derive_ci_status(status_check_rollup: Any) -> Optional[str]:
     """
-    Finds if any open PR is linked to the given issue number.
+    Derives a normalized CI status (PASS, RUNNING, FAIL) from GitHub's statusCheckRollup.
+    Pure function testable without subprocess mocks.
+    """
+    if not status_check_rollup:
+        return None
+
+    contexts: List[Dict[str, Any]] = []
+    if isinstance(status_check_rollup, list):
+        contexts = [c for c in status_check_rollup if isinstance(c, dict)]
+    elif isinstance(status_check_rollup, dict):
+        if "contexts" in status_check_rollup and isinstance(status_check_rollup["contexts"], list):
+            contexts = [c for c in status_check_rollup["contexts"] if isinstance(c, dict)]
+        elif "nodes" in status_check_rollup and isinstance(status_check_rollup["nodes"], list):
+            contexts = [c for c in status_check_rollup["nodes"] if isinstance(c, dict)]
+        else:
+            contexts = [status_check_rollup]
+
+    if not contexts:
+        return None
+
+    has_running = False
+    for check in contexts:
+        conclusion = str(check.get("conclusion") or check.get("state") or "").strip().upper()
+        status = str(check.get("status") or "").strip().upper()
+
+        if conclusion in ("FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "CANCELLED", "ERROR", "FAIL"):
+            return "FAIL"
+
+        if status in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED") or conclusion in ("PENDING", "IN_PROGRESS", "RUNNING"):
+            has_running = True
+        elif status and status != "COMPLETED" and not conclusion:
+            has_running = True
+
+    if has_running:
+        return "RUNNING"
+
+    return "PASS"
+
+
+def find_linked_pr(issue_number: int, prs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Finds if any open PR is linked to the given issue number and returns the matched PR dictionary.
     Inspects PR branch name (headRefName), title, and body for issue references.
     """
     if not prs or not issue_number:
@@ -46,16 +87,30 @@ def extract_linked_pr(issue_number: int, prs: List[Dict[str, Any]]) -> Optional[
 
         head_ref = pr.get("headRefName") or ""
         if pattern_branch.search(head_ref) or pattern_hash.search(head_ref):
-            return int(pr_number)
+            return pr
 
         title = pr.get("title") or ""
         if pattern_hash.search(title) or pattern_branch.search(title):
-            return int(pr_number)
+            return pr
 
         body = pr.get("body") or ""
         if pattern_hash.search(body) or pattern_branch.search(body):
-            return int(pr_number)
+            return pr
 
+    return None
+
+
+def extract_linked_pr(issue_number: int, prs: List[Dict[str, Any]]) -> Optional[int]:
+    """
+    Finds if any open PR is linked to the given issue number.
+    Inspects PR branch name (headRefName), title, and body for issue references.
+    """
+    matched = find_linked_pr(issue_number, prs)
+    if matched and matched.get("number"):
+        try:
+            return int(matched["number"])
+        except (ValueError, TypeError):
+            return None
     return None
 
 
@@ -207,7 +262,7 @@ async def fetch_open_prs(
         "--state",
         "open",
         "--json",
-        "number,title,body,labels,mergeable,url,headRefName,isDraft",
+        "number,title,body,labels,mergeable,url,headRefName,isDraft,state,statusCheckRollup",
         "--limit",
         str(limit),
     ]
@@ -241,7 +296,8 @@ async def poll_project_sdlc_items(
 ) -> List[Dict[str, Any]]:
     """
     Zero-token polling sweep that fetches open issues and open PRs for a project,
-    correlates linked PRs to issues, and syncs them to StateManager (sdlc_items table).
+    correlates linked PRs to issues, extracts Parent-link references, and syncs them
+    to StateManager (sdlc_items table).
     Non-blocking / best-effort on SQLite errors.
     """
     open_issues = await fetch_all_open_issues(project.repo, limit=limit_issues)
@@ -257,16 +313,38 @@ async def poll_project_sdlc_items(
         title = str(issue.get("title", ""))
         state = str(issue.get("state") or "OPEN")
         labels = issue.get("labels", [])
-        linked_pr = extract_linked_pr(issue_num, open_prs)
+        body = str(issue.get("body") or "")
+
+        # Extract Parent: #<id>
+        parent_match = re.search(r"Parent:\s*#(\d+)", body, re.IGNORECASE)
+        parent_issue_id = int(parent_match.group(1)) if parent_match else None
+
+        # Determine item_type
+        if parent_issue_id:
+            item_type = "SUBTASK"
+        elif "story" in title.lower():
+            item_type = "STORY"
+        else:
+            item_type = "SUBTASK"
+
+        matched_pr = find_linked_pr(int(issue_num), open_prs)
+        linked_pr = int(matched_pr["number"]) if matched_pr and matched_pr.get("number") else None
+        pr_status = str(matched_pr.get("state") or "OPEN").upper() if matched_pr else None
+        pr_ci_details = derive_ci_status(matched_pr.get("statusCheckRollup")) if matched_pr else None
+
         updated_ts = parse_iso_timestamp(issue.get("updatedAt") or issue.get("updated_at", now))
 
         items.append({
             "project_name": project.name,
             "issue_number": int(issue_num),
+            "parent_issue_id": parent_issue_id,
+            "item_type": item_type,
             "title": title,
             "state": state,
             "labels": labels,
             "linked_pr": linked_pr,
+            "pr_status": pr_status,
+            "pr_ci_details": pr_ci_details,
             "updated_at": updated_ts,
         })
 

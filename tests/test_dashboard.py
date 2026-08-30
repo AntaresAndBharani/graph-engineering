@@ -486,9 +486,9 @@ async def test_sdlc_progress_widget_renders_items(tmp_path: Path):
     app = TestApp()
     async with app.run_test() as _:
         widget = app.query_one(SDLCProgressWidget)
-        assert widget.TABLE_COLUMNS == ["ID", "Title", "Status/Label", "Linked PR"]
+        assert widget.TABLE_COLUMNS == ["ID", "Title", "Status/Label", "PR Status"]
         column_labels = [str(col.label) for col in widget.columns.values()]
-        assert column_labels == ["ID", "Title", "Status/Label", "Linked PR"]
+        assert column_labels == ["ID", "Title", "Status/Label", "PR Status"]
 
         assert widget.row_count == 2
         row0 = widget.get_row_at(0)

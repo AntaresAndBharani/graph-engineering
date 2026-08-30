@@ -891,70 +891,56 @@ class StateManager:
             s = str(state).strip().upper()
             return s in ("CLOSED", "MERGED", "DONE", "STATUS:CLOSED", "STATUS:MERGED", "STATUS:DONE")
 
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            await db.execute("PRAGMA journal_mode=WAL;")
-            await db.execute("PRAGMA busy_timeout=5000;")
-            cursor = await db.execute(
-                """
-                SELECT project_name, issue_number, parent_issue_id, item_type, sequence_order,
-                       title, state, labels, linked_pr, pr_status, pr_ci_details, created_at, updated_at
-                FROM sdlc_items
-                WHERE project_name = ?
-                ORDER BY sequence_order ASC, issue_number ASC
-                """,
-                (project_name,),
-            )
-            rows = await cursor.fetchall()
-            if not rows:
-                return []
+        rows = await self.get_sdlc_items(project_name)
+        if not rows:
+            return []
 
-            items = []
-            for row in rows:
-                r = dict(row)
-                if "status" not in r:
-                    r["status"] = r.get("state")
-                r["subtasks"] = []
-                r["children"] = []
-                items.append(r)
+        items = []
+        for row in rows:
+            r = dict(row)
+            if "status" not in r:
+                r["status"] = r.get("state")
+            r["subtasks"] = []
+            r["children"] = []
+            items.append(r)
 
-            items_by_id = {item["issue_number"]: item for item in items}
-            roots: List[Dict[str, Any]] = []
-            children_by_parent: Dict[int, List[Dict[str, Any]]] = {}
+        items_by_id = {item["issue_number"]: item for item in items}
+        roots: List[Dict[str, Any]] = []
+        children_by_parent: Dict[int, List[Dict[str, Any]]] = {}
 
-            for item in items:
-                parent_id = item.get("parent_issue_id")
-                if parent_id is not None and parent_id in items_by_id and parent_id != item["issue_number"]:
-                    children_by_parent.setdefault(parent_id, []).append(item)
-                else:
-                    roots.append(item)
+        for item in items:
+            parent_id = item.get("parent_issue_id")
+            if parent_id is not None and parent_id in items_by_id and parent_id != item["issue_number"]:
+                children_by_parent.setdefault(parent_id, []).append(item)
+            else:
+                roots.append(item)
 
-            # Assign sorted children to roots
-            for root in roots:
-                r_id = root["issue_number"]
-                subtasks = children_by_parent.get(r_id, [])
-                subtasks.sort(key=lambda s: (s.get("sequence_order", 0) or 0, s.get("issue_number", 0) or 0))
-                root["subtasks"] = subtasks
-                root["children"] = subtasks
+        # Assign sorted children to roots
+        for root in roots:
+            r_id = root["issue_number"]
+            subtasks = children_by_parent.get(r_id, [])
+            subtasks.sort(key=lambda s: (s.get("sequence_order", 0) or 0, s.get("issue_number", 0) or 0))
+            root["subtasks"] = subtasks
+            root["children"] = subtasks
 
-            # Smart Visibility Filter
-            active_hierarchy: List[Dict[str, Any]] = []
-            for root in roots:
-                root_closed = _is_closed(root.get("state"))
-                subtasks = root.get("subtasks", [])
-                if subtasks:
-                    all_subtasks_closed = all(_is_closed(c.get("state")) for c in subtasks)
-                else:
-                    all_subtasks_closed = True
+        # Smart Visibility Filter
+        active_hierarchy: List[Dict[str, Any]] = []
+        for root in roots:
+            root_closed = _is_closed(root.get("state"))
+            subtasks = root.get("subtasks", [])
+            if subtasks:
+                all_subtasks_closed = all(_is_closed(c.get("state")) for c in subtasks)
+            else:
+                all_subtasks_closed = True
 
-                # Exclude ONLY when parent AND 100% of children are closed
-                if root_closed and all_subtasks_closed:
-                    continue
+            # Exclude ONLY when parent AND 100% of children are closed
+            if root_closed and all_subtasks_closed:
+                continue
 
-                active_hierarchy.append(root)
+            active_hierarchy.append(root)
 
-            active_hierarchy.sort(key=lambda r: (r.get("sequence_order", 0) or 0, r.get("issue_number", 0) or 0))
-            return active_hierarchy
+        active_hierarchy.sort(key=lambda r: (r.get("sequence_order", 0) or 0, r.get("issue_number", 0) or 0))
+        return active_hierarchy
 
     async def get_active_story(self, project_name: str) -> Optional[Dict[str, Any]]:
         """
