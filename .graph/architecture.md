@@ -87,7 +87,7 @@ The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports a
 graph TD
     subgraph Layer 4: Presentation & UI Adapters
         CLI_Commands["Typer CLI Commands (`orchestrator/cli.py`)"]
-        TUI_Dashboard["Textual TUI Observability Dashboard (`orchestrator/ui/dashboard.py`)"]
+        TUI_Dashboard["Textual TUI Observability Dashboard (`orchestrator/ui/dashboard.py`, `orchestrator/ui/widgets.py`)"]
         Rich_Formatters["Rich Terminal Formatters, Tables & Live Views"]
     end
 
@@ -141,8 +141,9 @@ graph TD
      - `node-reviewer`: Remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
      - `node-bau`: Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
 
-4. **Presentation & CLI Layer (`orchestrator/cli.py`, `orchestrator/ui/dashboard.py`)**:
+4. **Presentation & CLI Layer (`orchestrator/cli.py`, `orchestrator/ui/dashboard.py`, `orchestrator/ui/widgets.py`)**:
    - Pure UI adapter handling command-line arguments, options (`--dashboard/--no-dashboard`, `--headless`), terminal dashboards (`DashboardApp`), and signal handling.
+   - Encapsulates modular Textual widgets (`SDLCProgressWidget`, `AnomalyAlertsWidget`, `HarnessQuotaWidget`) as read-only consumers of the SQLite Blackboard and `QuotaManager` via Dependency Injection.
    - Commands: `run`, `watch` (with interactive Textual TUI dashboard and headless fallback), `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `reload`, `artifact`, `artifacts`, `supervisor`.
    - Coordinates parallel workers across projects and handles graceful daemon shutdown, live reloading, and non-blocking TUI observability.
 
@@ -179,7 +180,8 @@ graph-engineering/
 │   ├── reloader.py                  # Hot-reloading watcher and module re-importer
 │   ├── ui/                          # Presentation & TUI dashboard package
 │   │   ├── __init__.py              # Subpackage exports
-│   │   └── dashboard.py             # DashboardApp Textual TUI with DataTable & RichLog
+│   │   ├── dashboard.py             # DashboardApp Textual TUI with DataTable & RichLog
+│   │   └── widgets.py               # Read-only UI widgets (SDLCProgressWidget, AnomalyAlertsWidget, HarnessQuotaWidget)
 │   └── nodes/                       # Autonomous pipeline node handlers
 │       ├── __init__.py              # Subpackage exports
 │       ├── architect.py             # Living architecture & story decomposition node

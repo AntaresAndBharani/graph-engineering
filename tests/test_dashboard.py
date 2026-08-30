@@ -7,12 +7,22 @@ import pytest
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 
-from orchestrator.config import GlobalConfig, ProjectConfig
+from orchestrator.config import (
+    GlobalConfig,
+    HarnessQuotaConfig,
+    ProjectConfig,
+    QuotaSettings,
+)
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import TextualLogHandler
+from orchestrator.quota import QuotaManager
 from orchestrator.ui.dashboard import DashboardApp
-from orchestrator.ui.widgets import AnomalyAlertsWidget, SDLCProgressWidget
+from orchestrator.ui.widgets import (
+    AnomalyAlertsWidget,
+    HarnessQuotaWidget,
+    SDLCProgressWidget,
+)
 
 
 def test_textual_log_handler_bounded_buffer():
@@ -897,3 +907,159 @@ async def test_dashboard_keyboard_navigation_arrow_keys(tmp_path: Path):
 
         sdlc = app.query_one("#sdlc_widget", SDLCProgressWidget)
         assert sdlc.row_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_dependency_injection(tmp_path: Path):
+    """
+    Asserts HarnessQuotaWidget adheres to Design Pattern #6 (Dependency Injection)
+    and does not self-construct QuotaManager when not provided.
+    """
+    from textual.app import App, ComposeResult
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            harnesses={
+                "claude": HarnessQuotaConfig(window_hours=5.0, window_token_limit=5_000_000)
+            }
+        )
+    )
+
+    # 1. Without quota_manager, widget does not instantiate one and shows "No quota data"
+    class TestAppNoMgr(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(config=config, state_manager=state_manager, quota_manager=None)
+
+    app1 = TestAppNoMgr()
+    async with app1.run_test() as _:
+        w1 = app1.query_one(HarnessQuotaWidget)
+        assert w1.quota_manager is None
+        assert w1.row_count == 1
+        row = w1.get_row_at(0)
+        assert "No quota data" in str(row[1])
+
+    # 2. With injected quota_manager, widget uses it directly
+    quota_mgr = QuotaManager(config, state_manager)
+
+    class TestAppWithMgr(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(config=config, state_manager=state_manager, quota_manager=quota_mgr)
+
+    app2 = TestAppWithMgr()
+    async with app2.run_test() as _:
+        w2 = app2.query_one(HarnessQuotaWidget)
+        assert w2.quota_manager is quota_mgr
+        assert w2.row_count == 1
+        row = w2.get_row_at(0)
+        assert "claude" in str(row[0])
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_formatting_and_render(tmp_path: Path):
+    """
+    Tests token formatting, progress bar rendering, and status row generation.
+    """
+    assert HarnessQuotaWidget._format_tokens(500) == "500"
+    assert HarnessQuotaWidget._format_tokens(1500) == "1.5k"
+    assert HarnessQuotaWidget._format_tokens(10000) == "10k"
+    assert HarnessQuotaWidget._format_tokens(2_000_000) == "2.0M"
+    assert HarnessQuotaWidget._format_tokens(2_500_000) == "2.5M"
+
+    assert HarnessQuotaWidget._render_progress_bar(0, 100, width=10) == "[░░░░░░░░░░]"
+    assert HarnessQuotaWidget._render_progress_bar(50, 100, width=10) == "[█████░░░░░]"
+    assert HarnessQuotaWidget._render_progress_bar(100, 100, width=10) == "[██████████]"
+    assert HarnessQuotaWidget._render_progress_bar(150, 100, width=10) == "[██████████]"
+    assert HarnessQuotaWidget._render_progress_bar(0, 0, width=10) == "[░░░░░░░░░░]"
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_ok_and_throttled_states(tmp_path: Path):
+    """
+    Asserts HarnessQuotaWidget renders OK vs THROTTLED statuses with breakdown.
+    """
+    from textual.app import App, ComposeResult
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=1_000_000,
+                    avg_tokens_per_hour=400_000,
+                )
+            },
+        )
+    )
+
+    quota_mgr = QuotaManager(config, state_manager)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(config=config, state_manager=state_manager, quota_manager=quota_mgr)
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(HarnessQuotaWidget)
+        assert widget.row_count == 1
+        row = widget.get_row_at(0)
+        assert "OK" in str(row[3])
+
+        # Record high usage causing throttle
+        await state_manager.record_token_usage_event(
+            harness_name="antigravity",
+            model_name="gemini-3.7-flash",
+            project_name="proj-alpha",
+            node_name="devtest",
+            issue_number=10,
+            prompt_tokens=700_000,
+            completion_tokens=200_000,
+            total_tokens=900_000,
+        )
+
+        await widget.update_quotas()
+        assert widget.row_count == 1
+        row_throttled = widget.get_row_at(0)
+        assert "THROTTLED" in str(row_throttled[3])
+        assert '"proj-alpha": 100%' in str(row_throttled[4])
+        assert '"devtest": 100%' in str(row_throttled[5])
+
+
+@pytest.mark.asyncio
+async def test_dashboard_app_composes_quota_tab(tmp_path: Path):
+    """
+    Asserts DashboardApp mounts HarnessQuotaWidget inside TabbedContent with Quota Limits tab.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    repo_dir = tmp_path / "repo1"
+    repo_dir.mkdir()
+
+    config = GlobalConfig(
+        projects=[ProjectConfig(name="p1", repo="org/repo1", local_path=repo_dir)],
+        quota=QuotaSettings(
+            harnesses={
+                "antigravity": HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000)
+            }
+        ),
+    )
+
+    quota_mgr = QuotaManager(config, state_manager)
+    app = DashboardApp(config=config, state_manager=state_manager, quota_manager=quota_mgr)
+
+    async with app.run_test() as _:
+        quota_widget = app.query_one("#quota_widget", HarnessQuotaWidget)
+        assert quota_widget is not None
+        assert quota_widget.quota_manager is quota_mgr
+        assert quota_widget.row_count == 1
+        assert "antigravity" in str(quota_widget.get_row_at(0)[0])
