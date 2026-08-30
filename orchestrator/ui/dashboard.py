@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
+from textual.widgets.data_table import RowDoesNotExist
 
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
@@ -269,7 +270,7 @@ class DashboardApp(App):
                 row_data = table.get_row(event.row_key)
                 if row_data:
                     project_name = str(row_data[0])
-        except Exception:
+        except (RowDoesNotExist, KeyError):
             pass
 
         if not project_name:
@@ -278,7 +279,7 @@ class DashboardApp(App):
                     row_data = table.get_row_at(event.cursor_row)
                     if row_data:
                         project_name = str(row_data[0])
-            except Exception:
+            except (RowDoesNotExist, KeyError, IndexError):
                 pass
 
         if project_name:
