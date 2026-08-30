@@ -12,10 +12,11 @@ from orchestrator.config import (
     HarnessQuotaConfig,
     ProjectConfig,
     QuotaSettings,
+    SettingsConfig,
 )
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import TextualLogHandler
+from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
 from orchestrator.quota import QuotaManager
 from orchestrator.ui.dashboard import DashboardApp
 from orchestrator.ui.widgets import (
@@ -1097,6 +1098,8 @@ async def test_dashboard_persistent_append_only_log_stream_across_refresh_ticks(
     And the operator's scroll position is preserved without jumping to the top.
     """
     db_path = tmp_path / "state.db"
+    ProjectLogBufferManager.reset()
+
     state_manager = StateManager(db_path)
     await state_manager.init_db()
 
@@ -1104,11 +1107,13 @@ async def test_dashboard_persistent_append_only_log_stream_across_refresh_ticks(
     repo_dir.mkdir()
 
     config = GlobalConfig(
-        projects=[ProjectConfig(name="proj1", repo="org/repo1", local_path=repo_dir)]
+        projects=[ProjectConfig(name="proj1", repo="org/repo1", local_path=repo_dir)],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
     )
 
     log_handler = TextualLogHandler(maxlen=1000)
     logger = logging.getLogger("orchestrator")
+    logger.handlers = [h for h in logger.handlers if not isinstance(h, TextualLogHandler)]
     logger.setLevel(logging.INFO)
     logger.addHandler(log_handler)
 
@@ -1269,11 +1274,11 @@ async def test_dashboard_inplace_projects_table_diffing_preserves_cursor_and_sel
         clear_spy.assert_not_called()
 
         # Verify in-place cell updates
-        row0 = table.get_row("crosstrainingapp")
+        row0 = table.get_row("crosstrainingapp::DevTest") if "crosstrainingapp::DevTest" in table.rows else table.get_row_at(0)
         assert "DevTest" in str(row0[2])
         assert "Issue #10" in str(row0[5])
 
-        row1 = table.get_row("graph-engineering")
+        row1 = table.get_row("graph-engineering::Idle") if "graph-engineering::Idle" in table.rows else table.get_row_at(1)
         assert "Paused" in str(row1[3])
 
         # Assert cursor remains locked on row 1 ("graph-engineering")
@@ -1861,7 +1866,7 @@ async def test_scenario_dashboard_harness_stream_3_arg_node_name_wiring(tmp_path
       Then ProjectLogBufferManager.add_line(line, project_name=project_name, node_name=node_name) must be called,
       populating the node-scoped tuple buffer
     """
-    from orchestrator.config import GlobalConfig, ProjectConfig
+    from orchestrator.config import GlobalConfig, ProjectConfig, SettingsConfig
     from orchestrator.logging import ProjectLogBufferManager
     from orchestrator.ui.dashboard import DashboardApp
     from textual.widgets import DataTable, RichLog
@@ -1874,7 +1879,8 @@ async def test_scenario_dashboard_harness_stream_3_arg_node_name_wiring(tmp_path
     config = GlobalConfig(
         projects=[
             ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=repo_dir),
-        ]
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
     )
 
     app = DashboardApp(config=config)
@@ -1914,6 +1920,267 @@ async def test_scenario_dashboard_harness_stream_3_arg_node_name_wiring(tmp_path
         rendered = [line.text for line in log_view.lines]
         assert any("Running 3-Amigos DevTest..." in r for r in rendered)
         assert any("INVEST decomposition complete" in r for r in rendered)
+
+
+# ---------------------------------------------------------------------------
+# Gherkin Acceptance Criteria Tests for Issue #106
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_multi_node_compound_row_rendering(tmp_path: Path):
+    """
+    Scenario: Multi-node compound row unit tests (Issue #106)
+      Given a fake StateManager returning two RUNNING jobs for the same project with different node_type values
+      When DashboardApp.update_projects_table() runs
+      Then the table must contain exactly two rows keyed "<project>::<node1>" and "<project>::<node2>"
+      And Row 1 must display "<project>" with Active Node "<node1>"
+      And Row 2 must display "  └─" with Active Node "<node2>"
+    """
+    from unittest.mock import AsyncMock
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=str(tmp_path)),
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
+    )
+
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/crosstrainingapp", "node_type": "architect", "status": "RUNNING", "issue_id": 101},
+        {"repo": "org/crosstrainingapp", "node_type": "devtest", "status": "RUNNING", "issue_id": 105},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_test"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        await pilot.pause()
+
+        assert table.row_count == 2
+
+        # Check row keys
+        row_keys = [k.value if hasattr(k, "value") else str(k) for k in table.rows.keys()]
+        assert row_keys == ["crosstrainingapp::architect", "crosstrainingapp::devtest"]
+
+        # Check row contents
+        row_arch = table.get_row("crosstrainingapp::architect")
+        assert row_arch[0] == "crosstrainingapp"
+        assert "architect" in str(row_arch[2])
+        assert "Issue #101" in str(row_arch[5])
+
+        row_dev = table.get_row("crosstrainingapp::devtest")
+        assert row_dev[0] == "  └─"
+        assert "devtest" in str(row_dev[2])
+        assert "Issue #105" in str(row_dev[5])
+
+
+@pytest.mark.asyncio
+async def test_scenario_node_isolated_log_tailing_upon_row_selection(tmp_path: Path):
+    """
+    Scenario: Node-Isolated Log Tailing upon Row Selection (Issue #106 / #105)
+      Given the ProjectStatusTable displays a row for "crosstrainingapp | devtest"
+      When the operator highlights this specific row
+      Then the RichLog pane must clear and hydrate using ONLY log records emitted by the "devtest" node
+      And live incoming logs from the concurrent "architect" node must be suppressed from this view
+      And the log pane title must display "Live Output [crosstrainingapp | devtest]"
+    """
+    from unittest.mock import AsyncMock
+
+    ProjectLogBufferManager.reset()
+
+    # Seed in-memory buffer with interleaved logs for architect and devtest
+    ProjectLogBufferManager.add_line("Arch task: planning architecture", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("DevTest: running pytest", project_name="crosstrainingapp", node_name="devtest")
+    ProjectLogBufferManager.add_line("Arch task: story decomposed", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("DevTest: green tests passing", project_name="crosstrainingapp", node_name="devtest")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=str(tmp_path)),
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
+    )
+
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/crosstrainingapp", "node_type": "architect", "status": "RUNNING", "issue_id": 101},
+        {"repo": "org/crosstrainingapp", "node_type": "devtest", "status": "RUNNING", "issue_id": 105},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_test"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        table.focus()
+        await pilot.pause()
+
+        # Highlight row 1: "crosstrainingapp::devtest"
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert app.selected_project == "crosstrainingapp"
+        assert app.selected_node == "devtest"
+        assert "Live Output" in str(log_view.border_title)
+        assert "crosstrainingapp" in str(log_view.border_title)
+        assert "devtest" in str(log_view.border_title)
+
+        # Verify only devtest logs are in the RichLog pane
+        rendered = [line.text for line in log_view.lines]
+        assert any("DevTest: running pytest" in r for r in rendered)
+        assert any("DevTest: green tests passing" in r for r in rendered)
+        assert not any("Arch task" in r for r in rendered)
+
+        # Incoming live log from architect is suppressed from active view
+        app._handle_harness_stream_line(
+            project_name="crosstrainingapp",
+            node_name="architect",
+            line="  [dim cyan][crosstrainingapp:architect][/dim cyan] [dim]New arch triage line[/dim]",
+        )
+        await pilot.pause()
+
+        rendered_after = [line.text for line in log_view.lines]
+        assert not any("New arch triage line" in r for r in rendered_after)
+
+        # Incoming live log from devtest appears in active view
+        app._handle_harness_stream_line(
+            project_name="crosstrainingapp",
+            node_name="devtest",
+            line="  [dim cyan][crosstrainingapp:devtest][/dim cyan] [dim]Live devtest assertion passing[/dim]",
+        )
+        await pilot.pause()
+
+        rendered_final = [line.text for line in log_view.lines]
+        assert any("Live devtest assertion passing" in r for r in rendered_final)
+
+
+@pytest.mark.asyncio
+async def test_scenario_cursor_migration_regression_on_node_idle(tmp_path: Path):
+    """
+    Scenario: Cursor migration regression test (Issue #106 / #105)
+      Given the highlighted row key no longer exists after a refresh (node went idle)
+      When update_projects_table() runs
+      Then no exception is raised and the cursor moves to a remaining valid row (or clears gracefully if none remain)
+    """
+    from unittest.mock import AsyncMock
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=str(tmp_path)),
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
+    )
+
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/crosstrainingapp", "node_type": "architect", "status": "RUNNING", "issue_id": 101},
+        {"repo": "org/crosstrainingapp", "node_type": "devtest", "status": "RUNNING", "issue_id": 105},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_test"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+        await pilot.pause()
+
+        # Position cursor on row 1 ("crosstrainingapp::devtest")
+        await pilot.press("down")
+        await pilot.pause()
+        assert table.cursor_row == 1
+
+        # Now simulate devtest completing its job -> only architect remains running
+        mock_sm.get_active_jobs.return_value = [
+            {"repo": "org/crosstrainingapp", "node_type": "architect", "status": "RUNNING", "issue_id": 101},
+        ]
+
+        # Trigger refresh
+        await app.update_projects_table()
+        await pilot.pause()
+
+        # No exception raised, table now has 1 row ("crosstrainingapp::architect")
+        assert table.row_count == 1
+        assert table.cursor_row == 0
+        assert "crosstrainingapp::architect" in table.rows
+
+        # Now simulate all jobs completing -> project becomes idle (1 row: "crosstrainingapp::Idle")
+        mock_sm.get_active_jobs.return_value = []
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert table.row_count == 1
+        assert table.cursor_row == 0
+        assert "crosstrainingapp::Idle" in table.rows
+
+
+@pytest.mark.asyncio
+async def test_scenario_node_scoped_cold_start_disk_tail_fallback_dashboard(tmp_path: Path):
+    """
+    Scenario: Node-scoped disk tail fallback test in DashboardApp (Issue #106 / #105)
+      Given an empty in-memory buffer and a log file under "<log_dir>/<project>/<node>/*.log"
+      When get_project_logs(project, node) / hydrate_project_logs is called
+      Then the returned lines match the tail of that node-specific file, not a sibling node directory
+    """
+    from unittest.mock import AsyncMock
+    from orchestrator.config import SettingsConfig
+
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    arch_dir = logs_root / "crosstrainingapp" / "architect"
+    dev_dir = logs_root / "crosstrainingapp" / "devtest"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    dev_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write log files
+    (arch_dir / "20260830_100000_architect_run.log").write_text(
+        "Arch cold disk line 1\nArch cold disk line 2\n", encoding="utf-8"
+    )
+    (dev_dir / "20260830_100000_devtest_run.log").write_text(
+        "Dev cold disk line 1\nDev cold disk line 2\n", encoding="utf-8"
+    )
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=str(tmp_path)),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/crosstrainingapp", "node_type": "architect", "status": "RUNNING", "issue_id": 101},
+        {"repo": "org/crosstrainingapp", "node_type": "devtest", "status": "RUNNING", "issue_id": 105},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_test"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        table.focus()
+        await pilot.pause()
+
+        # Select devtest row (row 1)
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert app.selected_node == "devtest"
+        rendered = [line.text for line in log_view.lines]
+        assert "Dev cold disk line 1" in rendered
+        assert "Dev cold disk line 2" in rendered
+        assert not any("Arch" in r for r in rendered)
+
 
 
 

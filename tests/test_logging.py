@@ -683,4 +683,72 @@ def test_scenario_backward_compatible_no_node_retrieval(tmp_path: Path):
     assert ProjectLogBufferManager.get_project_logs(None) == ["Global daemon log"]
 
 
+# ---------------------------------------------------------------------------
+# Gherkin Acceptance Criteria Tests for Issue #106
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_issue_106_node_stream_filtering():
+    """
+    Scenario: Node stream filtering integration test (Issue #106)
+      Given ProjectLogBufferManager buffers containing interleaved (node_name, line) tuples for two nodes
+      When get_project_logs(project_name, node_name="devtest") is called
+      Then only "devtest" lines are returned and "architect" lines are excluded
+    """
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    # Interleaved lines from architect and devtest
+    ProjectLogBufferManager.add_line("Architect: analyzing architecture.md", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("DevTest: running unit tests", project_name="crosstrainingapp", node_name="devtest")
+    ProjectLogBufferManager.add_line("Architect: story decomposition complete", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("DevTest: all assertions green", project_name="crosstrainingapp", node_name="devtest")
+
+    dev_logs = ProjectLogBufferManager.get_project_logs("crosstrainingapp", node_name="devtest")
+    assert dev_logs == [
+        "DevTest: running unit tests",
+        "DevTest: all assertions green",
+    ]
+    assert not any("Architect" in line for line in dev_logs)
+
+
+def test_scenario_issue_106_node_scoped_disk_tail_fallback(tmp_path: Path):
+    """
+    Scenario: Node-scoped disk tail fallback test (Issue #106)
+      Given an empty in-memory buffer and a log file under "<log_dir>/<project>/<node>/*.log"
+      When get_project_logs(project, node) is called
+      Then the returned lines match the tail of that node-specific file, not a sibling node directory
+    """
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    arch_dir = logs_root / "crosstrainingapp" / "architect"
+    dev_dir = logs_root / "crosstrainingapp" / "devtest"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    dev_dir.mkdir(parents=True, exist_ok=True)
+
+    arch_log = arch_dir / "20260830_100000_architect_run.log"
+    arch_log.write_text("ARCH_LINE_1\nARCH_LINE_2\n", encoding="utf-8")
+
+    dev_log = dev_dir / "20260830_100000_devtest_run.log"
+    dev_log.write_text("DEV_LINE_1\nDEV_LINE_2\nDEV_LINE_3\n", encoding="utf-8")
+
+    # In-memory is empty
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS.get("crosstrainingapp", [])) == 0
+
+    # Fetch devtest logs
+    dev_results = ProjectLogBufferManager.get_project_logs("crosstrainingapp", log_dir=logs_root, node_name="devtest")
+    assert dev_results == ["DEV_LINE_1", "DEV_LINE_2", "DEV_LINE_3"]
+    assert not any("ARCH" in line for line in dev_results)
+
+    # Fetch architect logs
+    arch_results = ProjectLogBufferManager.get_project_logs("crosstrainingapp", log_dir=logs_root, node_name="architect")
+    assert arch_results == ["ARCH_LINE_1", "ARCH_LINE_2"]
+    assert not any("DEV" in line for line in arch_results)
+
+
+
 

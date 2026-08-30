@@ -99,6 +99,7 @@ class DashboardApp(App):
             or ProjectLogBufferManager()
         )
         self.selected_project: Optional[str] = None
+        self.selected_node: Optional[str] = None
         self._last_bottom_pane_fingerprint: Optional[str] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
@@ -143,7 +144,7 @@ class DashboardApp(App):
         await self.update_projects_table()
 
         if self.selected_project:
-            await self.hydrate_project_logs(self.selected_project)
+            await self.hydrate_project_logs(self.selected_project, node_name=self.selected_node)
         elif self.log_handler:
             log_view = self.query_one(RichLog)
             for rec in self.log_handler.records:
@@ -153,7 +154,11 @@ class DashboardApp(App):
         # Set non-blocking 2.0s refresh interval
         self.set_interval(2.0, self.update_projects_table)
 
-    async def hydrate_project_logs(self, project_name: Optional[str]) -> None:
+    async def hydrate_project_logs(
+        self,
+        project_name: Optional[str],
+        node_name: Optional[str] = None,
+    ) -> None:
         """
         Clears the RichLog pane and populates it with scoped logs from ProjectLogBufferManager.
         Falls back to disk tailing if in-memory buffer is empty.
@@ -163,38 +168,35 @@ class DashboardApp(App):
         except Exception:
             return
 
+        if project_name:
+            if node_name:
+                log_view.border_title = f"Live Output [{project_name} | {node_name}]"
+            else:
+                log_view.border_title = f"Live Output [{project_name}]"
+        else:
+            log_view.border_title = "Live Output"
+
         log_dir = self.config.settings.resolved_log_dir if (self.config and self.config.settings) else None
 
-        buf = ProjectLogBufferManager.PROJECT_BUFFERS.get(project_name) if project_name else None
-        if buf and len(buf) > 0:
-            lines = [item[1] if isinstance(item, tuple) else item for item in buf]
-        else:
-            disk_lines = (
-                ProjectLogBufferManager.tail_latest_project_logs(
-                    project_name=project_name,
-                    log_dir=log_dir,
-                    max_lines=100,
+        lines = ProjectLogBufferManager.get_project_logs(
+            project_name=project_name,
+            log_dir=log_dir,
+            max_lines=100,
+            node_name=node_name,
+        )
+        if not lines and self.log_handler and self.log_handler.records:
+            lines = [
+                self.log_handler.format(rec)
+                for rec in self.log_handler.records
+                if (
+                    not project_name
+                    or ProjectLogBufferManager.extract_project_name(rec) in (None, project_name)
                 )
-                if project_name
-                else []
-            )
-            if disk_lines:
-                lines = disk_lines
-            elif self.log_handler and self.log_handler.records:
-                lines = [
-                    self.log_handler.format(rec)
-                    for rec in self.log_handler.records
-                    if (
-                        not project_name
-                        or ProjectLogBufferManager.extract_project_name(rec) in (None, project_name)
-                    )
-                ]
-            else:
-                lines = ProjectLogBufferManager.get_project_logs(
-                    project_name=project_name,
-                    log_dir=log_dir,
-                    max_lines=100,
+                and (
+                    not node_name
+                    or ProjectLogBufferManager.extract_node_name(rec) in (None, node_name)
                 )
+            ]
 
         log_view.clear()
         for line in lines:
@@ -203,7 +205,10 @@ class DashboardApp(App):
     def _handle_log_record(self, record: logging.LogRecord, formatted: str) -> None:
         """Callback invoked by TextualLogHandler on new log emissions."""
         rec_project = ProjectLogBufferManager.extract_project_name(record)
+        rec_node = ProjectLogBufferManager.extract_node_name(record)
         if self.selected_project and rec_project and rec_project != self.selected_project:
+            return
+        if self.selected_node and rec_node and rec_node != self.selected_node:
             return
 
         try:
@@ -241,6 +246,8 @@ class DashboardApp(App):
 
         if self.selected_project and line_project and line_project != self.selected_project:
             return
+        if self.selected_node and line_node and line_node != self.selected_node:
+            return
 
         try:
             log_view = self.query_one(RichLog)
@@ -255,7 +262,7 @@ class DashboardApp(App):
     async def update_projects_table(self) -> None:
         """
         Queries state_manager / in-memory config and refreshes DataTable rows in-place
-        sorted alphabetically by project name without clearing the table.
+        sorted alphabetically by project name with compound multi-node row keys without clearing the table.
         """
         try:
             table = self.query_one("#projects_table", DataTable)
@@ -285,40 +292,82 @@ class DashboardApp(App):
                 status = "[bold green]Active[/bold green]"
 
             # Check if active lock exists for repo
-            active_node = "Idle"
-            locks_info = "None"
             matching_jobs = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "RUNNING"]
             if matching_jobs:
-                job = matching_jobs[0]
-                active_node = f"[bold cyan]{job.get('node_type', 'Working')}[/bold cyan]"
-                locks_info = f"Issue #{job.get('issue_id')}"
+                # Sort matching jobs alphabetically by node_type for deterministic rendering
+                matching_jobs.sort(key=lambda j: str(j.get("node_type", "")))
+                for idx, job in enumerate(matching_jobs):
+                    node_type = job.get("node_type", "Working")
+                    row_key = f"{p.name}::{node_type}"
+                    display_name = p.name if idx == 0 else "  └─"
+                    active_node = f"[bold cyan]{node_type}[/bold cyan]"
+                    locks_info = f"Issue #{job.get('issue_id')}"
+                    target_rows.append(
+                        (
+                            row_key,
+                            (
+                                display_name,
+                                p.repo,
+                                active_node,
+                                status,
+                                now_str,
+                                locks_info,
+                            ),
+                        )
+                    )
             else:
                 failed_jobs = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "FAILED"]
+                locks_info = "None"
                 if failed_jobs:
                     locks_info = f"[bold red]Failed: #{failed_jobs[0].get('issue_id')}[/bold red]"
 
-            target_rows.append(
-                (
-                    p.name,
+                row_key = f"{p.name}::Idle"
+                target_rows.append(
                     (
-                        p.name,
-                        p.repo,
-                        active_node,
-                        status,
-                        now_str,
-                        locks_info,
-                    ),
+                        row_key,
+                        (
+                            p.name,
+                            p.repo,
+                            "Idle",
+                            status,
+                            now_str,
+                            locks_info,
+                        ),
+                    )
                 )
-            )
 
         _apply_keyed_diff(table, target_rows)
 
-        # Preserve cursor within valid bounds if rows were modified
-        if table.row_count > 0 and table.cursor_row is not None and table.cursor_row >= table.row_count:
-            try:
-                table.move_cursor(row=max(0, table.row_count - 1))
-            except Exception:
-                pass
+        # Preserve cursor within valid bounds / selected project & node
+        if table.row_count > 0:
+            target_cursor_index = None
+            if self.selected_project:
+                for idx, (rk, _) in enumerate(target_rows):
+                    parts = rk.split("::", 1)
+                    p_name = parts[0]
+                    n_name = parts[1] if len(parts) > 1 and parts[1] != "Idle" else None
+                    if p_name == self.selected_project:
+                        if getattr(self, "selected_node", None) and n_name == self.selected_node:
+                            target_cursor_index = idx
+                            break
+                        elif target_cursor_index is None:
+                            target_cursor_index = idx
+
+            if target_cursor_index is not None:
+                try:
+                    table.move_cursor(row=target_cursor_index)
+                except Exception:
+                    pass
+            elif table.cursor_row is not None and table.cursor_row >= table.row_count:
+                try:
+                    table.move_cursor(row=max(0, table.row_count - 1))
+                except Exception:
+                    pass
+            elif table.cursor_row is None:
+                try:
+                    table.move_cursor(row=0)
+                except Exception:
+                    pass
 
         if self.selected_project:
             await self._update_bottom_panes(self.selected_project, force=False)
@@ -346,31 +395,50 @@ class DashboardApp(App):
     @on(DataTable.RowHighlighted, "#projects_table")
     async def on_project_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """
-        Handles row highlight event on projects table to reactively filter bottom panes.
+        Handles row highlight event on projects table to reactively filter bottom panes and log view.
         """
         table = self.query_one("#projects_table", DataTable)
         project_name = None
-        try:
-            if event.row_key is not None:
-                row_data = table.get_row(event.row_key)
-                if row_data:
-                    project_name = str(row_data[0])
-        except (RowDoesNotExist, KeyError):
-            pass
+        node_name = None
+
+        row_key_str = None
+        if event.row_key is not None:
+            row_key_str = event.row_key.value if hasattr(event.row_key, "value") else str(event.row_key)
+
+        if row_key_str and "::" in row_key_str:
+            parts = row_key_str.split("::", 1)
+            project_name = parts[0]
+            node_name = parts[1] if parts[1] != "Idle" else None
+        elif row_key_str:
+            project_name = row_key_str
+
+        if not project_name:
+            try:
+                if event.row_key is not None:
+                    row_data = table.get_row(event.row_key)
+                    if row_data:
+                        raw_name = str(row_data[0]).strip()
+                        if not raw_name.startswith("└─"):
+                            project_name = raw_name
+            except (RowDoesNotExist, KeyError):
+                pass
 
         if not project_name:
             try:
                 if event.cursor_row is not None and 0 <= event.cursor_row < table.row_count:
                     row_data = table.get_row_at(event.cursor_row)
                     if row_data:
-                        project_name = str(row_data[0])
+                        raw_name = str(row_data[0]).strip()
+                        if not raw_name.startswith("└─"):
+                            project_name = raw_name
             except (RowDoesNotExist, KeyError, IndexError):
                 pass
 
         if project_name:
-            if project_name != self.selected_project:
+            if project_name != self.selected_project or node_name != getattr(self, "selected_node", None):
                 self.selected_project = project_name
-                await self.hydrate_project_logs(project_name)
+                self.selected_node = node_name
+                await self.hydrate_project_logs(project_name, node_name=node_name)
                 await self._update_bottom_panes(project_name, force=True)
 
     async def _update_bottom_panes(self, project_name: Optional[str], force: bool = False) -> None:
