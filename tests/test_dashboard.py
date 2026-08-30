@@ -1077,6 +1077,145 @@ async def test_dashboard_app_composes_quota_tab(tmp_path: Path):
         assert "antigravity" in str(quota_widget.get_row_at(0)[0])
 
 
+def test_dashboard_bindings_include_space_and_ctrl_l():
+    """Asserts DashboardApp.BINDINGS includes space for toggle_auto_scroll and ctrl+l for clear_logs."""
+    keys = {b.key: b.action for b in DashboardApp.BINDINGS}
+    assert "space" in keys
+    assert keys["space"] == "toggle_auto_scroll"
+    assert "ctrl+l" in keys
+    assert keys["ctrl+l"] == "clear_logs"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_persistent_append_only_log_stream_across_refresh_ticks(tmp_path: Path, mocker):
+    """
+    Scenario: Persistent Append-Only Log Stream Across Refresh Ticks
+    Given the "Logs" tab is active and contains historical agent log records
+    When multiple timer refresh cycles execute while agent harnesses emit new output lines
+    Then all historical log records remain intact in the RichLog buffer
+    And new records are appended to the bottom without calling rich_log.clear()
+    And the operator's scroll position is preserved without jumping to the top.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    repo_dir = tmp_path / "repo1"
+    repo_dir.mkdir()
+
+    config = GlobalConfig(
+        projects=[ProjectConfig(name="proj1", repo="org/repo1", local_path=repo_dir)]
+    )
+
+    log_handler = TextualLogHandler(maxlen=1000)
+    logger = logging.getLogger("orchestrator")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(log_handler)
+
+    # Seed initial historical log records
+    logger.info("Historical record 1: Daemon initializing")
+    logger.info("Historical record 2: Project config loaded")
+
+    app = DashboardApp(config=config, state_manager=state_manager, log_handler=log_handler)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Initial historical logs are loaded into RichLog
+        rendered_texts = [line.text for line in log_view.lines]
+        assert any("Historical record 1" in t for t in rendered_texts)
+        assert any("Historical record 2" in t for t in rendered_texts)
+        initial_count = len(log_view.lines)
+        assert initial_count >= 2
+
+        # Spy on RichLog.clear to verify periodic refresh ticks NEVER call clear()
+        clear_spy = mocker.spy(log_view, "clear")
+
+        # Emit new live output lines
+        logger.info("Live record 3: DevTest node started")
+        app._handle_harness_stream_line("Harness stdout line: Running tests...")
+        await pilot.pause()
+
+        # Execute multiple refresh cycles (simulating 2.0s timer ticks)
+        for _ in range(5):
+            await app.update_projects_table()
+            await pilot.pause()
+
+        # Emit more live records
+        logger.info("Live record 4: DevTest completed successfully")
+        await pilot.pause()
+
+        # Assert RichLog.clear() was NEVER called across refresh ticks
+        clear_spy.assert_not_called()
+
+        # Assert all historical records and new records remain intact in the RichLog buffer
+        all_texts = [line.text for line in log_view.lines]
+        assert any("Historical record 1" in t for t in all_texts)
+        assert any("Historical record 2" in t for t in all_texts)
+        assert any("Live record 3" in t for t in all_texts)
+        assert any("Running tests..." in t for t in all_texts)
+        assert any("Live record 4" in t for t in all_texts)
+        assert len(log_view.lines) >= initial_count + 3
+
+
+@pytest.mark.asyncio
+async def test_dashboard_interactive_log_controls_and_auto_scroll_toggle(tmp_path: Path):
+    """
+    Scenario: Interactive Log Controls & Auto-Scroll Toggle
+    Given the operator is viewing the live log stream
+    When the operator presses "Space"
+    Then log auto-scroll toggles between ON and OFF
+    And when the operator presses "Ctrl+L"
+    Then the log buffer clears on demand.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        projects=[ProjectConfig(name="proj1", repo="org/proj1", local_path=str(tmp_path))]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+
+        # Initial state: auto_scroll is ON
+        assert app.auto_scroll is True
+        assert log_view.auto_scroll is True
+        assert "[Auto-Scroll: ON]" in app.sub_title
+
+        # Press 'space' -> toggle auto_scroll OFF
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert app.auto_scroll is False
+        assert log_view.auto_scroll is False
+        assert "[Auto-Scroll: OFF]" in app.sub_title
+
+        # Press 'space' again -> toggle auto_scroll ON
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert app.auto_scroll is True
+        assert log_view.auto_scroll is True
+        assert "[Auto-Scroll: ON]" in app.sub_title
+
+        # Write lines to RichLog buffer
+        log_view.write("Entry 1 to be cleared")
+        log_view.write("Entry 2 to be cleared")
+        await pilot.pause()
+        assert len(log_view.lines) >= 2
+
+        # Press 'ctrl+l' -> clears log buffer on demand
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+
+        assert len(log_view.lines) == 0
+
+
 @pytest.mark.asyncio
 async def test_sdlc_progress_widget_keyed_inplace_diffing_preserves_cursor(tmp_path: Path, mocker):
     """
@@ -1368,4 +1507,5 @@ async def test_widgets_empty_state_transitions(tmp_path: Path):
         assert "No active SDLC items" in str(sdlc.get_row_at(0)[1])
         assert alerts.row_count == 1
         assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
+
 

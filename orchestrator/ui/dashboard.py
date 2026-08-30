@@ -64,6 +64,8 @@ class DashboardApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
         Binding("r", "refresh", "Refresh Status"),
+        Binding("space", "toggle_auto_scroll", "Toggle Auto-Scroll"),
+        Binding("ctrl+l", "clear_logs", "Clear Logs"),
     ]
 
     TABLE_COLUMNS = [
@@ -91,8 +93,9 @@ class DashboardApp(App):
         self.selected_project: Optional[str] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
+        self.auto_scroll: bool = True
         self.title = "Graph Orchestrator - TUI Dashboard"
-        self.sub_title = "Real-time Autonomous SDLC Observability"
+        self._update_sub_title()
 
     def compose(self) -> ComposeResult:
         """Compose the TUI layout with Header, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
@@ -102,7 +105,7 @@ class DashboardApp(App):
             yield SDLCProgressWidget(id="sdlc_widget", state_manager=self.state_manager)
             with TabbedContent(id="tabs"):
                 with TabPane("Logs", id="tab_logs"):
-                    yield RichLog(id="log_view", highlight=True, markup=True, max_lines=1000)
+                    yield RichLog(id="log_view", highlight=True, markup=True, max_lines=1000, auto_scroll=self.auto_scroll)
                 with TabPane("Quota Limits", id="tab_quotas"):
                     yield HarnessQuotaWidget(
                         id="quota_widget",
@@ -280,6 +283,34 @@ class DashboardApp(App):
         except Exception:
             pass
 
+    def _update_sub_title(self) -> None:
+        """Updates dashboard sub_title with current operational status and auto-scroll indicator."""
+        scroll_indicator = f"[Auto-Scroll: {'ON' if self.auto_scroll else 'OFF'}]"
+        if self.is_draining:
+            self.sub_title = (
+                f"⏳ DRAINING - Waiting for active agents to finish (Press 'Q' again to Force Quit) {scroll_indicator}"
+            )
+        else:
+            self.sub_title = f"Real-time Autonomous SDLC Observability {scroll_indicator}"
+
+    def action_toggle_auto_scroll(self) -> None:
+        """Toggles log auto-scrolling between ON and OFF and synchronizes with RichLog widget."""
+        self.auto_scroll = not self.auto_scroll
+        try:
+            log_view = self.query_one("#log_view", RichLog)
+            log_view.auto_scroll = self.auto_scroll
+        except Exception:
+            pass
+        self._update_sub_title()
+
+    def action_clear_logs(self) -> None:
+        """Clears the RichLog buffer on explicit demand."""
+        try:
+            log_view = self.query_one("#log_view", RichLog)
+            log_view.clear()
+        except Exception:
+            pass
+
     async def action_refresh(self) -> None:
         """Manual refresh trigger via 'R' key."""
         await self.update_projects_table()
@@ -289,7 +320,6 @@ class DashboardApp(App):
         Two-stage exit handler:
         1. If already draining: immediately force-terminates subprocesses and exits.
         2. If active harness subprocesses or running jobs exist: initiates graceful draining mode
-           and notifies the operator.
         3. If idle: performs clean immediate exit.
         """
         if self.is_draining:
@@ -322,7 +352,7 @@ class DashboardApp(App):
 
         # Active processes exist -> Enter graceful draining mode
         self.is_draining = True
-        self.sub_title = "⏳ DRAINING - Waiting for active agents to finish (Press 'Q' again to Force Quit)"
+        self._update_sub_title()
 
         # Request daemon stop in state DB so worker loops do not start new passes
         if self.state_manager:
