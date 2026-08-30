@@ -2,13 +2,63 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from textual.widgets import DataTable
 
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.quota import QuotaManager
+
+
+def _apply_keyed_diff(
+    table: DataTable,
+    target_rows: List[Tuple[str, Tuple[Any, ...]]],
+) -> None:
+    """
+    Applies non-destructive keyed in-place cell diffing to a DataTable.
+    - Drops deleted rows individually.
+    - Inserts newly added rows with explicit row keys.
+    - Updates modified cells in-place with bounds-validated column keys.
+    Prevents cursor coordinate resets and DOM reconstruction flicker.
+    """
+    if not table.columns:
+        return
+
+    existing_keys = {
+        k.value if hasattr(k, "value") else str(k)
+        for k in table.rows.keys()
+    }
+    target_keys = {rk for rk, _ in target_rows}
+
+    # 1. Remove deleted rows
+    for k in existing_keys - target_keys:
+        try:
+            table.remove_row(k)
+        except Exception:
+            pass
+
+    # 2. Add or update rows in-place
+    col_keys = list(table.columns.keys())
+    for row_key, values in target_rows:
+        if row_key not in table.rows:
+            try:
+                table.add_row(*values, key=row_key)
+            except Exception:
+                pass
+        else:
+            for col_idx, new_val in enumerate(values):
+                if 0 <= col_idx < len(col_keys):
+                    col_key = col_keys[col_idx]
+                    try:
+                        curr_val = table.get_cell(row_key, col_key)
+                    except Exception:
+                        curr_val = None
+                    if curr_val != new_val:
+                        try:
+                            table.update_cell(row_key, col_key, new_val)
+                        except Exception:
+                            pass
 
 
 class SDLCProgressWidget(DataTable):
@@ -33,6 +83,7 @@ class SDLCProgressWidget(DataTable):
         super().__init__(**kwargs)
         self.state_manager = state_manager
         self.project_name = project_name
+        self._render_lock = asyncio.Lock()
 
     async def on_mount(self) -> None:
         """Initializes table configuration and renders initial project items."""
@@ -51,37 +102,47 @@ class SDLCProgressWidget(DataTable):
         await self._render_rows()
 
     async def _render_rows(self) -> None:
-        """Renders SDLC item rows into the DataTable."""
-        if not self.columns:
-            return
-        self.clear()
+        """Renders SDLC item rows into the DataTable with keyed in-place diffing."""
+        async with self._render_lock:
+            if not self.columns:
+                return
 
-        if not self.project_name or not self.state_manager:
-            self.add_row("-", "No active SDLC items", "-", "-")
-            return
+            if not self.project_name or not self.state_manager:
+                _apply_keyed_diff(
+                    self,
+                    [("-empty-", ("-", "No active SDLC items", "-", "-"))],
+                )
+                return
 
-        try:
-            items = await self.state_manager.get_sdlc_items(self.project_name)
-        except Exception:
-            items = []
+            try:
+                items = await self.state_manager.get_sdlc_items(self.project_name)
+            except Exception:
+                items = []
 
-        if not items:
-            self.add_row("-", "No active SDLC items", "-", "-")
-            return
+            if not items:
+                _apply_keyed_diff(
+                    self,
+                    [("-empty-", ("-", "No active SDLC items", "-", "-"))],
+                )
+                return
 
-        for item in items:
-            issue_num = item.get("issue_number") or item.get("id", "-")
-            issue_id = f"#{issue_num}" if issue_num != "-" else "-"
-            title = str(item.get("title", ""))
+            target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
+            for item in items:
+                issue_num = item.get("issue_number") or item.get("id") or item.get("number")
+                issue_id = f"#{issue_num}" if (issue_num is not None and str(issue_num) != "-") else "-"
+                title = str(item.get("title", ""))
 
-            raw_labels = item.get("labels")
-            raw_state = item.get("state") or item.get("status")
-            status_label = str(raw_labels) if raw_labels else (str(raw_state) if raw_state else "-")
+                raw_labels = item.get("labels")
+                raw_state = item.get("state") or item.get("status")
+                status_label = str(raw_labels) if raw_labels else (str(raw_state) if raw_state else "-")
 
-            linked_pr = item.get("linked_pr")
-            pr_str = f"#{linked_pr}" if linked_pr else "-"
+                linked_pr = item.get("linked_pr")
+                pr_str = f"#{linked_pr}" if linked_pr else "-"
 
-            self.add_row(issue_id, title, status_label, pr_str)
+                row_key = str(issue_num) if (issue_num is not None and str(issue_num) != "-") else f"item_{title}"
+                target_rows.append((row_key, (issue_id, title, status_label, pr_str)))
+
+            _apply_keyed_diff(self, target_rows)
 
 
 class AnomalyAlertsWidget(DataTable):
@@ -108,6 +169,7 @@ class AnomalyAlertsWidget(DataTable):
         self.state_manager = state_manager
         self.project_name = project_name
         self.hours = hours
+        self._render_lock = asyncio.Lock()
 
     async def on_mount(self) -> None:
         """Initializes table configuration and renders initial anomaly events."""
@@ -132,39 +194,54 @@ class AnomalyAlertsWidget(DataTable):
         await self._render_rows()
 
     async def _render_rows(self) -> None:
-        """Renders anomaly event rows into the DataTable."""
-        if not self.columns:
-            return
-        self.clear()
+        """Renders anomaly event rows into the DataTable with keyed in-place diffing."""
+        async with self._render_lock:
+            if not self.columns:
+                return
 
-        if not self.project_name or not self.state_manager:
-            self.add_row("-", "-", "No anomalies in last 24h", "-")
-            return
+            if not self.project_name or not self.state_manager:
+                _apply_keyed_diff(
+                    self,
+                    [("-empty-", ("-", "-", "No anomalies in last 24h", "-"))],
+                )
+                return
 
-        try:
-            anomalies = await self.state_manager.get_recent_anomalies(
-                project_name=self.project_name,
-                hours=self.hours,
-            )
-        except Exception:
-            anomalies = []
+            try:
+                anomalies = await self.state_manager.get_recent_anomalies(
+                    project_name=self.project_name,
+                    hours=self.hours,
+                )
+            except Exception:
+                anomalies = []
 
-        if not anomalies:
-            self.add_row("-", "-", "No anomalies in last 24h", "-")
-            return
+            if not anomalies:
+                _apply_keyed_diff(
+                    self,
+                    [("-empty-", ("-", "-", "No anomalies in last 24h", "-"))],
+                )
+                return
 
-        for row in anomalies:
-            created_at = row.get("created_at")
-            if isinstance(created_at, (int, float)):
-                time_str = datetime.datetime.fromtimestamp(created_at).strftime("%H:%M:%S")
-            else:
-                time_str = str(created_at or "-")
+            target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
+            for row in anomalies:
+                created_at = row.get("created_at")
+                if isinstance(created_at, (int, float)):
+                    time_str = datetime.datetime.fromtimestamp(created_at).strftime("%H:%M:%S")
+                else:
+                    time_str = str(created_at or "-")
 
-            node_name = str(row.get("node_name", "-"))
-            error_type = str(row.get("error_type", "-"))
-            error_msg = str(row.get("error_message", "-"))
+                node_name = str(row.get("node_name", "-"))
+                error_type = str(row.get("error_type", "-"))
+                error_msg = str(row.get("error_message", "-"))
 
-            self.add_row(time_str, node_name, error_type, error_msg)
+                anomaly_id = row.get("id")
+                if anomaly_id is not None:
+                    row_key = f"anomaly_{anomaly_id}"
+                else:
+                    row_key = f"anomaly_{created_at}_{node_name}_{error_type}_{error_msg}"
+
+                target_rows.append((row_key, (time_str, node_name, error_type, error_msg)))
+
+            _apply_keyed_diff(self, target_rows)
 
 
 class HarnessQuotaWidget(DataTable):
@@ -252,22 +329,28 @@ class HarnessQuotaWidget(DataTable):
         return f"[{'█' * filled}{'░' * empty}]"
 
     async def _render_rows(self) -> None:
-        """Renders harness quota rows into the DataTable."""
+        """Renders harness quota rows into the DataTable with keyed in-place diffing."""
         async with self._render_lock:
             if not self.columns:
                 return
-            self.clear()
 
             if not self.quota_manager:
-                self.add_row("-", "No quota data", "-", "-", "-", "-")
+                _apply_keyed_diff(
+                    self,
+                    [("-empty-", ("-", "No quota data", "-", "-", "-", "-"))],
+                )
                 return
 
             harnesses = getattr(self.config, "quota", None)
             harness_dict = harnesses.harnesses if harnesses else {}
             if not harness_dict:
-                self.add_row("-", "No harnesses configured", "-", "-", "-", "-")
+                _apply_keyed_diff(
+                    self,
+                    [("-empty-", ("-", "No harnesses configured", "-", "-", "-", "-"))],
+                )
                 return
 
+            target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
             for harness_name in sorted(harness_dict.keys()):
                 quota_cfg = harness_dict[harness_name]
                 window_hours = quota_cfg.window_hours
@@ -320,12 +403,19 @@ class HarnessQuotaWidget(DataTable):
                 else:
                     node_str = "-"
 
-                self.add_row(
-                    harness_name,
-                    capacity_str,
-                    w_str,
-                    status_str,
-                    project_str,
-                    node_str,
-                    key=harness_name,
+                target_rows.append(
+                    (
+                        harness_name,
+                        (
+                            harness_name,
+                            capacity_str,
+                            w_str,
+                            status_str,
+                            project_str,
+                            node_str,
+                        ),
+                    )
                 )
+
+            _apply_keyed_diff(self, target_rows)
+

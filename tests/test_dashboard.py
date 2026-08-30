@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import pytest
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent
 
 from orchestrator.config import (
     GlobalConfig,
@@ -1214,4 +1214,298 @@ async def test_dashboard_interactive_log_controls_and_auto_scroll_toggle(tmp_pat
         await pilot.pause()
 
         assert len(log_view.lines) == 0
+
+
+@pytest.mark.asyncio
+async def test_sdlc_progress_widget_keyed_inplace_diffing_preserves_cursor(tmp_path: Path, mocker):
+    """
+    Scenario: Non-Destructive SDLC Progress Widget
+    Given the operator is viewing the SDLC items pane with multiple items
+    And the cursor is positioned on a specific row
+    When background data is refreshed from SQLite with modified, added, and removed items
+    Then rows matching existing keys are updated in-place without clearing the table
+    And cursor coordinate and row position are preserved
+    And table.clear() is never invoked.
+    """
+    import aiosqlite
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Initial SDLC items
+    await state_manager.sync_project_sdlc_items(
+        "proj_alpha",
+        [
+            {"issue_number": 10, "title": "Issue Ten", "labels": "ready-for-dev", "linked_pr": None},
+            {"issue_number": 20, "title": "Issue Twenty", "labels": "needs-triage", "linked_pr": None},
+            {"issue_number": 30, "title": "Issue Thirty", "labels": "ready-for-dev", "linked_pr": None},
+        ],
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="proj_alpha")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = app.query_one(SDLCProgressWidget)
+        widget.focus()
+        assert widget.row_count == 3
+
+        # Move cursor to row 1 (Issue 20)
+        widget.move_cursor(row=1)
+        await pilot.pause()
+        assert widget.cursor_row == 1
+
+        # Spy on DataTable.clear() to ensure it is NEVER called during refresh
+        clear_spy = mocker.spy(widget, "clear")
+
+        # Mutate SQLite data:
+        # - Issue 10: status changes to "in-progress"
+        # - Issue 20: status changes to "architect-approved", linked_pr becomes 99
+        # - Issue 30: deleted from SQLite (by deleting and re-syncing new set)
+        # - Issue 40: added
+        async with aiosqlite.connect(tmp_path / "state.db") as db:
+            await db.execute("DELETE FROM sdlc_items WHERE project_name = 'proj_alpha'")
+            await db.commit()
+
+        await state_manager.sync_project_sdlc_items(
+            "proj_alpha",
+            [
+                {"issue_number": 10, "title": "Issue Ten", "labels": "in-progress", "linked_pr": None},
+                {"issue_number": 20, "title": "Issue Twenty", "labels": "architect-approved", "linked_pr": 99},
+                {"issue_number": 40, "title": "Issue Forty", "labels": "needs-architect-review", "linked_pr": 101},
+            ],
+        )
+
+        # Trigger update_project
+        await widget.update_project("proj_alpha")
+        await pilot.pause()
+
+        # Verify clear was NEVER called
+        clear_spy.assert_not_called()
+
+        # Verify row count and in-place updates
+        assert widget.row_count == 3
+
+        # Row 0: Issue 10 updated
+        row0 = widget.get_row("10")
+        assert row0[0] == "#10"
+        assert row0[2] == "in-progress"
+
+        # Row 1: Issue 20 updated in-place and cursor is PRESERVED on row 1
+        row1 = widget.get_row("20")
+        assert row1[0] == "#20"
+        assert row1[2] == "architect-approved"
+        assert row1[3] == "#99"
+        assert widget.cursor_row == 1
+
+        # Row 40 added
+        row_new = widget.get_row("40")
+        assert row_new[0] == "#40"
+        assert row_new[1] == "Issue Forty"
+
+        # Row 30 removed from table.rows
+        assert "30" not in widget.rows
+
+
+@pytest.mark.asyncio
+async def test_anomaly_alerts_widget_keyed_inplace_diffing_preserves_cursor(tmp_path: Path, mocker):
+    """
+    Scenario: Non-Destructive Anomaly Alerts Widget
+    Given the operator is viewing the Anomaly Alerts widget
+    And the cursor is positioned on a specific anomaly row
+    When new anomaly events are recorded in SQLite
+    Then existing rows are preserved and new rows are appended without table.clear()
+    And the cursor position is preserved.
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    await state_manager.record_anomaly_event(
+        project_name="proj_beta",
+        node_name="devtest",
+        error_type="Timeout",
+        error_message="First timeout",
+        issue_number=1,
+    )
+    await state_manager.record_anomaly_event(
+        project_name="proj_beta",
+        node_name="reviewer",
+        error_type="Conflict",
+        error_message="Merge conflict",
+        issue_number=2,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield AnomalyAlertsWidget(state_manager=state_manager, project_name="proj_beta")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = app.query_one(AnomalyAlertsWidget)
+        widget.focus()
+        assert widget.row_count == 2
+
+        # Move cursor to row 1
+        widget.move_cursor(row=1)
+        await pilot.pause()
+        assert widget.cursor_row == 1
+
+        clear_spy = mocker.spy(widget, "clear")
+
+        # Record a 3rd anomaly
+        await state_manager.record_anomaly_event(
+            project_name="proj_beta",
+            node_name="supervisor",
+            error_type="SLAViolation",
+            error_message="Issue exceeded SLA",
+            issue_number=3,
+        )
+
+        await widget.update_project("proj_beta")
+        await pilot.pause()
+
+        clear_spy.assert_not_called()
+        assert widget.row_count == 3
+        assert widget.cursor_row == 1
+
+
+@pytest.mark.asyncio
+async def test_harness_quota_widget_keyed_inplace_diffing_preserves_cursor(tmp_path: Path, mocker):
+    """
+    Scenario: Non-Destructive Quota Limits Widget
+    Given the operator is viewing the Quota Limits widget
+    And cursor is positioned on a harness row
+    When token usage updates harness status from OK to THROTTLED
+    Then cell values update in-place without table.clear()
+    And the cursor remains on the selected harness row.
+    """
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(window_hours=1.0, window_token_limit=1_000_000, avg_tokens_per_hour=400_000),
+                "claude": HarnessQuotaConfig(window_hours=2.0, window_token_limit=2_000_000, avg_tokens_per_hour=500_000),
+            },
+        )
+    )
+    quota_mgr = QuotaManager(config, state_manager)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield HarnessQuotaWidget(config=config, state_manager=state_manager, quota_manager=quota_mgr)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = app.query_one(HarnessQuotaWidget)
+        widget.focus()
+        assert widget.row_count == 2
+
+        # Position cursor on row 1 ("claude")
+        widget.move_cursor(row=1)
+        await pilot.pause()
+        assert widget.cursor_row == 1
+        row_claude = widget.get_row("claude")
+        assert "OK" in str(row_claude[3])
+
+        clear_spy = mocker.spy(widget, "clear")
+
+        # Record usage to throttle claude
+        await state_manager.record_token_usage_event(
+            harness_name="claude",
+            model_name="claude-3-5-sonnet",
+            project_name="proj-x",
+            node_name="devtest",
+            issue_number=100,
+            prompt_tokens=1_500_000,
+            completion_tokens=400_000,
+            total_tokens=1_900_000,
+        )
+
+        await widget.update_quotas()
+        await pilot.pause()
+
+        clear_spy.assert_not_called()
+        assert widget.row_count == 2
+        assert widget.cursor_row == 1
+
+        # Check in-place cell update for claude
+        row_claude_after = widget.get_row("claude")
+        assert "THROTTLED" in str(row_claude_after[3])
+        assert '"proj-x": 100%' in str(row_claude_after[4])
+
+
+@pytest.mark.asyncio
+async def test_widgets_empty_state_transitions(tmp_path: Path):
+    """
+    Scenario: Seamless Empty State Transitions
+    Tests that widgets transition between empty state and data state without table.clear() or errors.
+    """
+    import aiosqlite
+    from textual.app import App, ComposeResult
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="test_proj", id="sdlc")
+            yield AnomalyAlertsWidget(state_manager=state_manager, project_name="test_proj", id="alerts")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        sdlc = app.query_one("#sdlc", SDLCProgressWidget)
+        alerts = app.query_one("#alerts", AnomalyAlertsWidget)
+
+        # 1. Initially empty
+        assert sdlc.row_count == 1
+        assert "No active SDLC items" in str(sdlc.get_row_at(0)[1])
+        assert alerts.row_count == 1
+        assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
+
+        # 2. Add data
+        await state_manager.sync_project_sdlc_items(
+            "test_proj",
+            [{"issue_number": 55, "title": "Added Issue", "labels": "ready-for-dev"}],
+        )
+        await state_manager.record_anomaly_event(
+            project_name="test_proj",
+            node_name="devtest",
+            error_type="ErrorX",
+            error_message="MsgX",
+        )
+
+        await sdlc.update_project("test_proj")
+        await alerts.update_project("test_proj")
+        await pilot.pause()
+
+        assert sdlc.row_count == 1
+        assert sdlc.get_row("55")[1] == "Added Issue"
+        assert alerts.row_count == 1
+        assert alerts.get_row_at(0)[2] == "ErrorX"
+
+        # 3. Transition back to empty
+        async with aiosqlite.connect(tmp_path / "state.db") as db:
+            await db.execute("DELETE FROM sdlc_items WHERE project_name = 'test_proj'")
+            await db.execute("DELETE FROM anomaly_events WHERE project_name = 'test_proj'")
+            await db.commit()
+
+        await sdlc.update_project("test_proj")
+        await alerts.update_project("test_proj")
+        await pilot.pause()
+
+        assert sdlc.row_count == 1
+        assert "No active SDLC items" in str(sdlc.get_row_at(0)[1])
+        assert alerts.row_count == 1
+        assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
+
 
