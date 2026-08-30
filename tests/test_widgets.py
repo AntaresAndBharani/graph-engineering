@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
+from textual.widgets import DataTable
 
 from orchestrator.db import StateManager
 from orchestrator.ui.widgets import (
@@ -352,3 +353,42 @@ async def test_scenario_cursor_stability_across_refresh_cycle(tmp_path: Path, mo
         assert widget.row_count == 3
         assert widget.get_row("20")[1] == "Story 20 (Active)"
         assert widget.get_row("20")[3] == "#100 [green]PASS[/green]"
+
+
+@pytest.mark.asyncio
+async def test_apply_keyed_diff_crud_and_ordering():
+    """
+    Direct unit test for _apply_keyed_diff validating add, update, remove, and ordering.
+    """
+    class DiffTestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DataTable()
+
+    app = DiffTestApp()
+    async with app.run_test() as _:
+        table = app.query_one(DataTable)
+        # Before adding columns, calling diff is a safe no-op
+        _apply_keyed_diff(table, [("row1", ("A", "B"))])
+        assert table.row_count == 0
+
+        table.add_columns("Col1", "Col2")
+
+        # Initial population
+        _apply_keyed_diff(table, [
+            ("r1", ("Val1", "Val2")),
+            ("r2", ("Val3", "Val4")),
+        ])
+        assert table.row_count == 2
+        assert table.get_row("r1") == ["Val1", "Val2"]
+        assert table.get_row("r2") == ["Val3", "Val4"]
+
+        # In-place update + remove r1 + insert r3 + reverse order
+        _apply_keyed_diff(table, [
+            ("r3", ("Val5", "Val6")),
+            ("r2", ("Val3-Updated", "Val4")),
+        ])
+        assert table.row_count == 2
+        assert table.get_row("r2") == ["Val3-Updated", "Val4"]
+        assert table.get_row("r3") == ["Val5", "Val6"]
+
+
