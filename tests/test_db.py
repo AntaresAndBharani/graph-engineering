@@ -278,6 +278,7 @@ async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
             "state": "TEXT",
             "labels": "TEXT",
             "linked_pr": "INTEGER",
+            "created_at": "REAL",
             "updated_at": "REAL",
         }
         for name, expected_type in expected_sdlc_cols.items():
@@ -286,6 +287,12 @@ async def test_sdlc_items_and_anomaly_events_schema_creation(tmp_path: Path):
 
         assert col_map["project_name"]["pk"] > 0
         assert col_map["issue_number"]["pk"] > 0
+
+        cursor = await db.execute("PRAGMA index_list(sdlc_items);")
+        sdlc_indexes = await cursor.fetchall()
+        sdlc_idx_names = [idx[1] for idx in sdlc_indexes]
+        assert "idx_sdlc_parent" in sdlc_idx_names
+        assert "idx_sdlc_lookahead" in sdlc_idx_names
 
         # Check anomaly_events table
         cursor = await db.execute("PRAGMA table_info(anomaly_events);")
@@ -822,6 +829,198 @@ async def test_get_project_state_fingerprint(tmp_path: Path):
     # Global fingerprint also updated
     fp_global = await manager.get_project_state_fingerprint(None)
     assert fp_global == "global:1:1"
+
+
+@pytest.mark.asyncio
+async def test_count_planned_stories_scenario(tmp_path: Path):
+    """
+    Scenario: Count planned stories for a project
+      Given SQLite sdlc_items contains 2 rows for project "demo" with status "PLANNED"
+      When count_planned_stories("demo") is called
+      Then it returns 2
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Empty initially
+    assert await manager.count_planned_stories("demo") == 0
+
+    items = [
+        {
+            "issue_number": 50,
+            "title": "Story: User Auth",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 51,
+            "title": "Story: Profile Dashboard",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 52,
+            "title": "Story: In-progress feature",
+            "state": "IN_PROGRESS",
+            "item_type": "STORY",
+            "sequence_order": 0,
+        },
+    ]
+    await manager.sync_project_sdlc_items("demo", items)
+
+    count = await manager.count_planned_stories("demo")
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_oldest_planned_story_scenario(tmp_path: Path):
+    """
+    Scenario: Get oldest planned story
+      Given SQLite sdlc_items contains multiple "PLANNED" stories for project "demo" with different created_at timestamps
+      When get_oldest_planned_story("demo") is called
+      Then it returns the story record with the earliest created_at
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Empty initially
+    assert await manager.get_oldest_planned_story("demo") is None
+
+    base_time = 1700000000.0
+    items = [
+        {
+            "issue_number": 62,
+            "title": "Story: Newer Story",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "created_at": base_time + 300.0,
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 60,
+            "title": "Story: Oldest Story",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "created_at": base_time,
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 61,
+            "title": "Story: Middle Story",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "created_at": base_time + 150.0,
+            "sequence_order": 3,
+        },
+    ]
+    await manager.sync_project_sdlc_items("demo", items)
+
+    oldest = await manager.get_oldest_planned_story("demo")
+    assert oldest is not None
+    assert oldest["issue_number"] == 60
+    assert oldest["title"] == "Story: Oldest Story"
+    assert oldest["state"] == "PLANNED"
+    assert oldest["status"] == "PLANNED"
+    assert oldest["created_at"] == base_time
+
+
+@pytest.mark.asyncio
+async def test_promote_planned_story_scenario(tmp_path: Path):
+    """
+    Scenario: Promote a planned story
+      Given story #60 exists in SQLite with status "PLANNED"
+      When promote_planned_story("demo", 60) is called
+      Then the story's status is updated to "ACTIVE" (or equivalent active state) in the same WAL transaction
+      And the update is atomic under the existing TTL/lock conventions of StateManager
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 60,
+            "title": "Story: Core Engine",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 61,
+            "title": "Story: Extension Pack",
+            "state": "PLANNED",
+            "item_type": "STORY",
+            "sequence_order": 2,
+        },
+    ]
+    await manager.sync_project_sdlc_items("demo", items)
+    assert await manager.count_planned_stories("demo") == 2
+
+    # Promote story #60
+    promoted = await manager.promote_planned_story("demo", 60)
+    assert promoted is True
+
+    # Check updated status
+    sdlc_items = await manager.get_sdlc_items("demo")
+    story_60 = next(s for s in sdlc_items if s["issue_number"] == 60)
+    assert story_60["state"] == "ACTIVE"
+    assert story_60["status"] == "ACTIVE"
+
+    # Planned count should now be 1
+    assert await manager.count_planned_stories("demo") == 1
+
+    # Oldest planned story is now #61
+    oldest = await manager.get_oldest_planned_story("demo")
+    assert oldest is not None
+    assert oldest["issue_number"] == 61
+
+
+@pytest.mark.asyncio
+async def test_planned_stories_lookahead_edge_cases_and_multi_project_isolation(tmp_path: Path):
+    """
+    Tests edge cases: non-existent story promotion, custom new_status,
+    case insensitivity (status:planned), and multi-project isolation.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 1. Promote non-existent story -> returns False
+    res = await manager.promote_planned_story("demo", 999)
+    assert res is False
+
+    # 2. Multi-project isolation
+    items_p1 = [
+        {"issue_number": 10, "title": "P1 Story", "state": "planned", "created_at": 100.0}
+    ]
+    items_p2 = [
+        {"issue_number": 20, "title": "P2 Story", "state": "PLANNED", "created_at": 200.0}
+    ]
+    await manager.sync_project_sdlc_items("proj1", items_p1)
+    await manager.sync_project_sdlc_items("proj2", items_p2)
+
+    assert await manager.count_planned_stories("proj1") == 1
+    assert await manager.count_planned_stories("proj2") == 1
+    assert await manager.count_planned_stories("proj3") == 0
+
+    p1_oldest = await manager.get_oldest_planned_story("proj1")
+    assert p1_oldest is not None
+    assert p1_oldest["issue_number"] == 10
+
+    # 3. Custom status promotion (e.g. READY-FOR-DEV)
+    promoted = await manager.promote_planned_story("proj1", 10, new_status="READY-FOR-DEV")
+    assert promoted is True
+
+    p1_items = await manager.get_sdlc_items("proj1")
+    assert p1_items[0]["state"] == "READY-FOR-DEV"
+    assert await manager.count_planned_stories("proj1") == 0
+    assert await manager.get_oldest_planned_story("proj1") is None
+    # proj2 unchanged
+    assert await manager.count_planned_stories("proj2") == 1
 
 
 
