@@ -216,15 +216,27 @@ class DashboardApp(App):
             except Exception:
                 pass
 
-    def _handle_harness_stream_line(self, project_name: Optional[str] = None, line: Optional[str] = None) -> None:
+    def _handle_harness_stream_line(
+        self,
+        project_name: Optional[str] = None,
+        node_name: Optional[str] = None,
+        line: Optional[str] = None,
+    ) -> None:
         """Callback invoked by AsyncHarnessAdapter on live subprocess stream emissions."""
-        if line is None:
-            # Fallback for 1-argument calls where line is passed as first argument
-            line = str(project_name) if project_name is not None else ""
+        if line is None and node_name is not None:
+            # Fallback for 2-argument calls where (project_name, line) was passed
+            line = node_name
+            node_name = None
+        elif line is None and node_name is None and project_name is not None:
+            # Fallback for 1-argument calls where (line,) was passed
+            line = str(project_name)
             project_name = None
 
+        if line is None:
+            line = ""
+
         line_project = project_name or ProjectLogBufferManager.extract_project_name(line)
-        line_node = ProjectLogBufferManager.extract_node_name(line)
+        line_node = node_name or ProjectLogBufferManager.extract_node_name(line)
         self.buffer_manager.add_line(line, project_name=line_project, node_name=line_node)
 
         if self.selected_project and line_project and line_project != self.selected_project:

@@ -1852,5 +1852,69 @@ async def test_dashboard_harness_stream_line_routing_with_project_tag(tmp_path: 
         assert not any("Other project tests..." in r for r in rendered)
 
 
+@pytest.mark.asyncio
+async def test_scenario_dashboard_harness_stream_3_arg_node_name_wiring(tmp_path: Path):
+    """
+    Scenario: Buffer manager wiring uses node_name (Issue #104)
+      Given the TUI dashboard registers a stream listener that forwards to ProjectLogBufferManager.add_line
+      When a line arrives with (project_name, node_name, line)
+      Then ProjectLogBufferManager.add_line(line, project_name=project_name, node_name=node_name) must be called,
+      populating the node-scoped tuple buffer
+    """
+    from orchestrator.config import GlobalConfig, ProjectConfig
+    from orchestrator.logging import ProjectLogBufferManager
+    from orchestrator.ui.dashboard import DashboardApp
+    from textual.widgets import DataTable, RichLog
+
+    ProjectLogBufferManager.reset()
+
+    repo_dir = tmp_path / "crosstrainingapp"
+    repo_dir.mkdir()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=repo_dir),
+        ]
+    )
+
+    app = DashboardApp(config=config)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+        table.move_cursor(row=0)
+        await pilot.pause()
+        assert app.selected_project == "crosstrainingapp"
+
+        # Emit 3-arg stream line with explicit node_name
+        app._handle_harness_stream_line(
+            "crosstrainingapp",
+            "devtest",
+            "  [dim cyan][crosstrainingapp:devtest][/dim cyan] [dim]Running 3-Amigos DevTest...[/dim]",
+        )
+
+        # Emit 3-arg stream line for architect node
+        app._handle_harness_stream_line(
+            "crosstrainingapp",
+            "architect",
+            "  [dim cyan][crosstrainingapp:architect][/dim cyan] [dim]INVEST decomposition complete[/dim]",
+        )
+
+        # Check ProjectLogBufferManager has (node_name, line) tuples
+        buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("crosstrainingapp")
+        assert buf is not None
+        assert len(buf) == 2
+        assert buf[0][0] == "devtest"
+        assert "Running 3-Amigos DevTest..." in buf[0][1]
+        assert buf[1][0] == "architect"
+        assert "INVEST decomposition complete" in buf[1][1]
+
+        # Check log view rendered the active project's lines
+        rendered = [line.text for line in log_view.lines]
+        assert any("Running 3-Amigos DevTest..." in r for r in rendered)
+        assert any("INVEST decomposition complete" in r for r in rendered)
+
+
 
 

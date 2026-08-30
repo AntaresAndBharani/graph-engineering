@@ -727,11 +727,11 @@ async def test_harness_token_recording_sqlite_resilience(tmp_path: Path, monkeyp
 @pytest.mark.asyncio
 async def test_scenario_live_subprocess_stream_tagging_and_routing(tmp_path: Path):
     """
-    Scenario: Live Subprocess Stream Tagging and Routing
-      Given an agent node executes an external LLM CLI harness for project "graph-engineering"
-      When the subprocess emits stdout/stderr lines
-      Then the AsyncHarnessAdapter must broadcast the stream with the project_name tag
-      And ProjectLogBufferManager must route the line to the "graph-engineering" buffer and live TUI if active
+    Scenario: Stream listener callback includes node_name (Issue #104)
+      Given a harness executes with project_name="crosstrainingapp" and node_name="devtest"
+      When a stdout/stderr line is streamed
+      Then registered listeners must be invoked as listener(project_name, node_name, formatted_line)
+      And ProjectLogBufferManager must route the line with node_name to the "crosstrainingapp" buffer
     """
     import sys
     from orchestrator.config import HarnessConfig
@@ -740,11 +740,11 @@ async def test_scenario_live_subprocess_stream_tagging_and_routing(tmp_path: Pat
 
     ProjectLogBufferManager.reset()
 
-    received_events: list[tuple[str | None, str]] = []
+    received_events: list[tuple[str | None, str | None, str]] = []
 
-    def stream_listener(project_name: str | None, line: str) -> None:
-        received_events.append((project_name, line))
-        ProjectLogBufferManager.add_line(line, project_name=project_name)
+    def stream_listener(project_name: str | None, node_name: str | None, line: str) -> None:
+        received_events.append((project_name, node_name, line))
+        ProjectLogBufferManager.add_line(line, project_name=project_name, node_name=node_name)
 
     AsyncHarnessAdapter.register_stream_listener(stream_listener)
 
@@ -757,7 +757,7 @@ async def test_scenario_live_subprocess_stream_tagging_and_routing(tmp_path: Pat
         adapter = AsyncHarnessAdapter(
             name="python_test",
             config=cfg,
-            project_name="graph-engineering",
+            project_name="crosstrainingapp",
             node_name="devtest",
         )
 
@@ -766,55 +766,58 @@ async def test_scenario_live_subprocess_stream_tagging_and_routing(tmp_path: Pat
             prompt="run",
             cwd=tmp_path,
             log_file=log_file,
-            console_prefix="[graph-engineering:devtest]",
-            project_name="graph-engineering",
+            console_prefix="[crosstrainingapp:devtest]",
+            project_name="crosstrainingapp",
+            node_name="devtest",
         )
 
         assert exit_code == 0
         assert len(received_events) >= 2
 
-        # Verify every broadcast event contains the injected project_name
-        for proj, line in received_events:
-            assert proj == "graph-engineering"
+        # Verify every broadcast event contains injected project_name and node_name
+        for proj, node, line in received_events:
+            assert proj == "crosstrainingapp"
+            assert node == "devtest"
             assert "Line 1 from harness" in line or "Line 2 from harness" in line
 
-        # Verify ProjectLogBufferManager routed lines to graph-engineering buffer
-        buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("graph-engineering")
+        # Verify ProjectLogBufferManager routed lines to crosstrainingapp buffer with ('devtest', line) tuples
+        buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("crosstrainingapp")
         assert buf is not None
         assert len(buf) >= 2
-        assert any("Line 1 from harness" in (line[1] if isinstance(line, tuple) else line) for line in buf)
-        assert any("Line 2 from harness" in (line[1] if isinstance(line, tuple) else line) for line in buf)
+        assert any(item[0] == "devtest" and "Line 1 from harness" in item[1] for item in buf)
+        assert any(item[0] == "devtest" and "Line 2 from harness" in item[1] for item in buf)
 
     finally:
         AsyncHarnessAdapter.unregister_stream_listener(stream_listener)
 
 
 @pytest.mark.asyncio
-async def test_stream_listener_fallback_to_adapter_project_name(tmp_path: Path):
+async def test_stream_listener_fallback_to_adapter_node_and_project_name(tmp_path: Path):
     """
-    Asserts that when execute() is called without explicit project_name,
-    it falls back to the adapter's configured project_name.
+    Asserts that when execute() is called without explicit project_name/node_name,
+    it falls back to the adapter's configured project_name and node_name.
     """
     import sys
     from orchestrator.config import HarnessConfig
     from orchestrator.harness import AsyncHarnessAdapter
 
-    received_events: list[tuple[str | None, str]] = []
+    received_events: list[tuple[str | None, str | None, str]] = []
 
-    def stream_listener(project_name: str | None, line: str) -> None:
-        received_events.append((project_name, line))
+    def stream_listener(project_name: str | None, node_name: str | None, line: str) -> None:
+        received_events.append((project_name, node_name, line))
 
     AsyncHarnessAdapter.register_stream_listener(stream_listener)
 
     try:
         cfg = HarnessConfig(
             binary=sys.executable,
-            args=["-c", "print('Output from custom project');"],
+            args=["-c", "print('Output from architect node');"],
         )
         adapter = AsyncHarnessAdapter(
             name="python_test",
             config=cfg,
             project_name="custom-project",
+            node_name="architect",
         )
 
         log_file = tmp_path / "fallback.log"
@@ -828,10 +831,101 @@ async def test_stream_listener_fallback_to_adapter_project_name(tmp_path: Path):
         assert exit_code == 0
         assert len(received_events) >= 1
         assert received_events[0][0] == "custom-project"
-        assert "Output from custom project" in received_events[0][1]
+        assert received_events[0][1] == "architect"
+        assert "Output from architect node" in received_events[0][2]
 
     finally:
         AsyncHarnessAdapter.unregister_stream_listener(stream_listener)
+
+
+@pytest.mark.asyncio
+async def test_stream_listener_fallback_to_harness_name_when_no_node(tmp_path: Path):
+    """
+    Asserts that when execute() and adapter have no node_name,
+    it falls back to adapter.name as the effective node_name.
+    """
+    import sys
+    from orchestrator.config import HarnessConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    received_events: list[tuple[str | None, str | None, str]] = []
+
+    def stream_listener(project_name: str | None, node_name: str | None, line: str) -> None:
+        received_events.append((project_name, node_name, line))
+
+    AsyncHarnessAdapter.register_stream_listener(stream_listener)
+
+    try:
+        cfg = HarnessConfig(
+            binary=sys.executable,
+            args=["-c", "print('Output without explicit node');"],
+        )
+        adapter = AsyncHarnessAdapter(
+            name="my_harness",
+            config=cfg,
+            project_name="custom-project",
+        )
+
+        log_file = tmp_path / "harness_name_fallback.log"
+        exit_code = await adapter.execute(
+            prompt="run",
+            cwd=tmp_path,
+            log_file=log_file,
+        )
+
+        assert exit_code == 0
+        assert len(received_events) >= 1
+        assert received_events[0][0] == "custom-project"
+        assert received_events[0][1] == "my_harness"
+        assert "Output without explicit node" in received_events[0][2]
+
+    finally:
+        AsyncHarnessAdapter.unregister_stream_listener(stream_listener)
+
+
+@pytest.mark.asyncio
+async def test_stream_listener_legacy_2_arg_compatibility(tmp_path: Path):
+    """
+    Asserts backwards compatibility with legacy 2-arg stream listeners (project_name, line).
+    """
+    import sys
+    from orchestrator.config import HarnessConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    legacy_events: list[tuple[str | None, str]] = []
+
+    def legacy_2arg_listener(project_name: str | None, line: str) -> None:
+        legacy_events.append((project_name, line))
+
+    AsyncHarnessAdapter.register_stream_listener(legacy_2arg_listener)
+
+    try:
+        cfg = HarnessConfig(
+            binary=sys.executable,
+            args=["-c", "print('Legacy 2-arg compatible line');"],
+        )
+        adapter = AsyncHarnessAdapter(
+            name="python_test",
+            config=cfg,
+            project_name="legacy-proj",
+            node_name="devtest",
+        )
+
+        log_file = tmp_path / "legacy_2arg.log"
+        exit_code = await adapter.execute(
+            prompt="run",
+            cwd=tmp_path,
+            log_file=log_file,
+            console_prefix="[legacy-proj:devtest]",
+        )
+
+        assert exit_code == 0
+        assert len(legacy_events) >= 1
+        assert legacy_events[0][0] == "legacy-proj"
+        assert "Legacy 2-arg compatible line" in legacy_events[0][1]
+
+    finally:
+        AsyncHarnessAdapter.unregister_stream_listener(legacy_2arg_listener)
 
 
 @pytest.mark.asyncio
@@ -859,6 +953,7 @@ async def test_stream_listener_legacy_single_arg_compatibility(tmp_path: Path):
             name="python_test",
             config=cfg,
             project_name="legacy-proj",
+            node_name="devtest",
         )
 
         log_file = tmp_path / "legacy.log"
@@ -887,7 +982,7 @@ async def test_stream_listener_exception_resilience(tmp_path: Path):
     from orchestrator.config import HarnessConfig
     from orchestrator.harness import AsyncHarnessAdapter
 
-    def faulty_listener(project_name: str | None, line: str) -> None:
+    def faulty_listener(project_name: str | None, node_name: str | None, line: str) -> None:
         raise RuntimeError("Faulty UI Listener Crash")
 
     AsyncHarnessAdapter.register_stream_listener(faulty_listener)
@@ -901,6 +996,7 @@ async def test_stream_listener_exception_resilience(tmp_path: Path):
             name="python_test",
             config=cfg,
             project_name="resilient-proj",
+            node_name="devtest",
         )
 
         log_file = tmp_path / "resilience.log"
