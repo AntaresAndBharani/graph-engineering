@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Added **Non-Destructive In-Place Project Table Diffing & Selection Stability (`orchestrator/ui/dashboard.py`, `orchestrator/ui/widgets.py`, `orchestrator/db.py`, `tests/test_dashboard.py`, `tests/test_db.py`)**: Refactored `DashboardApp.update_projects_table()` and `@on(DataTable.RowHighlighted)` to eliminate destructive `table.clear()` invocations. Introduced `_apply_keyed_diff` for non-destructive, in-place cell mutation across top and child panes, locking table cursor navigation (`table.cursor_row`) without resets, DOM flicker, or spurious selection jumps. Decoupled bottom-pane child widget updates from periodic 2s polling loops via lightweight state fingerprinting (`StateManager.get_project_state_fingerprint`) across SDLC items, anomalies, and token usage events (Issue #71, Closes #71).
 - Added `architect-approved` and `needs-refactor` to `DEFAULT_MANAGED_LABELS` in `orchestrator/config.py` to ensure complete workflow taxonomy synchronization across local and remote repositories.
 
 

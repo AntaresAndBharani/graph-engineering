@@ -20,6 +20,7 @@ from orchestrator.ui.widgets import (
     AnomalyAlertsWidget,
     HarnessQuotaWidget,
     SDLCProgressWidget,
+    _apply_keyed_diff,
 )
 
 
@@ -89,6 +90,7 @@ class DashboardApp(App):
         self.log_handler = log_handler
         self.quota_manager = quota_manager
         self.selected_project: Optional[str] = None
+        self._last_bottom_pane_fingerprint: Optional[str] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
         self.title = "Graph Orchestrator - TUI Dashboard"
@@ -163,8 +165,8 @@ class DashboardApp(App):
 
     async def update_projects_table(self) -> None:
         """
-        Queries state_manager / in-memory config and refreshes DataTable rows
-        sorted alphabetically by project name.
+        Queries state_manager / in-memory config and refreshes DataTable rows in-place
+        sorted alphabetically by project name without clearing the table.
         """
         try:
             table = self.query_one("#projects_table", DataTable)
@@ -181,11 +183,10 @@ class DashboardApp(App):
             except Exception:
                 pass
 
-        table.clear()
         sorted_projects = sorted(self.config.projects, key=lambda p: p.name.lower())
-
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
 
+        target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
         for p in sorted_projects:
             if not p.enabled:
                 status = "[dim red]Disabled[/dim red]"
@@ -207,26 +208,49 @@ class DashboardApp(App):
                 if failed_jobs:
                     locks_info = f"[bold red]Failed: #{failed_jobs[0].get('issue_id')}[/bold red]"
 
-            table.add_row(
-                p.name,
-                p.repo,
-                active_node,
-                status,
-                now_str,
-                locks_info,
-                key=p.name,
+            target_rows.append(
+                (
+                    p.name,
+                    (
+                        p.name,
+                        p.repo,
+                        active_node,
+                        status,
+                        now_str,
+                        locks_info,
+                    ),
+                )
             )
 
+        _apply_keyed_diff(table, target_rows)
+
+        # Preserve cursor within valid bounds if rows were modified
+        if table.row_count > 0 and table.cursor_row is not None and table.cursor_row >= table.row_count:
+            try:
+                table.move_cursor(row=max(0, table.row_count - 1))
+            except Exception:
+                pass
+
         if self.selected_project:
-            await self._update_bottom_panes(self.selected_project)
+            await self._update_bottom_panes(self.selected_project, force=False)
         else:
             try:
                 quota_widget = self.query_one(HarnessQuotaWidget)
-                await quota_widget.update_quotas(
-                    config=self.config,
-                    state_manager=self.state_manager,
-                    quota_manager=self.quota_manager,
-                )
+                if self.state_manager:
+                    fp = await self.state_manager.get_project_state_fingerprint(None)
+                    if fp != self._last_bottom_pane_fingerprint:
+                        self._last_bottom_pane_fingerprint = fp
+                        await quota_widget.update_quotas(
+                            config=self.config,
+                            state_manager=self.state_manager,
+                            quota_manager=self.quota_manager,
+                        )
+                else:
+                    await quota_widget.update_quotas(
+                        config=self.config,
+                        state_manager=self.state_manager,
+                        quota_manager=self.quota_manager,
+                    )
             except Exception:
                 pass
 
@@ -255,13 +279,29 @@ class DashboardApp(App):
                 pass
 
         if project_name:
-            self.selected_project = project_name
-            await self._update_bottom_panes(project_name)
+            if project_name != self.selected_project:
+                self.selected_project = project_name
+                await self._update_bottom_panes(project_name, force=True)
 
-    async def _update_bottom_panes(self, project_name: Optional[str]) -> None:
+    async def _update_bottom_panes(self, project_name: Optional[str], force: bool = False) -> None:
         """
         Asynchronously updates SDLCProgressWidget, AnomalyAlertsWidget, and HarnessQuotaWidget for the selected project.
+        Uses lightweight state fingerprinting to avoid redundant SQLite re-queries when state is unchanged.
         """
+        if not force and self.state_manager:
+            try:
+                fp = await self.state_manager.get_project_state_fingerprint(project_name)
+                if fp == self._last_bottom_pane_fingerprint:
+                    return
+                self._last_bottom_pane_fingerprint = fp
+            except Exception:
+                pass
+        elif self.state_manager:
+            try:
+                self._last_bottom_pane_fingerprint = await self.state_manager.get_project_state_fingerprint(project_name)
+            except Exception:
+                pass
+
         try:
             sdlc_widget = self.query_one(SDLCProgressWidget)
             await sdlc_widget.update_project(project_name)
@@ -283,6 +323,8 @@ class DashboardApp(App):
     async def action_refresh(self) -> None:
         """Manual refresh trigger via 'R' key."""
         await self.update_projects_table()
+        if self.selected_project:
+            await self._update_bottom_panes(self.selected_project, force=True)
 
     async def action_quit(self) -> None:
         """

@@ -881,6 +881,46 @@ class StateManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def get_project_state_fingerprint(self, project_name: Optional[str]) -> str:
+        """
+        Returns a lightweight composite string fingerprint of the project's current
+        SDLC items, anomalies, and token usage events.
+        Enables non-destructive UI caching to avoid redundant SQLite re-queries.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout=5000;")
+            if not project_name:
+                cursor = await db.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM token_usage_events;")
+                t_row = await cursor.fetchone()
+                t_part = f"{t_row[0]}:{t_row[1]}" if t_row else "0:0"
+                return f"global:{t_part}"
+
+            # 1. SDLC items fingerprint
+            cursor = await db.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM sdlc_items WHERE project_name = ?;",
+                (project_name,),
+            )
+            sdlc_row = await cursor.fetchone()
+            sdlc_part = f"{sdlc_row[0]}:{sdlc_row[1]}" if sdlc_row else "0:0"
+
+            # 2. Anomaly events fingerprint
+            cursor = await db.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM anomaly_events WHERE project_name = ?;",
+                (project_name,),
+            )
+            anomaly_row = await cursor.fetchone()
+            anomaly_part = f"{anomaly_row[0]}:{anomaly_row[1]}" if anomaly_row else "0:0"
+
+            # 3. Token usage events fingerprint
+            cursor = await db.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM token_usage_events WHERE project_name = ?;",
+                (project_name,),
+            )
+            token_row = await cursor.fetchone()
+            token_part = f"{token_row[0]}:{token_row[1]}" if token_row else "0:0"
+
+            return f"{project_name}:{sdlc_part}:{anomaly_part}:{token_part}"
+
     # =========================================================================
     # Token Usage Events & Quota Ledger (Global Multi-Window Gating)
     # =========================================================================

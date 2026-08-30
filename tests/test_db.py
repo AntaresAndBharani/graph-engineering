@@ -767,5 +767,63 @@ async def test_token_usage_empty_and_isolation(tmp_path: Path):
     assert events == []
 
 
+@pytest.mark.asyncio
+async def test_get_project_state_fingerprint(tmp_path: Path):
+    """
+    Asserts StateManager.get_project_state_fingerprint produces deterministic
+    fingerprints that update dynamically when SDLC items, anomalies, or tokens change.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 1. Initially empty
+    fp_global_empty = await manager.get_project_state_fingerprint(None)
+    assert fp_global_empty == "global:0:0"
+
+    fp_p1_empty = await manager.get_project_state_fingerprint("p1")
+    assert fp_p1_empty == "p1:0:0:0:0:0:0"
+
+    # 2. Add SDLC item
+    await manager.sync_project_sdlc_items(
+        "p1",
+        [{"issue_number": 10, "title": "T10", "labels": "ready-for-dev", "updated_at": 1000.0}],
+    )
+    fp_p1_sdlc = await manager.get_project_state_fingerprint("p1")
+    assert fp_p1_sdlc != fp_p1_empty
+    assert "p1:1:1000.0:" in fp_p1_sdlc
+
+    # 3. Add anomaly event
+    await manager.record_anomaly_event(
+        project_name="p1",
+        node_name="devtest",
+        error_type="Timeout",
+        error_message="Msg",
+    )
+    fp_p1_anomaly = await manager.get_project_state_fingerprint("p1")
+    assert fp_p1_anomaly != fp_p1_sdlc
+    assert ":1:1:" in fp_p1_anomaly or ":1:1" in fp_p1_anomaly
+
+    # 4. Add token usage event
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="flash",
+        project_name="p1",
+        node_name="devtest",
+        issue_number=10,
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+    )
+    fp_p1_tokens = await manager.get_project_state_fingerprint("p1")
+    assert fp_p1_tokens != fp_p1_anomaly
+    assert fp_p1_tokens.endswith(":1:1")
+
+    # Global fingerprint also updated
+    fp_global = await manager.get_project_state_fingerprint(None)
+    assert fp_global == "global:1:1"
+
+
+
 
 
