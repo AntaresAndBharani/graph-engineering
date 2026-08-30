@@ -66,6 +66,25 @@ def _apply_keyed_diff(
                         except (CellDoesNotExist, RowDoesNotExist, ColumnDoesNotExist, KeyError):
                             pass
 
+    # 3. Re-align row locations to preserve exact target_rows order
+    key_map = {
+        (k.value if hasattr(k, "value") else str(k)): k
+        for k in table.rows.keys()
+    }
+    target_row_key_order = [rk for rk, _ in target_rows]
+    ordered_row_keys = [
+        key_map[rk]
+        for rk in target_row_key_order
+        if rk in key_map
+    ]
+    if ordered_row_keys and len(ordered_row_keys) == len(table.rows):
+        from textual._two_way_dict import TwoWayDict
+        table._row_locations = TwoWayDict(
+            {row_key: new_index for new_index, row_key in enumerate(ordered_row_keys)}
+        )
+        table._update_count += 1
+        table.refresh()
+
 
 class SDLCProgressWidget(DataTable):
     """

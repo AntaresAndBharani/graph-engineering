@@ -1014,6 +1014,61 @@ async def test_stream_listener_exception_resilience(tmp_path: Path):
         AsyncHarnessAdapter.unregister_stream_listener(faulty_listener)
 
 
+@pytest.mark.asyncio
+async def test_stream_listener_legacy_signatures_compatibility(tmp_path: Path):
+    """
+    Asserts AsyncHarnessAdapter supports legacy 2-argument and 1-argument stream listeners.
+    """
+    import sys
+    from orchestrator.config import HarnessConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    received_2arg: list[tuple[str | None, str]] = []
+    received_1arg: list[str] = []
+
+    def legacy_2arg_listener(project_name: str | None, line: str) -> None:
+        received_2arg.append((project_name, line))
+
+    def legacy_1arg_listener(line: str) -> None:
+        received_1arg.append(line)
+
+    AsyncHarnessAdapter.register_stream_listener(legacy_2arg_listener)
+    AsyncHarnessAdapter.register_stream_listener(legacy_1arg_listener)
+
+    try:
+        cfg = HarnessConfig(
+            binary=sys.executable,
+            args=["-c", "print('Legacy signature output');"],
+        )
+        adapter = AsyncHarnessAdapter(
+            name="python_test",
+            config=cfg,
+            project_name="legacy-proj",
+            node_name="devtest",
+        )
+
+        log_file = tmp_path / "legacy.log"
+        exit_code = await adapter.execute(
+            prompt="run",
+            cwd=tmp_path,
+            log_file=log_file,
+            console_prefix="[legacy-proj:devtest]",
+        )
+
+        assert exit_code == 0
+        assert len(received_2arg) >= 1
+        assert received_2arg[0][0] == "legacy-proj"
+        assert "Legacy signature output" in received_2arg[0][1]
+
+        assert len(received_1arg) >= 1
+        assert "Legacy signature output" in received_1arg[0]
+
+    finally:
+        AsyncHarnessAdapter.unregister_stream_listener(legacy_2arg_listener)
+        AsyncHarnessAdapter.unregister_stream_listener(legacy_1arg_listener)
+
+
+
 
 
 
