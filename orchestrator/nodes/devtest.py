@@ -544,8 +544,7 @@ async def _verify_and_auto_merge_pr(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await p_merge.wait()
-
+            stdout_m, stderr_m = await p_merge.communicate()
             if p_merge.returncode == 0:
                 console.print(f"  [{project.name}:devtest] [bold green]✓ DevTest E2E Complete: PR #{pr_number} auto-merged into main[/bold green]")
                 
@@ -588,6 +587,36 @@ async def _verify_and_auto_merge_pr(
                     console.print(f"  [{project.name}:devtest] [dim yellow]Parent sequential advance notice: {ex}[/dim yellow]")
 
                 return True, f"DevTest node implemented issue #{issue_id}, verified CI 100% Green, and auto-merged PR #{pr_number} into main."
+            else:
+                err_text = (stderr_m or b"").decode("utf-8", errors="replace").strip()
+                console.print(f"  [{project.name}:devtest] [bold red]✗ PR #{pr_number} merge failed ({err_text}). Flagging for conflict remediation.[/bold red]")
+                p_fail = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "edit", str(pr_number),
+                    "--repo", project.repo,
+                    "--remove-label", "dev-implemented",
+                    "--add-label", "needs-refactor",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_fail.wait()
+
+                p_comm = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "comment", str(pr_number),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **DevTest Merge Quality Gate**: PR #{pr_number} cannot be merged into `main` ({err_text}). Flagging with `needs-refactor` for autonomous conflict remediation.",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_comm.wait()
+
+                await state_manager.record_anomaly_event(
+                    project_name=project.name,
+                    node_name="devtest",
+                    error_type="MERGE_CONFLICT",
+                    error_message=f"PR #{pr_number} cannot be merged: {err_text}",
+                    issue_number=issue_id,
+                )
+                return False, f"PR #{pr_number} cannot be merged ({err_text}). Tagged 'needs-refactor'."
 
     elif ci_status == "FAIL":
         if shutil.which("gh"):
