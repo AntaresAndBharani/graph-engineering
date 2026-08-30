@@ -256,7 +256,13 @@ class QuotaManager:
     """
 
     def __init__(self, config: GlobalConfig | QuotaSettings, state_manager: TokenUsageReader):
-        if isinstance(config, GlobalConfig):
+        if hasattr(config, "quota") and hasattr(config, "projects"):
+            self.config = config
+            self.quota_settings = config.quota
+        elif hasattr(config, "harnesses") and hasattr(config, "buffer_minutes"):
+            self.config = GlobalConfig(quota=config)
+            self.quota_settings = config
+        elif isinstance(config, GlobalConfig):
             self.config = config
             self.quota_settings = config.quota
         elif isinstance(config, QuotaSettings):

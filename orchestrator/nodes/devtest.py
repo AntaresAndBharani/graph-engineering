@@ -11,6 +11,7 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
 from orchestrator import poller
+from orchestrator.nodes.reviewer import check_pr_ci_status
 from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
 
 
@@ -212,7 +213,42 @@ async def _remediate_refactor_pr(
         pp = await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(project.local_path))
         await pp.wait()
 
-    # 5. Relabel PR from needs-refactor back to needs-architect-review
+    # 5. E2E CI Verification / Auto-Merge on Remediated PR
+    if getattr(node_cfg, "auto_merge_approved", True):
+        ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
+        if ci_status == "PASS" and shutil.which("gh"):
+            await (await asyncio.create_subprocess_exec(
+                "gh", "pr", "review", str(pr_number),
+                "--repo", project.repo,
+                "--approve",
+                "--body", "🤖 **DevTest Quality Gate**: Remediated PR passed all tests & CI checks (100% Green). Auto-merging into main.",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )).wait()
+
+            p_merge = await asyncio.create_subprocess_exec(
+                "gh", "pr", "merge", str(pr_number),
+                "--repo", project.repo,
+                "--squash",
+                "--delete-branch",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_merge.wait()
+            if p_merge.returncode == 0:
+                await state_manager.sync_project_sdlc_items(
+                    project.name,
+                    [{
+                        "issue_number": pr_number,
+                        "title": pr_title,
+                        "state": "MERGED",
+                        "labels": ["merged"],
+                        "linked_pr": pr_number,
+                    }],
+                )
+                await state_manager.delete_pr_artifact(project.repo, pr_number)
+                return True, f"DevTest node remediated PR #{pr_number}, verified CI 100% Green, and merged into main."
+
     if shutil.which("gh"):
         p_edit = await asyncio.create_subprocess_exec(
             "gh", "pr", "edit", str(pr_number),
@@ -234,6 +270,187 @@ async def _remediate_refactor_pr(
         await p_comment.wait()
 
     return True, f"DevTest node remediated PR #{pr_number} and transitioned to 'needs-architect-review'."
+
+
+async def _verify_and_auto_merge_pr(
+    project: ProjectConfig,
+    state_manager: StateManager,
+    pr_number: int,
+    issue_id: int,
+    issue_title: str,
+    trigger_label: str,
+    auto_merge_approved: bool = True,
+    is_conflict_resolution: bool = False,
+    default_output_label: str = "needs-architect-review",
+) -> tuple[bool, str]:
+    """
+    Performs E2E verification on a DevTest implementation PR:
+    1. Checks remote GitHub Actions CI status (`check_pr_ci_status`).
+    2. If CI is PASS and auto_merge_approved is True:
+       - Approves the PR.
+       - Squashes and merges the PR into main (`--delete-branch`).
+       - Transitions parent issue to 'dev-implemented' and closes the issue.
+       - Syncs SDLC item in StateManager to MERGED.
+    3. If CI is FAIL:
+       - Flags the PR with 'needs-refactor'.
+       - Posts a comment detailing failing checks.
+    4. If CI is PENDING or auto_merge_approved is False:
+       - Relabels PR to 'needs-architect-review' (or leaves pending).
+    """
+    from rich.console import Console
+    console = Console()
+
+    if not auto_merge_approved:
+        effective_output_label = "architect-approved" if is_conflict_resolution else default_output_label
+        if shutil.which("gh"):
+            p_pr_label = await asyncio.create_subprocess_exec(
+                "gh", "pr", "edit", str(pr_number),
+                "--repo", project.repo,
+                "--add-label", effective_output_label,
+            )
+            await p_pr_label.wait()
+            p_issue_edit = await asyncio.create_subprocess_exec(
+                "gh", "issue", "edit", str(issue_id),
+                "--repo", project.repo,
+                "--remove-label", trigger_label,
+                "--add-label", "dev-implemented",
+            )
+            await p_issue_edit.wait()
+        await state_manager.sync_project_sdlc_items(
+            project.name,
+            [{
+                "issue_number": issue_id,
+                "title": issue_title,
+                "state": "IN_PROGRESS",
+                "labels": ["dev-implemented"],
+                "linked_pr": pr_number,
+            }],
+        )
+        return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_number} ('{effective_output_label}')."
+
+    # E2E CI Verification & Auto-Merge
+    ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
+    console.print(f"  [{project.name}:devtest] [dim]PR #{pr_number} CI Status: {ci_status} ({ci_details})[/dim]")
+
+    if ci_status == "PASS":
+        if shutil.which("gh"):
+            # 1. Quality gate approval review
+            p_approve = await asyncio.create_subprocess_exec(
+                "gh", "pr", "review", str(pr_number),
+                "--repo", project.repo,
+                "--approve",
+                "--body", "🤖 **DevTest Quality Gate**: 100% passing local tests and green remote CI. Auto-merging into main.",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_approve.wait()
+
+            # 2. Squash and merge
+            p_merge = await asyncio.create_subprocess_exec(
+                "gh", "pr", "merge", str(pr_number),
+                "--repo", project.repo,
+                "--squash",
+                "--delete-branch",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_merge.wait()
+
+            if p_merge.returncode == 0:
+                console.print(f"  [{project.name}:devtest] [bold green]✓ DevTest E2E Complete: PR #{pr_number} auto-merged into main[/bold green]")
+                
+                # 3. Close issue & mark dev-implemented
+                p_issue_edit = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "edit", str(issue_id),
+                    "--repo", project.repo,
+                    "--remove-label", trigger_label,
+                    "--add-label", "dev-implemented",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_issue_edit.wait()
+
+                p_close = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "close", str(issue_id),
+                    "--repo", project.repo,
+                    "--comment", f"🎉 **DevTest E2E Completed**: Implemented, verified against CI, and merged via PR #{pr_number}.",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_close.wait()
+
+                await state_manager.sync_project_sdlc_items(
+                    project.name,
+                    [{
+                        "issue_number": issue_id,
+                        "title": issue_title,
+                        "state": "MERGED",
+                        "labels": ["dev-implemented"],
+                        "linked_pr": pr_number,
+                    }],
+                )
+                await state_manager.delete_pr_artifact(project.repo, pr_number)
+                return True, f"DevTest node implemented issue #{issue_id}, verified CI 100% Green, and auto-merged PR #{pr_number} into main."
+
+    elif ci_status == "FAIL":
+        if shutil.which("gh"):
+            p_fail = await asyncio.create_subprocess_exec(
+                "gh", "pr", "edit", str(pr_number),
+                "--repo", project.repo,
+                "--add-label", "needs-refactor",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_fail.wait()
+            p_comm = await asyncio.create_subprocess_exec(
+                "gh", "pr", "comment", str(pr_number),
+                "--repo", project.repo,
+                "--body", f"🤖 **DevTest Quality Gate**: Remote CI checks failed ({ci_details}). Flagging with `needs-refactor` for autonomous remediation.",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_comm.wait()
+
+        await state_manager.record_anomaly_event(
+            project_name=project.name,
+            node_name="devtest",
+            error_type="CI_FAILURE",
+            error_message=f"PR #{pr_number} failed CI checks: {ci_details}",
+            issue_number=issue_id,
+        )
+        return False, f"DevTest PR #{pr_number} failed CI checks ({ci_details}). Tagged 'needs-refactor'."
+
+    # CI is PENDING or checks running
+    if shutil.which("gh"):
+        p_label = await asyncio.create_subprocess_exec(
+            "gh", "pr", "edit", str(pr_number),
+            "--repo", project.repo,
+            "--add-label", "dev-implemented",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await p_label.wait()
+        p_issue = await asyncio.create_subprocess_exec(
+            "gh", "issue", "edit", str(issue_id),
+            "--repo", project.repo,
+            "--remove-label", trigger_label,
+            "--add-label", "dev-implemented",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await p_issue.wait()
+
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{
+            "issue_number": issue_id,
+            "title": issue_title,
+            "state": "IN_PROGRESS",
+            "labels": ["dev-implemented"],
+            "linked_pr": pr_number,
+        }],
+    )
+    return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_number} (CI checks pending)."
 
 
 async def run_devtest_node(
@@ -486,17 +703,6 @@ async def run_devtest_node(
 
     if existing_pr:
         pr_num = existing_pr["number"]
-        effective_output_label = "architect-approved" if is_conflict_resolution else output_label
-        pr_labels = [l.get("name") for l in existing_pr.get("labels", []) if isinstance(l, dict)]
-        if effective_output_label not in pr_labels and shutil.which("gh"):
-            p_pr_label = await asyncio.create_subprocess_exec(
-                "gh", "pr", "edit", str(pr_num),
-                "--repo", project.repo,
-                "--add-label", effective_output_label,
-            )
-            await p_pr_label.wait()
-
-        # Update Blackboard status
         if is_conflict_resolution:
             await state_manager.upsert_pr_artifact(
                 repo=project.repo,
@@ -506,29 +712,19 @@ async def run_devtest_node(
                 comment=f"DevTest node resolved merge conflicts on PR #{pr_num}.",
             )
 
-        # Transition parent issue to dev-implemented
-        if shutil.which("gh"):
-            p_issue_edit = await asyncio.create_subprocess_exec(
-                "gh", "issue", "edit", str(issue_id),
-                "--repo", project.repo,
-                "--remove-label", trigger,
-                "--add-label", "dev-implemented",
-            )
-            await p_issue_edit.wait()
-
-        await state_manager.sync_project_sdlc_items(
-            project.name,
-            [{
-                "issue_number": issue_id,
-                "title": issue_title,
-                "state": "IN_PROGRESS",
-                "labels": ["dev-implemented"],
-                "linked_pr": pr_num,
-            }],
+        ran, msg = await _verify_and_auto_merge_pr(
+            project=project,
+            state_manager=state_manager,
+            pr_number=pr_num,
+            issue_id=issue_id,
+            issue_title=issue_title,
+            trigger_label=trigger,
+            auto_merge_approved=getattr(node_cfg, "auto_merge_approved", True),
+            is_conflict_resolution=is_conflict_resolution,
+            default_output_label=output_label,
         )
-
         await state_manager.release_lock(issue_id, project.repo, "devtest")
-        return True, f"DevTest node implemented issue #{issue_id} and opened/updated PR #{pr_num} ('{effective_output_label}')."
+        return ran, msg
 
     # 7. Fallback: Check Git Diff (Did the model leave uncommitted code?)
     diff_proc = await asyncio.create_subprocess_exec(
@@ -551,9 +747,11 @@ async def run_devtest_node(
             error_message="Model finished but left 0 git changes and no PR was created.",
             issue_number=issue_id,
         )
+        await state_manager.release_lock(issue_id, project.repo, "devtest")
         return False, f"DevTest finished with 0 file changes for issue #{issue_id}."
 
     # 8. Branch, Commit, Push & PR Lifecycle (if uncommitted changes exist)
+    created_pr_num = None
     try:
         await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, cwd=str(project.local_path))).wait()
         await (await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(project.local_path))).wait()
@@ -570,16 +768,17 @@ async def run_devtest_node(
                 "--body", f"Automated 3-Amigos DevTest implementation.\n\nCloses #{issue_id}",
                 "--label", output_label,
                 cwd=str(project.local_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            await p_pr.wait()
-
-            p_edit = await asyncio.create_subprocess_exec(
-                "gh", "issue", "edit", str(issue_id),
-                "--repo", project.repo,
-                "--remove-label", trigger,
-                "--add-label", "dev-implemented",
-            )
-            await p_edit.wait()
+            stdout_c, _ = await p_pr.communicate()
+            if stdout_c:
+                url_str = stdout_c.decode("utf-8", errors="replace").strip()
+                if "/pull/" in url_str:
+                    try:
+                        created_pr_num = int(url_str.split("/pull/")[-1].split()[0])
+                    except Exception:
+                        pass
     except Exception as e:
         await state_manager.fail_job(
             issue_id=issue_id,
@@ -594,7 +793,22 @@ async def run_devtest_node(
             error_message=f"Git / PR creation failed: {e}",
             issue_number=issue_id,
         )
+        await state_manager.release_lock(issue_id, project.repo, "devtest")
         return False, f"Git / PR creation failed: {e}"
+
+    if created_pr_num:
+        ran, msg = await _verify_and_auto_merge_pr(
+            project=project,
+            state_manager=state_manager,
+            pr_number=created_pr_num,
+            issue_id=issue_id,
+            issue_title=issue_title,
+            trigger_label=trigger,
+            auto_merge_approved=getattr(node_cfg, "auto_merge_approved", True),
+            default_output_label=output_label,
+        )
+        await state_manager.release_lock(issue_id, project.repo, "devtest")
+        return ran, msg
 
     await state_manager.sync_project_sdlc_items(
         project.name,
@@ -608,3 +822,4 @@ async def run_devtest_node(
 
     await state_manager.release_lock(issue_id, project.repo, "devtest")
     return True, f"DevTest node implemented issue #{issue_id} and opened PR with label '{output_label}'."
+
