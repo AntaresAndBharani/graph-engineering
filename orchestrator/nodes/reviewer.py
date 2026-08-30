@@ -140,7 +140,7 @@ async def resolve_pr_merge_conflicts(
 
     # Pre-flight quota gating: since the local `git merge` attempt is zero-token,
     # we gate capacity immediately before dispatching the AI conflict-resolution harness.
-    allowed, q_res = await check_dispatch_quota(project, "reviewer", config, state_manager)
+    allowed, q_res = await check_dispatch_quota(project, "reviewer", config, state_manager, harness_name=harness_name)
     if not allowed:
         await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."

@@ -69,7 +69,7 @@ async def run_bau_node(
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
 
-    allowed, q_res = await check_dispatch_quota(project, "bau", config, state_manager)
+    allowed, q_res = await check_dispatch_quota(project, "bau", config, state_manager, harness_name=harness_name)
     if not allowed:
         return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 

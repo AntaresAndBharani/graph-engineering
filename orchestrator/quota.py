@@ -127,9 +127,6 @@ def extract_token_usage(stdout: str, prompt: str = "") -> tuple[int, int, int]:
     return prompt_tokens, completion_tokens, total_tokens
 
 
-extract_token_counts = extract_token_usage
-
-
 @dataclass
 class QuotaCheckResult:
     harness_name: str
@@ -183,7 +180,9 @@ class QuotaManager:
 
     def resolve_harness_for_node(self, project: ProjectConfig, node_name: str) -> str:
         """
-        Inspects project.nodes[node_name].harness or falls back to global default.
+        Fallback helper inspecting project.nodes[node_name].harness or default.
+        Callers should pass their already-resolved harness_name directly to
+        check_dispatch_quota / check_harness_capacity as the single source of truth.
         """
         if node_name in project.nodes:
             node_cfg = project.nodes[node_name]

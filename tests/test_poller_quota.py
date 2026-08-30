@@ -296,3 +296,157 @@ async def test_scenario_poller_automatically_dispatches_once_throttle_clears(tmp
     ran, msg = await run_devtest_node(project, config, state_manager)
     assert ran is True
     assert harness_dispatched is True
+
+
+@pytest.mark.asyncio
+async def test_architect_sync_gates_on_research_harness_quota(tmp_path: Path, monkeypatch):
+    """
+    Asserts _sync_architecture_plane gates on research_harness (antigravity)
+    rather than node primary harness (claude).
+    """
+    from orchestrator.nodes.architect import _sync_architecture_plane
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        harnesses={
+            "antigravity": HarnessConfig(binary="antigravity", args=["-p", "{prompt}"]),
+            "claude": HarnessConfig(binary="claude", args=["-p", "{prompt}"]),
+        },
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=2_000_000,
+                    avg_tokens_per_hour=400_000,
+                ),
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                ),
+            },
+        ),
+        projects=[
+            ProjectConfig(
+                name="graph-engineering",
+                repo="AntaresAndBharani/graph-engineering",
+                local_path=tmp_path / "graph-engineering",
+                nodes={
+                    "architect": NodeConfig(
+                        harness="claude",
+                        research_harness="antigravity",
+                    )
+                },
+            ),
+        ],
+    )
+
+    project = config.projects[0]
+    (tmp_path / "graph-engineering").mkdir()
+    node_cfg = project.nodes["architect"]
+
+    # Exhaust antigravity quota (research harness)
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash-high",
+        project_name=project.name,
+        node_name="architect",
+        issue_number=None,
+        prompt_tokens=1500000,
+        completion_tokens=450000,
+        total_tokens=1950000,
+    )
+
+    # Claude quota is completely empty (healthy), but antigravity is throttled
+    ran, msg = await _sync_architecture_plane(project, config, state_manager, node_cfg, force=True)
+    assert ran is False
+    assert "Quota throttled for harness 'antigravity'" in msg
+
+
+@pytest.mark.asyncio
+async def test_reviewer_conflict_gates_on_conflict_harness_quota(tmp_path: Path, monkeypatch):
+    """
+    Asserts resolve_pr_merge_conflicts gates on conflict_harness (antigravity)
+    rather than node primary harness (claude).
+    """
+    from orchestrator.nodes.reviewer import resolve_pr_merge_conflicts
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        harnesses={
+            "antigravity": HarnessConfig(binary="antigravity", args=["-p", "{prompt}"]),
+            "claude": HarnessConfig(binary="claude", args=["-p", "{prompt}"]),
+        },
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=2_000_000,
+                    avg_tokens_per_hour=400_000,
+                ),
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                ),
+            },
+        ),
+        projects=[
+            ProjectConfig(
+                name="graph-engineering",
+                repo="AntaresAndBharani/graph-engineering",
+                local_path=tmp_path / "graph-engineering",
+                nodes={
+                    "reviewer": NodeConfig(
+                        harness="claude",
+                        conflict_harness="antigravity",
+                    )
+                },
+            ),
+        ],
+    )
+
+    project = config.projects[0]
+    (tmp_path / "graph-engineering").mkdir()
+    node_cfg = project.nodes["reviewer"]
+
+    # Exhaust antigravity quota
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash-low",
+        project_name=project.name,
+        node_name="reviewer",
+        issue_number=10,
+        prompt_tokens=1500000,
+        completion_tokens=450000,
+        total_tokens=1950000,
+    )
+
+    # Mock git subprocesses
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        proc = AsyncMock()
+        # Mock git merge origin/main failing (conflict exists)
+        if args and args[0] == "git" and len(args) > 1 and args[1] == "merge" and args[2] == "origin/main":
+            proc.communicate.return_value = (b"CONFLICT (content): Merge conflict in file.txt", b"")
+            proc.returncode = 1
+        else:
+            proc.communicate.return_value = (b"", b"")
+            proc.returncode = 0
+        proc.wait.return_value = 0
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_create_subprocess_exec)
+
+    resolved, msg = await resolve_pr_merge_conflicts(
+        project, config, pr_number=10, branch_name="feat/issue-10", node_cfg=node_cfg, state_manager=state_manager
+    )
+    assert resolved is False
+    assert "Quota throttled for harness 'antigravity'" in msg
