@@ -1048,3 +1048,8 @@ class StateManager:
             cursor = await db.execute(query, tuple(params))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+
+
+
+

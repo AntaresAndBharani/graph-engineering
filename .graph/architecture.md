@@ -101,8 +101,8 @@ graph TD
 
     subgraph Layer 2: Infrastructure & External Adapters
         HarnessAdapter["Harness Adapter (`orchestrator/harness.py`)"]
-        QuotaEngine["Quota Manager & Velocity Gating (`orchestrator/quota.py`)"]
         SQLiteManager["State & Blackboard Manager (`orchestrator/db.py`)"]
+        QuotaEngine["Quota & Runway Gating Engine (`orchestrator/quota.py`)"]
         GitHubPoller["Zero-Token GitHub Poller (`orchestrator/poller.py`)"]
         Housekeeping["Label Provisioner (`orchestrator/housekeeping.py`)"]
         ReloaderWatcher["Source Watcher (`orchestrator/reloader.py`)"]
@@ -122,13 +122,13 @@ graph TD
 ### Separation of Concerns
 
 1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`)**:
-   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
+   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), quota configuration structures (`HarnessQuotaConfig`, `QuotaSettings`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `SettingsConfig`).
    - Strictly isolated from concrete execution logic, database calls, and network I/O.
    - Provides pure path normalization, environment resolution functions (`resolve_path`), and bounded log streaming (`TextualLogHandler`).
 
 2. **Infrastructure & Ports/Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`)**:
    - Manages state persistence and distributed locking via SQLite WAL transactions (`StateManager`).
-   - Implements multi-window rolling quota calculations, velocity tracking, runway-and-ETA pre-flight dispatch gating, and token extraction heuristics (`QuotaManager`, `extract_token_usage`).
+   - Implements multi-window rolling quota calculations, velocity tracking, runway gating, and replenishment ETA projections (`QuotaManager`), decoupled from persistence through the typed `TokenUsageReader` protocol.
    - Implements asynchronous process execution, process tree lifecycle, ANSI-sanitized log streaming, and harness-level telemetry anomaly event production (`AsyncHarnessAdapter` writing retry/timeout anomalies to `anomaly_events`).
    - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_all_open_issues`, `fetch_open_prs`, `sync_repository_labels`).
    - Manages dynamic file modification inspection (`SourceWatcher`).
@@ -175,7 +175,7 @@ graph-engineering/
 │   ├── housekeeping.py              # GitHub label provisioning and taxonomy synchronization
 │   ├── logging.py                   # Unified file and console logging with ANSI sanitization & TextualLogHandler
 │   ├── poller.py                    # Zero-token GitHub CLI/GraphQL query abstraction
-│   ├── quota.py                     # Multi-window token quota manager, runway gating & token extraction
+│   ├── quota.py                     # Multi-window rolling token quota, burn velocity & replenishment ETA engine
 │   ├── reloader.py                  # Hot-reloading watcher and module re-importer
 │   ├── ui/                          # Presentation & TUI dashboard package
 │   │   ├── __init__.py              # Subpackage exports
@@ -195,14 +195,11 @@ graph-engineering/
 │   ├── test_config.py               # Configuration loading and path expansion tests
 │   ├── test_dashboard.py            # Textual dashboard, log handler, and UI tests
 │   ├── test_db.py                   # State manager, TTL, and Blackboard tests
-│   ├── test_devtest_refactor.py     # DevTest refactoring and Git safety tests
-│   ├── test_harness.py              # Subprocess harness execution, timeout and token usage tests
+│   ├── test_harness.py              # Subprocess harness execution and timeout tests
 │   ├── test_logging.py              # Log rotation and ANSI strip tests
 │   ├── test_nodes.py                # Node workflow execution and boundary tests
-│   ├── test_poller.py               # Zero-token GitHub polling and issue triage tests
-│   ├── test_poller_quota.py         # Multi-project quota throttling and pre-flight gating tests
 │   ├── test_project_pause.py        # Per-project pause/resume lifecycle tests
-│   ├── test_quota.py                # QuotaManager window calculations, runway, and ETA tests
+│   ├── test_quota.py                # QuotaManager, velocity, runway gating, and token parser tests
 │   ├── test_reloader.py             # Hot reloading and source watcher tests
 │   ├── test_stop.py                 # Graceful daemon shutdown tests
 │   ├── test_supervisor_po.py        # Supervisor PO-proxy evaluation tests
@@ -263,8 +260,6 @@ All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to
 - **Fail-Fast Non-Retryable Errors**: Immediately returns on client errors (`401 Unauthorized`, `400 Bad Request`, `404 Not Found`, syntax compilation errors) without token or time waste.
 - **Terminal Exhaustion Protection**: Caps retries at `max_retries` before surfacing terminal failures to the calling node.
 - **Harness-Level Blackboard Telemetry Producer**: Interacts directly with `StateManager` (`record_anomaly_event`) as a harness-level producer to persist categorized transient anomalies (`http_503`, `http_429`, `http_502`, `http_504`, `connection_reset`) and execution SLA timeouts (`sla_violation`) into the SQLite WAL `anomaly_events` table for real-time dashboard observability.
-- **Post-Execution Token Event Ledger**: Extracts structured prompt, completion, and total tokens from execution outputs via regex/JSON (with empirical character fallback `max(1000, floor((len(prompt) + len(stdout)) / 4))`) and records usage in the `token_usage_events` SQLite WAL table for global multi-window quota velocity gating.
-
 
 ```python
 adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
@@ -278,28 +273,7 @@ exit_code = await adapter.execute(
 )
 ```
 
-### 3. Pre-Flight Quota Gating & Replenishment Runway Pattern (`QuotaManager` & `check_dispatch_quota`)
-To prevent cascading upstream rate limit exhaustion (`HTTP 429 RESOURCE_EXHAUSTED`) across multi-project workspaces sharing AI execution harnesses (Claude Code, Antigravity, Devin), the system implements an autonomous **Pre-Flight Quota Gating** engine:
-- **Zero-Token Local Pre-Flight Evaluation**: Before acquiring a distributed lock or dispatching an AI harness subprocess, application pipeline nodes (`architect`, `devtest`, `reviewer`, `bau`) query `check_dispatch_quota()`. This evaluates capacity purely via local SQLite WAL queries against `token_usage_events` with zero network overhead and zero LLM tokens.
-- **Runway Gating Formula**: For a given harness with rolling window $W_{\text{hours}}$, token limit $L$, average burn rate $R_{\text{tph}}$ (tokens/hour), and safety buffer duration $B_{\text{min}}$:
-  $$\text{required\_runway} = R_{\text{tph}} \times \frac{B_{\text{min}}}{60}$$
-  $$\text{remaining} = \max(0, L - \text{used\_tokens})$$
-  $$\text{allowed} = \text{remaining} \ge \text{required\_runway}$$
-- **Replenishment ETA & Throttling**: If remaining tokens are below the required runway, task dispatch is deferred (`THROTTLED`). `QuotaManager` scans the chronological event ledger to compute the exact timestamp when sufficient historical token volume will age out of the rolling window ($t_{\text{renewal}} = t_{\text{event}} + W_{\text{hours}}$), logging a renewal ETA countdown (`Xh Ym Zs`) without mutating GitHub labels or holding worker locks.
-- **Cross-Project Isolation & Fair Sharing**: Quota tracking is aggregated globally per execution harness while recording project and node attribution, enabling informative percentage breakdowns (`get_informative_breakdown`) and preventing a single high-velocity project from starving shared AI harness bandwidth.
-
-```mermaid
-flowchart TD
-    TaskTrigger["Task Triggered (Poller / Label Event)"] --> QuotaCheck["check_dispatch_quota(project, node, config, state_manager)"]
-    QuotaCheck --> Capacity{"Capacity >= Required Runway?"}
-    Capacity -- "Yes (Allowed)" --> AcquireLock["state_manager.acquire_lock()"]
-    AcquireLock --> ExecuteHarness["AsyncHarnessAdapter.execute()"]
-    ExecuteHarness --> RecordTokens["record_token_usage_event(prompt, completion, total)"]
-    Capacity -- "No (Throttled)" --> LogETA["Log Renewal Countdown ETA (0 tokens spent)"]
-    LogETA --> DeferTask["Defer Dispatch (Labels Unchanged, 0 Lock Contention)"]
-```
-
-### 4. Distributed State Machine & TTL Locking (`StateManager`)
+### 3. Distributed State Machine & TTL Locking (`StateManager`)
 - **Write-Ahead Logging (WAL)**: SQLite runs in WAL mode (`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`) ensuring concurrent non-blocking reads and serialized atomic writes across async workers.
 - **TTL Lock Protection & Retry-Aware Sizing**: Every task execution is bounded by a dynamic Time-To-Live (TTL). When retry policies are enabled on harnesses, lock TTL is sized dynamically based on the full retry budget:
   $$\text{lock\_ttl} = \text{timeout\_minutes} \times (1 + \text{max\_retries}) + 5$$
@@ -324,7 +298,7 @@ stateDiagram-v2
     Recovered --> [*]
 ```
 
-### 5. Dynamic Hot Reloading Runtime (`SourceWatcher` & `hot_reload_runtime`)
+### 4. Dynamic Hot Reloading Runtime (`SourceWatcher` & `hot_reload_runtime`)
 The daemon monitors both `config.yaml` and internal Python source files (`orchestrator/**/*.py`) for file modification events. When changes are detected, `hot_reload_runtime()` topologically reloads modules in `sys.modules` without terminating running worker loops.
 
 ```mermaid
@@ -335,14 +309,22 @@ flowchart LR
     FreshConfig --> ActiveWorkers["Active Daemon Workers continue with Updated Code"]
 ```
 
-### 6. Autonomous Git Merge Conflict Resolution Pattern
+### 5. Autonomous Git Merge Conflict Resolution Pattern
 The Reviewer node implements a two-tier conflict resolution strategy:
 1. **Clean Auto-Merge**: Executes `git merge origin/main` in a safe subshell. If clean, pushes immediately to origin.
 2. **AI-Assisted Resolution**: If conflict markers exist (`<<<<<<< HEAD`), launches a specialized cost-effective harness (`antigravity` / `gemini-3.7-flash-low`) to reconcile diffs, verify absence of conflict markers, commit, and push.
 3. **Blackboard Fallback**: Updates `pr_artifacts` with `APPROVED_WITH_CONFLICT` or flags `needs-po-review` if unresolvable.
 
-### 7. Dependency Injection via Composition Root
+### 6. Dependency Injection via Composition Root
 Configuration is loaded once via `load_config()` at the presentation entry point (`cli.py`) and passed explicitly down the call hierarchy (`config`, `project`, `state_manager`). Modules never rely on global mutable singletons.
+
+### 7. Multi-Window Rolling Quota & Velocity Runway Gating Pattern (`QuotaManager` & `TokenUsageReader`)
+To protect against rate-limit throttling and API cost overruns across multi-project workspaces, the control plane enforces a proactive, multi-window quota gating engine (`QuotaManager` in Layer 2 Infrastructure):
+- **Decoupled State Access via Typed Protocol (`TokenUsageReader`)**: `QuotaManager` interacts with the SQLite state engine strictly through the `@runtime_checkable` `TokenUsageReader` Protocol (`get_window_token_usage`, `get_usage_breakdown`, `get_token_usage_events`), ensuring clean architectural decoupling and eliminating runtime duck-typing.
+- **Fail-Fast Composition**: `QuotaManager` strictly validates injected dependencies (`GlobalConfig` | `QuotaSettings` and `TokenUsageReader`), raising `TypeError` on invalid configurations instead of masking errors with silent defaults.
+- **Pure Function Extraction**: Core mathematical calculations (`calculate_required_runway`, `calculate_remaining`, `calculate_velocity`, `calculate_replenishment_eta`, `extract_token_usage`) are isolated as pure functions without database or subprocess side effects.
+- **Global Harness Pooling & Shared Gating**: Gating checks (`check_harness_capacity`) evaluate total consumption across all projects sharing the same AI execution harness (e.g. `claude`, `antigravity`, `devin`). If the remaining quota within the configured rolling window ($W_{\text{hours}}$) is insufficient for the required safety runway ($R_{\text{runway}} = \text{avg\_tokens\_per\_hour} \times \frac{\text{buffer\_minutes}}{60}$), the harness is throttled before subprocess dispatch.
+- **Replenishment Countdown ETA**: When throttled, `calculate_replenishment_eta()` computes the exact seconds remaining until aging token usage events roll out of the sliding window, providing precise countdown telemetry to the dashboard.
 
 ---
 
