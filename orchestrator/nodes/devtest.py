@@ -17,7 +17,7 @@ from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import get_project_log_path
 from orchestrator import poller
 from orchestrator.nodes.reviewer import check_pr_ci_status
-from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
+from orchestrator.poller import check_dispatch_quota, fetch_issue_by_number, fetch_open_prs
 from orchestrator.worktree import WorktreeManager
 
 _logger = logging.getLogger(__name__)
@@ -981,10 +981,14 @@ async def run_devtest_node(
             )
             return False, f"PR #{pr_number} failed CI checks ({ci_details}). Tagged 'needs-refactor'."
 
-    # Phase 3: Deterministic Gating for New Implementation Issues (0 Tokens)
-    issues = await fetch_issues_with_label(project.repo, trigger, limit=1)
-    if not issues:
-        return False, f"No PRs labeled 'needs-refactor'/'dev-implemented' and no issues labeled '{trigger}'. Idle (0 tokens)."
+    # Phase 3: Deterministic Gating for New Implementation Issues via Story Lock (0 Tokens)
+    target_issue_id = await state_manager.get_next_devtest_task(project.name)
+    if target_issue_id is None:
+        _logger.warning(
+            "[%s:devtest] Project is locked on active story or no actionable task found. Idling (0 tokens).",
+            project.name,
+        )
+        return False, f"No PRs labeled 'needs-refactor'/'dev-implemented' and no actionable task for project '{project.name}' (story lock active or idle). Idle (0 tokens)."
 
     # Pre-Flight Quota Gating (Pure local SQLite calculation, 0 LLM tokens)
     harness_name = node_cfg.harness or "antigravity"
@@ -992,7 +996,11 @@ async def run_devtest_node(
     if not allowed:
         return False, f"Quota throttled for harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
 
-    target_issue = issues[0]
+    # Targeted Fetch of the specific issue payload via fetch_issue_by_number (0 LLM tokens)
+    target_issue = await fetch_issue_by_number(project.repo, target_issue_id)
+    if not target_issue:
+        return False, f"Target issue #{target_issue_id} could not be fetched from GitHub."
+
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 

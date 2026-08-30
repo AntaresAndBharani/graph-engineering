@@ -58,7 +58,6 @@ async def test_devtest_remediates_needs_refactor_pr(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
-    monkeypatch.setattr(devtest, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "verify_git_safety", mock_verify_safety)
 
     config = GlobalConfig(
@@ -142,7 +141,6 @@ async def test_devtest_e2e_auto_merges_pr_when_ci_green(tmp_path: Path, monkeypa
     monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
-    monkeypatch.setattr(devtest, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "verify_git_safety", mock_verify_safety)
     monkeypatch.setattr(devtest, "check_pr_ci_status", mock_ci_status)
 
@@ -215,7 +213,6 @@ async def test_devtest_e2e_flags_needs_refactor_when_ci_fails(tmp_path: Path, mo
     monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
-    monkeypatch.setattr(devtest, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "verify_git_safety", mock_verify_safety)
     monkeypatch.setattr(devtest, "check_pr_ci_status", mock_ci_status)
 
@@ -274,7 +271,6 @@ async def test_devtest_phase2_auto_merges_open_implemented_pr_when_ci_green(tmp_
     monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
-    monkeypatch.setattr(devtest, "fetch_issues_with_label", mock_fetch_issues)
     monkeypatch.setattr(devtest, "check_pr_ci_status", mock_ci_status)
 
     config = GlobalConfig(

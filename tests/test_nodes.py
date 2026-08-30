@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 import pytest
 from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
 from orchestrator.db import StateManager
@@ -522,12 +523,17 @@ async def test_devtest_blackboard_producer_wiring(tmp_path: Path, monkeypatch):
     await state_manager.init_db()
     config = GlobalConfig()
 
-    mock_issues = [{"number": 88, "title": "feat: worker"}]
-
-    async def mock_fetch_issues(*a, **kw):
-        return mock_issues
-
-    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", mock_fetch_issues)
+    await state_manager.sync_project_sdlc_items(
+        "dev-proj",
+        [{
+            "issue_number": 88,
+            "title": "feat: worker",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+        }],
+    )
+    mock_issue = {"number": 88, "title": "feat: worker", "labels": [{"name": "ready-for-dev"}]}
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", AsyncMock(return_value=mock_issue))
 
     # Safety check fails (not a valid git dir)
     ran, msg = await run_devtest_node(project, config, state_manager)
@@ -670,8 +676,17 @@ async def test_scenario_devtest_operates_in_its_own_worktree(tmp_path: Path, mon
     )
     config = GlobalConfig()
 
-    mock_issues = [{"number": 75, "title": "feat: worktree execution"}]
-    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issues_with_label", AsyncMock(return_value=mock_issues))
+    await state_manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{
+            "issue_number": 75,
+            "title": "feat: worktree execution",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+        }],
+    )
+    mock_issue = {"number": 75, "title": "feat: worktree execution", "labels": [{"name": "ready-for-dev"}]}
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", AsyncMock(return_value=mock_issue))
     monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
     monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "Safety verified.")))
 
@@ -977,6 +992,257 @@ async def test_scenario_no_planned_story_available(tmp_path: Path, monkeypatch):
     story_50 = next(s for s in sdlc_items if s["issue_number"] == 50)
     assert story_50["state"] == "CLOSED"
     assert await state_manager.count_planned_stories("graph-engineering") == 0
+
+
+@pytest.mark.asyncio
+async def test_devtest_phase3_targeted_fetch_and_stateless_execution(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Targeted Fetch and Stateless Execution in DevTest
+      Given get_next_devtest_task returns issue ID #93
+      When run_devtest_node executes Phase 3
+      Then it must fetch issue #93 directly via fetch_issue_by_number
+      And it must not perform generic blind label polling across the repository.
+    """
+    from unittest.mock import AsyncMock
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.harness import AsyncHarnessAdapter
+    from orchestrator.worktree import WorktreeManager
+    import orchestrator.poller as poller_mod
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    config = GlobalConfig()
+
+    # Mock get_next_devtest_task returning issue ID #93
+    monkeypatch.setattr(state_manager, "get_next_devtest_task", AsyncMock(return_value=93))
+
+    fetched_issue_numbers = []
+
+    async def mock_fetch_issue_by_number(repo, issue_number):
+        fetched_issue_numbers.append(issue_number)
+        return {
+            "number": issue_number,
+            "title": "feat: deterministic locked issue dispatch",
+            "body": "Issue body",
+            "labels": [{"name": "ready-for-dev"}],
+        }
+
+    # Tracking for generic blind label polling to assert it is never called
+    blind_polling_called = False
+
+    async def mock_fetch_issues_with_label(*args, **kwargs):
+        nonlocal blind_polling_called
+        blind_polling_called = True
+        return [{"number": 999, "title": "Wrong issue from blind polling"}]
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", mock_fetch_issue_by_number)
+    monkeypatch.setattr(poller_mod, "fetch_issues_with_label", mock_fetch_issues_with_label)
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "Safety verified.")))
+    monkeypatch.setattr(WorktreeManager, "ensure_worktree", AsyncMock(return_value=tmp_path))
+
+    dispatched_prompt = ""
+
+    async def mock_harness_execute(self, prompt, cwd=None, **kwargs):
+        nonlocal dispatched_prompt
+        dispatched_prompt = prompt
+        return 0
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_harness_execute)
+
+    class MockProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+        async def communicate(self):
+            return b"", b""
+
+    async def mock_subprocess_exec(*cmd, **kw):
+        mock_p = MockProc()
+        if "status" in cmd and "--porcelain" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"M orchestrator/nodes/devtest.py\n", b""))
+        elif "pr" in cmd and "create" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"https://github.com/AntaresAndBharani/graph-engineering/pull/93\n", b""))
+        else:
+            mock_p.communicate = AsyncMock(return_value=(b"", b""))
+        return mock_p
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_pr_ci_status", AsyncMock(return_value=("PASS", "100% green")))
+
+    ran, msg = await run_devtest_node(project, config, state_manager)
+
+    assert ran is True
+    # Assert issue #93 was fetched directly via fetch_issue_by_number
+    assert fetched_issue_numbers == [93]
+    # Assert generic blind label polling was NOT performed
+    assert blind_polling_called is False
+    # Assert harness prompt targeted issue #93
+    assert "#93" in dispatched_prompt
+
+
+@pytest.mark.asyncio
+async def test_devtest_phase3_blocked_pipeline_halts_without_skipping_stories(tmp_path: Path, monkeypatch, caplog):
+    """
+    Scenario: Blocked Pipeline Halts Without Skipping Stories
+      Given get_next_devtest_task returns None because the locked story's next subtask is blocked
+      When run_devtest_node executes Phase 3
+      Then DevTest must idle without dispatching any other issue
+      And it must emit a warning log indicating the project is locked on the active story.
+    """
+    import logging
+    from unittest.mock import AsyncMock
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    config = GlobalConfig()
+
+    # get_next_devtest_task returns None (blocked story / no actionable task)
+    monkeypatch.setattr(state_manager, "get_next_devtest_task", AsyncMock(return_value=None))
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+
+    harness_called = False
+
+    async def mock_harness_execute(*args, **kwargs):
+        nonlocal harness_called
+        harness_called = True
+        return 0
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_harness_execute)
+
+    with caplog.at_level(logging.WARNING):
+        ran, msg = await run_devtest_node(project, config, state_manager)
+
+    # 1. DevTest must idle without dispatching any issue
+    assert ran is False
+    assert harness_called is False
+    assert "Idle (0 tokens)" in msg
+    assert "story lock active or idle" in msg
+
+    # 2. Must emit a warning log indicating the project is locked on the active story
+    warning_logged = any(
+        "Project is locked on active story" in record.message or "locked on active story" in record.message.lower()
+        for record in caplog.records
+    )
+    assert warning_logged is True
+
+
+@pytest.mark.asyncio
+async def test_devtest_phase3_sqlite_cte_story_lock_end_to_end(tmp_path: Path, monkeypatch, caplog):
+    """
+    Integration test asserting end-to-end SQLite CTE Story Lock gating in run_devtest_node:
+    - Story A (#90) with Subtask #93 (status:blocked) and Subtask #94 (ready-for-dev)
+    - Story B (#100) with Subtask #101 (ready-for-dev)
+    - run_devtest_node must idle and NOT skip to #94 or Story B #101.
+    - When Subtask #93 is unblocked (ready-for-dev), run_devtest_node dispatches #93.
+    """
+    import logging
+    from unittest.mock import AsyncMock
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.harness import AsyncHarnessAdapter
+    from orchestrator.worktree import WorktreeManager
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    config = GlobalConfig()
+
+    # Seed Story A (#90) with Subtask #93 (blocked) and Subtask #94 (ready-for-dev)
+    # Seed Story B (#100) with Subtask #101 (ready-for-dev)
+    items = [
+        {"issue_number": 90, "title": "Story A", "state": "OPEN", "item_type": "STORY", "sequence_order": 1, "labels": ["architect-processed"]},
+        {"issue_number": 93, "parent_issue_id": 90, "title": "Subtask #93", "state": "OPEN", "item_type": "SUBTASK", "sequence_order": 1, "labels": ["status:blocked"]},
+        {"issue_number": 94, "parent_issue_id": 90, "title": "Subtask #94", "state": "OPEN", "item_type": "SUBTASK", "sequence_order": 2, "labels": ["ready-for-dev"]},
+        {"issue_number": 100, "title": "Story B", "state": "OPEN", "item_type": "STORY", "sequence_order": 2, "labels": ["architect-processed"]},
+        {"issue_number": 101, "parent_issue_id": 100, "title": "Subtask #101", "state": "OPEN", "item_type": "SUBTASK", "sequence_order": 1, "labels": ["ready-for-dev"]},
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "Safety verified.")))
+    monkeypatch.setattr(WorktreeManager, "ensure_worktree", AsyncMock(return_value=tmp_path))
+
+    dispatched_issues = []
+
+    async def mock_fetch_issue_by_number(repo, issue_number):
+        return {
+            "number": issue_number,
+            "title": f"Subtask #{issue_number}",
+            "body": "Subtask body",
+            "labels": [{"name": "ready-for-dev"}],
+        }
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", mock_fetch_issue_by_number)
+
+    async def mock_harness_execute(self, prompt, cwd=None, **kwargs):
+        dispatched_issues.append(getattr(self, "issue_number", None))
+        return 0
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_harness_execute)
+
+    class MockProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+        async def communicate(self):
+            return b"", b""
+
+    async def mock_subprocess_exec(*cmd, **kw):
+        mock_p = MockProc()
+        if "status" in cmd and "--porcelain" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"M test.py\n", b""))
+        elif "pr" in cmd and "create" in cmd:
+            mock_p.communicate = AsyncMock(return_value=(b"https://github.com/AntaresAndBharani/graph-engineering/pull/93\n", b""))
+        else:
+            mock_p.communicate = AsyncMock(return_value=(b"", b""))
+        return mock_p
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_pr_ci_status", AsyncMock(return_value=("PASS", "100% green")))
+
+    # 1. First execution: Subtask #93 is blocked -> DevTest idles with warning log
+    with caplog.at_level(logging.WARNING):
+        ran1, msg1 = await run_devtest_node(project, config, state_manager)
+
+    assert ran1 is False
+    assert len(dispatched_issues) == 0
+    assert any("Project is locked on active story" in r.message for r in caplog.records)
+
+    # 2. Unblock Subtask #93 (transitions to 'ready-for-dev')
+    items[1]["labels"] = ["ready-for-dev"]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # 3. Second execution: DevTest dispatches Subtask #93 directly
+    ran2, msg2 = await run_devtest_node(project, config, state_manager)
+    assert ran2 is True
+    assert 93 in dispatched_issues
+
 
 
 
