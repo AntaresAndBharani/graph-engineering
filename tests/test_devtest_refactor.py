@@ -245,3 +245,71 @@ async def test_devtest_e2e_flags_needs_refactor_when_ci_fails(tmp_path: Path, mo
     assert ran is False
     assert "failed CI checks" in msg
 
+
+@pytest.mark.asyncio
+async def test_devtest_phase2_auto_merges_open_implemented_pr_when_ci_green(tmp_path: Path, monkeypatch):
+    """Verifies that DevTest Phase 2 sweeps open dev-implemented PRs, validates CI green, and auto-merges."""
+    from orchestrator import poller
+    from orchestrator.nodes import devtest
+
+    mock_pr = {
+        "number": 85,
+        "title": "feat(worktree): WorktreeManager module",
+        "headRefName": "feat/issue-79",
+        "body": "Closes #79\n\nParent: #77",
+        "labels": [{"name": "dev-implemented"}],
+    }
+
+    async def mock_fetch_prs(repo, label=None, limit=20):
+        if label == "dev-implemented":
+            return [mock_pr]
+        return []
+
+    async def mock_fetch_issues(repo, label, limit=5):
+        return []
+
+    async def mock_ci_status(repo, pr_number):
+        return "PASS", "All CI checks passed (100% green)"
+
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(devtest, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(devtest, "check_pr_ci_status", mock_ci_status)
+
+    config = GlobalConfig(
+        harnesses={"antigravity": HarnessConfig(binary="agy", timeout_minutes=30)}
+    )
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(harness="antigravity", enabled=True, auto_merge_approved=True)},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    executed_cmds = []
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        executed_cmds.append(list(args))
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.wait = AsyncMock(return_value=0)
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "C:\\Program Files\\GitHub CLI\\gh.exe")
+
+    ran, msg = await run_devtest_node(project, config, state_manager)
+    assert ran is True
+    assert "auto-merged PR #85" in msg
+
+    # Verify that gh pr merge and gh issue close were executed
+    merged = any("merge" in c and "85" in c for c in executed_cmds)
+    closed = any("close" in c and "79" in c for c in executed_cmds)
+    assert merged is True
+    assert closed is True
+
+

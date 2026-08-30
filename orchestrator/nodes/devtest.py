@@ -544,8 +544,7 @@ async def _verify_and_auto_merge_pr(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await p_merge.wait()
-
+            stdout_m, stderr_m = await p_merge.communicate()
             if p_merge.returncode == 0:
                 console.print(f"  [{project.name}:devtest] [bold green]✓ DevTest E2E Complete: PR #{pr_number} auto-merged into main[/bold green]")
                 
@@ -588,6 +587,36 @@ async def _verify_and_auto_merge_pr(
                     console.print(f"  [{project.name}:devtest] [dim yellow]Parent sequential advance notice: {ex}[/dim yellow]")
 
                 return True, f"DevTest node implemented issue #{issue_id}, verified CI 100% Green, and auto-merged PR #{pr_number} into main."
+            else:
+                err_text = (stderr_m or b"").decode("utf-8", errors="replace").strip()
+                console.print(f"  [{project.name}:devtest] [bold red]✗ PR #{pr_number} merge failed ({err_text}). Flagging for conflict remediation.[/bold red]")
+                p_fail = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "edit", str(pr_number),
+                    "--repo", project.repo,
+                    "--remove-label", "dev-implemented",
+                    "--add-label", "needs-refactor",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_fail.wait()
+
+                p_comm = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "comment", str(pr_number),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **DevTest Merge Quality Gate**: PR #{pr_number} cannot be merged into `main` ({err_text}). Flagging with `needs-refactor` for autonomous conflict remediation.",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_comm.wait()
+
+                await state_manager.record_anomaly_event(
+                    project_name=project.name,
+                    node_name="devtest",
+                    error_type="MERGE_CONFLICT",
+                    error_message=f"PR #{pr_number} cannot be merged: {err_text}",
+                    issue_number=issue_id,
+                )
+                return False, f"PR #{pr_number} cannot be merged ({err_text}). Tagged 'needs-refactor'."
 
     elif ci_status == "FAIL":
         if shutil.which("gh"):
@@ -650,18 +679,60 @@ async def _verify_and_auto_merge_pr(
     return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_number} (CI checks pending)."
 
 
+async def _extract_issue_from_pr(repo: str, pr: Dict[str, Any]) -> tuple[Optional[int], str]:
+    """Extracts issue_id and title from PR object or GitHub API."""
+    body = pr.get("body", "")
+    branch = pr.get("headRefName", "")
+    title = pr.get("title", "")
+    pr_number = pr.get("number", 0)
+
+    m = re.search(r"issue-(\d+)", branch, re.IGNORECASE)
+    if m:
+        return int(m.group(1)), title
+
+    m = re.search(r"(?:Fixes|Closes|Resolves)\s*#(\d+)", body, re.IGNORECASE)
+    if m:
+        return int(m.group(1)), title
+
+    if shutil.which("gh") and pr_number:
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "gh", "pr", "view", str(pr_number),
+                "--repo", repo,
+                "--json", "body,headRefName,title",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await p.communicate()
+            if p.returncode == 0 and stdout:
+                data = json.loads(stdout.decode("utf-8", errors="replace"))
+                b = data.get("body", "")
+                br = data.get("headRefName", "")
+                m = re.search(r"issue-(\d+)", br, re.IGNORECASE) or re.search(r"(?:Fixes|Closes|Resolves)\s*#(\d+)", b, re.IGNORECASE)
+                if m:
+                    return int(m.group(1)), data.get("title", title)
+        except Exception:
+            pass
+
+    return None, title
+
+
 async def run_devtest_node(
     project: ProjectConfig,
     config: GlobalConfig,
     state_manager: StateManager,
 ) -> tuple[bool, str]:
     """
-    Executes 3Amigos DevTest Node (Implementation & Verification).
-    Zero-token gating: if no issues labeled 'ready-for-dev' and no PRs labeled 'needs-refactor', exits with 0 tokens consumed.
+    Executes 3Amigos DevTest Node (Implementation, CI Verification & PR Auto-Merge).
+    Zero-token gating: if no issues labeled 'ready-for-dev' and no PRs labeled 'needs-refactor' / 'dev-implemented', exits with 0 tokens consumed.
     """
     node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
     if not node_cfg.enabled:
         return False, "DevTest node disabled for project."
+
+    trigger = node_cfg.label_trigger or "ready-for-dev"
+    output_label = node_cfg.label_output or "needs-architect-review"
+    branch_prefix = node_cfg.branch_prefix or "feat/issue-"
 
     # Phase 1: Remediate PRs with 'needs-refactor'
     refactor_prs = await fetch_open_prs(project.repo, label="needs-refactor", limit=1)
@@ -684,14 +755,56 @@ async def run_devtest_node(
             branch_name=branch_name,
         )
 
-    trigger = node_cfg.label_trigger or "ready-for-dev"
-    output_label = node_cfg.label_output or "needs-architect-review"
-    branch_prefix = node_cfg.branch_prefix or "feat/issue-"
+    # Phase 2: Autonomous E2E Completion & Auto-Merge of Open PRs Awaiting CI
+    implemented_prs = await fetch_open_prs(project.repo, label="dev-implemented", limit=10)
+    for pr in implemented_prs:
+        pr_number = pr["number"]
+        pr_title = pr.get("title", "")
+        ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
+        if ci_status == "PASS":
+            issue_id, issue_title = await _extract_issue_from_pr(project.repo, pr)
+            target_issue_id = issue_id or pr_number
+            return await _verify_and_auto_merge_pr(
+                project=project,
+                state_manager=state_manager,
+                pr_number=pr_number,
+                issue_id=target_issue_id,
+                issue_title=issue_title or pr_title,
+                trigger_label=trigger,
+                auto_merge_approved=True,
+            )
+        elif ci_status == "FAIL":
+            if shutil.which("gh"):
+                p_fail = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "edit", str(pr_number),
+                    "--repo", project.repo,
+                    "--remove-label", "dev-implemented",
+                    "--add-label", "needs-refactor",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_fail.wait()
+                p_comm = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "comment", str(pr_number),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **DevTest Quality Gate**: Remote CI checks failed ({ci_details}). Flagging with `needs-refactor` for autonomous remediation.",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_comm.wait()
+            await state_manager.record_anomaly_event(
+                project_name=project.name,
+                node_name="devtest",
+                error_type="CI_FAILURE",
+                error_message=f"PR #{pr_number} failed CI checks: {ci_details}",
+                issue_number=pr_number,
+            )
+            return False, f"PR #{pr_number} failed CI checks ({ci_details}). Tagged 'needs-refactor'."
 
-    # 1. Deterministic Gating (0 Tokens)
+    # Phase 3: Deterministic Gating for New Implementation Issues (0 Tokens)
     issues = await fetch_issues_with_label(project.repo, trigger, limit=1)
     if not issues:
-        return False, f"No PRs labeled 'needs-refactor' and no issues labeled '{trigger}'. Idle (0 tokens)."
+        return False, f"No PRs labeled 'needs-refactor'/'dev-implemented' and no issues labeled '{trigger}'. Idle (0 tokens)."
 
     # Pre-Flight Quota Gating (Pure local SQLite calculation, 0 LLM tokens)
     harness_name = node_cfg.harness or "antigravity"
