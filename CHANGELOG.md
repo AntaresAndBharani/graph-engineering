@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Added `architect-approved` and `needs-refactor` to `DEFAULT_MANAGED_LABELS` in `orchestrator/config.py` to ensure complete workflow taxonomy synchronization across local and remote repositories.
+
+
 ## [2.0.0] - 2026-08-30
 
 ### Changed

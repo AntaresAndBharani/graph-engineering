@@ -132,9 +132,11 @@ class SettingsConfig(BaseModel):
 
 
 DEFAULT_MANAGED_LABELS: List[LabelConfig] = [
-    LabelConfig(name="needs-triage", color="E2B7E1", description="Awaiting Architect Node triage"),
+    LabelConfig(name="needs-triage", color="E2B7E1", description="Awaiting Architect Node triage and decomposition"),
     LabelConfig(name="ready-for-dev", color="0E8A16", description="Awaiting 3Amigos DevTest implementation"),
-    LabelConfig(name="needs-architect-review", color="FBCA04", description="PR submitted, ready for review"),
+    LabelConfig(name="needs-architect-review", color="FBCA04", description="PR submitted, ready for architectural review"),
+    LabelConfig(name="architect-approved", color="2EA44F", description="Architectural review passed, ready for final CI merge"),
+    LabelConfig(name="needs-refactor", color="D93F0B", description="Architect identified structural violations, returned to DevTest"),
     LabelConfig(name="dev-implemented", color="C2E0C6", description="Implementation completed by DevTest node"),
     LabelConfig(name="orchestration-failed", color="B60205", description="AI Harness execution failed"),
     LabelConfig(name="needs-po-review", color="D93F0B", description="Supervisor flagged methodological conflict"),
