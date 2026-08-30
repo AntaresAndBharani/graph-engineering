@@ -368,7 +368,8 @@ def build_triage_prompt(
 
     po_ac_context = ""
     decomposition_instruction = (
-        f"     - Create new subtask issues: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+        f"     - Create Subtask 1 (Active): `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+        f"     - Create Subtasks 2..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label 'queued'`.\n"
     )
 
     if po_record and po_record.get("status") == "PO_APPROVED" and po_record.get("gherkin_ac"):
@@ -380,7 +381,8 @@ def build_triage_prompt(
             f"CRITICAL: Do NOT re-derive acceptance criteria from scratch. Incorporate and decompose directly from these pre-approved Gherkin criteria into subtasks.\n"
         )
         decomposition_instruction = (
-            f"     - Create new subtask issues using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+            f"     - Create Subtask 1 (Active) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
+            f"     - Create Subtasks 2..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label 'queued'`.\n"
         )
 
     prompt = (
@@ -406,7 +408,7 @@ def build_triage_prompt(
         f"{decomposition_instruction}"
         f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
         f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
-        f"     - Post a comment on the parent issue listing all created subtask numbers.\n"
+        f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
     )
     return prompt
 

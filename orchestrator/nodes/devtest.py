@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -247,6 +250,10 @@ async def _remediate_refactor_pr(
                     }],
                 )
                 await state_manager.delete_pr_artifact(project.repo, pr_number)
+                try:
+                    await _advance_parent_and_unlock_next_subtask(project, state_manager, pr_number)
+                except Exception:
+                    pass
                 return True, f"DevTest node remediated PR #{pr_number}, verified CI 100% Green, and merged into main."
 
     if shutil.which("gh"):
@@ -272,6 +279,188 @@ async def _remediate_refactor_pr(
     return True, f"DevTest node remediated PR #{pr_number} and transitioned to 'needs-architect-review'."
 
 
+async def _advance_parent_and_unlock_next_subtask(
+    project: ProjectConfig,
+    state_manager: StateManager,
+    subtask_id: int,
+) -> None:
+    """
+    Evaluates whether the completed subtask belongs to a parent story.
+    If so:
+    1. Checks off `- [x] #<subtask_id>` in the parent issue body.
+    2. Searches for remaining open child subtasks with label 'queued'.
+    3. If any queued subtask exists, unlocks the first queued subtask in sequence
+       (removes 'queued', applies 'ready-for-dev').
+    4. If 100% of child subtasks for the parent are closed, transitions the parent
+       issue to 'dev-implemented' and closes the parent story.
+    """
+    if not shutil.which("gh"):
+        return
+
+    # 1. Fetch subtask details to find if it has a Parent reference
+    proc_sub = await asyncio.create_subprocess_exec(
+        "gh", "issue", "view", str(subtask_id),
+        "--repo", project.repo,
+        "--json", "body,title,labels",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_sub, _ = await proc_sub.communicate()
+    if proc_sub.returncode != 0 or not stdout_sub:
+        return
+
+    parent_id = None
+    try:
+        sub_data = json.loads(stdout_sub.decode("utf-8", errors="replace"))
+        sub_body = sub_data.get("body", "")
+        m = re.search(r"Parent:\s*#(\d+)", sub_body, re.IGNORECASE)
+        if m:
+            parent_id = int(m.group(1))
+    except Exception:
+        pass
+
+    if not parent_id:
+        return
+
+    # 2. Fetch parent issue details
+    proc_parent = await asyncio.create_subprocess_exec(
+        "gh", "issue", "view", str(parent_id),
+        "--repo", project.repo,
+        "--json", "body,title,labels,state",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_p, _ = await proc_parent.communicate()
+    if proc_parent.returncode != 0 or not stdout_p:
+        return
+
+    try:
+        parent_data = json.loads(stdout_p.decode("utf-8", errors="replace"))
+    except Exception:
+        return
+
+    parent_body = parent_data.get("body", "")
+    if not parent_body:
+        return
+
+    # 3. Check off this subtask in the parent body
+    updated_body = re.sub(
+        rf"(-\s*\[\s*\]\s*#{subtask_id}\b)",
+        f"- [x] #{subtask_id}",
+        parent_body,
+    )
+
+    if updated_body != parent_body:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+            tf.write(updated_body)
+            temp_path = tf.name
+        try:
+            p_update = await asyncio.create_subprocess_exec(
+                "gh", "issue", "edit", str(parent_id),
+                "--repo", project.repo,
+                "--body-file", temp_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_update.wait()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    # 4. Search for all child subtasks referencing Parent: #<parent_id>
+    proc_children = await asyncio.create_subprocess_exec(
+        "gh", "issue", "list",
+        "--repo", project.repo,
+        "--search", f"#{parent_id}",
+        "--state", "all",
+        "--json", "number,title,state,labels",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_c, _ = await proc_children.communicate()
+    children = []
+    if proc_children.returncode == 0 and stdout_c:
+        try:
+            all_res = json.loads(stdout_c.decode("utf-8", errors="replace"))
+            children = [c for c in all_res if c.get("number") != parent_id]
+        except Exception:
+            pass
+
+    if not children:
+        return
+
+    children.sort(key=lambda x: x.get("number", 0))
+
+    # Check if any open subtasks with 'queued' exist
+    queued_children = []
+    for c in children:
+        c_state = str(c.get("state", "")).upper()
+        if c_state != "CLOSED":
+            c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
+            if "queued" in c_labels or "status:queued" in c_labels:
+                queued_children.append(c)
+
+    if queued_children:
+        next_child = queued_children[0]
+        next_id = next_child["number"]
+        queued_lbl = "status:queued" if "status:queued" in [l.get("name") if isinstance(l, dict) else str(l) for l in next_child.get("labels", [])] else "queued"
+        ready_lbl = "status:ready-for-dev" if queued_lbl == "status:queued" else "ready-for-dev"
+
+        p_promote = await asyncio.create_subprocess_exec(
+            "gh", "issue", "edit", str(next_id),
+            "--repo", project.repo,
+            "--remove-label", queued_lbl,
+            "--add-label", ready_lbl,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await p_promote.wait()
+
+        p_comment = await asyncio.create_subprocess_exec(
+            "gh", "issue", "comment", str(parent_id),
+            "--repo", project.repo,
+            "--body", f"🤖 **DevTest Sequential Advance**: Subtask #{subtask_id} completed and merged. Unlocked next sequential subtask #{next_id} (`{ready_lbl}`).",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await p_comment.wait()
+    else:
+        # Check if 100% of all children are now CLOSED
+        all_closed = all(str(c.get("state", "")).upper() == "CLOSED" for c in children)
+        if all_closed:
+            p_edit_parent = await asyncio.create_subprocess_exec(
+                "gh", "issue", "edit", str(parent_id),
+                "--repo", project.repo,
+                "--remove-label", "architect-processed",
+                "--remove-label", "status:in-progress",
+                "--add-label", "dev-implemented",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_edit_parent.wait()
+
+            child_list_str = ", ".join(f"#{c.get('number')}" for c in children)
+            p_close_parent = await asyncio.create_subprocess_exec(
+                "gh", "issue", "close", str(parent_id),
+                "--repo", project.repo,
+                "--comment", f"🎉 **Parent Story Completed**: 100% of child subtasks ({child_list_str}) have been implemented, verified against CI, and merged into main.",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await p_close_parent.wait()
+
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": parent_id,
+                    "title": parent_data.get("title", f"Parent Story #{parent_id}"),
+                    "state": "CLOSED",
+                    "labels": ["dev-implemented"],
+                    "item_type": "STORY",
+                }],
+            )
+
+
 async def _verify_and_auto_merge_pr(
     project: ProjectConfig,
     state_manager: StateManager,
@@ -291,6 +480,7 @@ async def _verify_and_auto_merge_pr(
        - Squashes and merges the PR into main (`--delete-branch`).
        - Transitions parent issue to 'dev-implemented' and closes the issue.
        - Syncs SDLC item in StateManager to MERGED.
+       - Evaluates parent story sequential advance / parent closure.
     3. If CI is FAIL:
        - Flags the PR with 'needs-refactor'.
        - Posts a comment detailing failing checks.
@@ -390,6 +580,13 @@ async def _verify_and_auto_merge_pr(
                     }],
                 )
                 await state_manager.delete_pr_artifact(project.repo, pr_number)
+
+                # 4. Advance parent story sequence / unlock next queued subtask
+                try:
+                    await _advance_parent_and_unlock_next_subtask(project, state_manager, issue_id)
+                except Exception as ex:
+                    console.print(f"  [{project.name}:devtest] [dim yellow]Parent sequential advance notice: {ex}[/dim yellow]")
+
                 return True, f"DevTest node implemented issue #{issue_id}, verified CI 100% Green, and auto-merged PR #{pr_number} into main."
 
     elif ci_status == "FAIL":
