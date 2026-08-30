@@ -1666,3 +1666,135 @@ async def test_widgets_empty_state_transitions(tmp_path: Path):
         assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
 
 
+@pytest.mark.asyncio
+async def test_dashboard_scenario_idempotent_project_scoped_log_hydration(tmp_path: Path):
+    """
+    Scenario: Idempotent Project-Scoped Log Hydration
+      Given the user switches project selection from "graph-engineering" to "crosstrainingapp"
+      When the project selection event fires
+      Then the dashboard must retrieve "crosstrainingapp's" scoped log buffer from ProjectLogBufferManager
+      And clear the RichLog pane and populate it with the retrieved historical lines
+      And incoming live logs from other projects must accumulate in the background without polluting the active view
+    """
+    from orchestrator.config import ProjectConfig, SettingsConfig
+    from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
+
+    ProjectLogBufferManager.reset()
+
+    repo_ge = tmp_path / "graph-engineering"
+    repo_ge.mkdir()
+    repo_ct = tmp_path / "crosstrainingapp"
+    repo_ct.mkdir()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=repo_ct),
+            ProjectConfig(name="graph-engineering", repo="org/graph-engineering", local_path=repo_ge),
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
+    )
+
+    log_handler = TextualLogHandler(maxlen=1000)
+    logger = logging.getLogger("orchestrator")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(log_handler)
+
+    # Seed historical logs
+    logger.info("[graph-engineering:architect] Historical GE story triage")
+    logger.info("[crosstrainingapp:supervisor] Historical CT watchdog check")
+
+    app = DashboardApp(config=config, log_handler=log_handler)
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+        await pilot.pause()
+
+        # Switch selection to graph-engineering (row 1 because alphabetical sort)
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.selected_project == "graph-engineering"
+
+        rendered_ge = [line.text for line in log_view.lines]
+        assert any("Historical GE story triage" in t for t in rendered_ge)
+        assert not any("Historical CT watchdog check" in t for t in rendered_ge)
+
+        # When user switches project selection to crosstrainingapp (row 0)
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.selected_project == "crosstrainingapp"
+
+        # Then RichLog clears and populates with crosstrainingapp logs
+        rendered_ct = [line.text for line in log_view.lines]
+        assert any("Historical CT watchdog check" in t for t in rendered_ct)
+        assert not any("Historical GE story triage" in t for t in rendered_ct)
+
+        # And incoming live logs from other projects accumulate in background without polluting active view
+        logger.info("[graph-engineering:devtest] Live GE test execution")
+        app._handle_harness_stream_line("  [dim cyan][graph-engineering:harness][/dim cyan] [dim]GE subprocess[/dim]")
+        await pilot.pause()
+
+        rendered_after_ge_live = [line.text for line in log_view.lines]
+        assert not any("Live GE test execution" in t for t in rendered_after_ge_live)
+        assert not any("GE subprocess" in t for t in rendered_after_ge_live)
+
+        # Incoming live logs from active project appear in active view
+        logger.info("[crosstrainingapp:devtest] Live CT test execution")
+        app._handle_harness_stream_line("  [dim cyan][crosstrainingapp:harness][/dim cyan] [dim]CT subprocess[/dim]")
+        await pilot.pause()
+
+        rendered_after_ct_live = [line.text for line in log_view.lines]
+        assert any("Live CT test execution" in t for t in rendered_after_ct_live)
+        assert any("CT subprocess" in t for t in rendered_after_ct_live)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_scenario_cold_start_disk_log_fallback(tmp_path: Path):
+    """
+    Scenario: Cold-Start Disk Log Fallback
+      Given project "crosstrainingapp" is selected but the orchestrator daemon was recently restarted (in-memory deque is empty)
+      When the UI requests the project logs
+      Then the log manager must fallback to tailing the last 100 lines from the latest disk log file in "~/.config/orchestrator/logs/crosstrainingapp/"
+      And display them in the RichLog pane with immediate historical context
+    """
+    from orchestrator.config import ProjectConfig, SettingsConfig
+    from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
+
+    ProjectLogBufferManager.reset()
+
+    logs_dir = tmp_path / "logs"
+    ct_log_dir = logs_dir / "crosstrainingapp" / "devtest"
+    ct_log_dir.mkdir(parents=True, exist_ok=True)
+
+    disk_log = ct_log_dir / "20260830_120000_devtest_run.log"
+    content = "\n".join([f"Cold-start disk line {i:03d}" for i in range(1, 151)])
+    disk_log.write_text(content, encoding="utf-8")
+
+    repo_ct = tmp_path / "crosstrainingapp"
+    repo_ct.mkdir()
+
+    config = GlobalConfig(
+        projects=[ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=repo_ct)],
+        settings=SettingsConfig(log_dir=str(logs_dir)),
+    )
+
+    log_handler = TextualLogHandler(maxlen=1000)
+    app = DashboardApp(config=config, log_handler=log_handler)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+        await pilot.pause()
+
+        # Trigger project selection
+        await pilot.press("down")
+        await pilot.pause()
+
+        rendered = [line.text for line in log_view.lines]
+        assert len(rendered) == 100
+        assert "Cold-start disk line 051" in rendered[0]
+        assert "Cold-start disk line 150" in rendered[-1]
+
+
+

@@ -310,3 +310,195 @@ def test_setup_logger_with_textual_handler(tmp_path: Path):
     assert len(handler.buffer) >= 1
     assert any("Core orchestrator worker started" in r.getMessage() for r in handler.records)
 
+
+# ---------------------------------------------------------------------------
+# Gherkin Acceptance Criteria Tests for ProjectLogBufferManager (Issue #91)
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_idempotent_project_scoped_log_hydration():
+    """
+    Scenario: Idempotent Project-Scoped Log Hydration
+      Given the user switches project selection from "graph-engineering" to "crosstrainingapp"
+      When the project selection event fires
+      Then the dashboard must retrieve "crosstrainingapp's" scoped log buffer from ProjectLogBufferManager
+      And clear the RichLog pane and populate it with the retrieved historical lines
+      And incoming live logs from other projects must accumulate in the background without polluting the active view
+    """
+    from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
+
+    ProjectLogBufferManager.reset()
+
+    handler = TextualLogHandler(maxlen=1000)
+    logger = logging.getLogger("orchestrator.test_scoped_hydration")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # Seed logs for graph-engineering
+    logger.info("[graph-engineering:architect] Starting INVEST story decomposition")
+    logger.info("[graph-engineering:devtest] Running pytest suite")
+
+    # Seed logs for crosstrainingapp
+    logger.info("[crosstrainingapp:supervisor] Watchdog health check OK")
+    logger.info("[crosstrainingapp:reviewer] PR #42 approved by gatekeeper")
+
+    # Verify ProjectLogBufferManager separated the logs
+    ge_logs = ProjectLogBufferManager.get_project_logs("graph-engineering")
+    assert len(ge_logs) == 2
+    assert any("INVEST story decomposition" in line for line in ge_logs)
+    assert any("Running pytest suite" in line for line in ge_logs)
+    assert not any("crosstrainingapp" in line for line in ge_logs)
+
+    ct_logs = ProjectLogBufferManager.get_project_logs("crosstrainingapp")
+    assert len(ct_logs) == 2
+    assert any("Watchdog health check OK" in line for line in ct_logs)
+    assert any("PR #42 approved" in line for line in ct_logs)
+    assert not any("graph-engineering" in line for line in ct_logs)
+
+    # Idempotent retrieval
+    ct_logs_2 = ProjectLogBufferManager.get_project_logs("crosstrainingapp")
+    assert ct_logs == ct_logs_2
+
+
+def test_scenario_cold_start_disk_log_fallback(tmp_path: Path):
+    """
+    Scenario: Cold-Start Disk Log Fallback
+      Given project "crosstrainingapp" is selected but the orchestrator daemon was recently restarted (in-memory deque is empty)
+      When the UI requests the project logs
+      Then the log manager must fallback to tailing the last 100 lines from the latest disk log file in "~/.config/orchestrator/logs/crosstrainingapp/"
+      And display them in the RichLog pane with immediate historical context
+    """
+    from orchestrator.logging import ProjectLogBufferManager, tail_latest_project_logs
+
+    ProjectLogBufferManager.reset()
+
+    # Create mock disk structure
+    logs_root = tmp_path / "logs"
+    ct_dir = logs_root / "crosstrainingapp" / "devtest"
+    ct_dir.mkdir(parents=True, exist_ok=True)
+
+    # Older log file
+    older_file = ct_dir / "20260829_120000_devtest_run.log"
+    older_file.write_text("Older log line 1\nOlder log line 2\n", encoding="utf-8")
+    import os
+    os.utime(older_file, (time.time() - 3600, time.time() - 3600))
+
+    # Latest log file with 150 lines
+    latest_file = ct_dir / "20260830_120000_devtest_run.log"
+    content = "\n".join([f"Execution trace line {i:03d}" for i in range(1, 151)])
+    latest_file.write_text(content, encoding="utf-8")
+    os.utime(latest_file, (time.time(), time.time()))
+
+    # When UI requests project logs with cold start (empty in-memory deque)
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS.get("crosstrainingapp", [])) == 0
+    logs = ProjectLogBufferManager.get_project_logs("crosstrainingapp", log_dir=logs_root, max_lines=100)
+
+    # Then it tails the last 100 lines from the latest log file
+    assert len(logs) == 100
+    assert logs[0] == "Execution trace line 051"
+    assert logs[-1] == "Execution trace line 150"
+    assert "Older log line" not in logs
+
+    # Module-level function also works identically
+    direct_logs = tail_latest_project_logs("crosstrainingapp", log_dir=logs_root, max_lines=100)
+    assert len(direct_logs) == 100
+    assert direct_logs[0] == "Execution trace line 051"
+
+
+def test_tail_latest_project_logs_empty_or_nonexistent(tmp_path: Path):
+    """Asserts tail_latest_project_logs gracefully returns [] on empty or missing directories."""
+    from orchestrator.logging import tail_latest_project_logs
+
+    # Nonexistent log_dir
+    assert tail_latest_project_logs("nonexistent", log_dir=tmp_path / "does_not_exist") == []
+
+    # Empty project directory
+    empty_proj = tmp_path / "logs" / "empty_proj"
+    empty_proj.mkdir(parents=True)
+    assert tail_latest_project_logs("empty_proj", log_dir=tmp_path / "logs") == []
+
+    # Empty project name
+    assert tail_latest_project_logs("", log_dir=tmp_path / "logs") == []
+
+
+def test_project_log_buffer_manager_extract_project_name():
+    """Asserts robust project name extraction across various log record types and string tags."""
+    from orchestrator.logging import ProjectLogBufferManager
+
+    # 1. String with [project:node]
+    assert ProjectLogBufferManager.extract_project_name("[crosstrainingapp:supervisor] Error occurred") == "crosstrainingapp"
+
+    # 2. String with [project]
+    assert ProjectLogBufferManager.extract_project_name("[graph-engineering] Polling 5 issues") == "graph-engineering"
+
+    # 3. String with Rich markup [dim cyan][project:node][/dim cyan]
+    assert ProjectLogBufferManager.extract_project_name("  [dim cyan][ws-gym:devtest][/dim cyan] Tests running") == "ws-gym"
+
+    # 4. Formatted log string with log level [INFO] preceding project tag
+    assert ProjectLogBufferManager.extract_project_name("12:00:00 [INFO] [crosstrainingapp:architect] Story ready") == "crosstrainingapp"
+
+    # 5. LogRecord with attribute project_name
+    rec1 = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="Msg", args=(), exc_info=None)
+    setattr(rec1, "project_name", "alpha-project")
+    assert ProjectLogBufferManager.extract_project_name(rec1) == "alpha-project"
+
+    # 6. LogRecord with attribute project (object with .name)
+    class DummyProj:
+        name = "beta-project"
+    rec2 = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="Msg", args=(), exc_info=None)
+    setattr(rec2, "project", DummyProj())
+    assert ProjectLogBufferManager.extract_project_name(rec2) == "beta-project"
+
+    # 7. Unscoped general log record
+    rec3 = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="Daemon starting", args=(), exc_info=None)
+    assert ProjectLogBufferManager.extract_project_name(rec3) is None
+
+
+def test_project_log_buffer_manager_bounded_capacity():
+    """Asserts per-project buffer respects 500 maxlen and global buffer respects 1000 maxlen."""
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    for i in range(600):
+        ProjectLogBufferManager.add_line(f"Line {i}", project_name="proj-bounded")
+
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"]) == 500
+    assert ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"][0] == "Line 100"
+    assert ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"][-1] == "Line 599"
+
+    # Global buffer has all 600
+    assert len(ProjectLogBufferManager.GLOBAL_LOG_BUFFER) == 600
+
+    # Add 500 more to test global buffer 1000 maxlen
+    for i in range(600, 1100):
+        ProjectLogBufferManager.add_line(f"Line {i}", project_name="other-proj")
+
+    assert len(ProjectLogBufferManager.GLOBAL_LOG_BUFFER) == 1000
+    assert ProjectLogBufferManager.GLOBAL_LOG_BUFFER[0] == "Line 100"
+    assert ProjectLogBufferManager.GLOBAL_LOG_BUFFER[-1] == "Line 1099"
+
+
+def test_project_log_buffer_manager_clear_and_reset():
+    """Asserts clear(project) and reset() selectively or completely clear buffers."""
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+    ProjectLogBufferManager.add_line("P1 log", project_name="p1")
+    ProjectLogBufferManager.add_line("P2 log", project_name="p2")
+
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS["p1"]) == 1
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS["p2"]) == 1
+
+    # Clear specific project
+    ProjectLogBufferManager.clear(project_name="p1")
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS["p1"]) == 0
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS["p2"]) == 1
+
+    # Global reset
+    ProjectLogBufferManager.reset()
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS) == 0
+    assert len(ProjectLogBufferManager.GLOBAL_LOG_BUFFER) == 0
+
+

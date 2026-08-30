@@ -39,10 +39,12 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`), quota limits (`HarnessQuotaWidget`), and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
 3. **Reactive Project Selection**:
    - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.
-4. **Filtered & Append-Only Bounded Log Stream (`RichLog`)**:
+4. **Project-Scoped Log Hydration & Bounded Stream (`ProjectLogBufferManager` & `RichLog`)**:
    - Captures core root `orchestrator` daemon events via `TextualLogHandler` and live agent subprocess outputs.
-   - Backed by a bounded `collections.deque(maxlen=1000)` buffer to prevent memory growth or UI freezes.
+   - Backed by `ProjectLogBufferManager` maintaining a global bounded buffer (`GLOBAL_LOG_BUFFER: deque(maxlen=1000)`) and project-scoped buffers (`PROJECT_BUFFERS: dict[str, deque(maxlen=500)]`) to prevent memory growth or UI freezes.
    - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
+   - **Idempotent Project-Scoped Log Hydration**: When the operator switches project selection in the top table, `DashboardApp` clears the `RichLog` pane and populates it with the selected project's scoped buffer, while live incoming logs from other background projects accumulate safely in their respective buffers without polluting the active view.
+   - **Cold-Start Disk Log Fallback**: When in-memory deques are empty upon daemon restart, `ProjectLogBufferManager.tail_latest_project_logs` uses pure-Python recursive disk tailing (`pathlib.Path.rglob`) to load the last 100 lines from the latest execution log file under `~/.config/orchestrator/logs/<project>/<node>/*.log`, providing immediate historical context.
    - **Persistent Append-Only Stream**: Historical log entries persist indefinitely across 2.0s table refresh ticks without calling `clear()`.
    - **Interactive Auto-Scroll & Clear Controls**: Pressing `Space` toggles auto-scrolling (`[Auto-Scroll: ON/OFF]`) allowing the operator to freeze scroll position to inspect historical traces, while `Ctrl+L` manually clears the buffer on demand.
 5. **Native Dual-Level Async Concurrency**:

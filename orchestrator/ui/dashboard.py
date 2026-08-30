@@ -15,7 +15,7 @@ from textual.widgets.data_table import RowDoesNotExist
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import TextualLogHandler
+from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
 from orchestrator.quota import QuotaManager
 from orchestrator.ui.widgets import (
     AnomalyAlertsWidget,
@@ -85,6 +85,7 @@ class DashboardApp(App):
         state_manager: Optional[StateManager] = None,
         log_handler: Optional[TextualLogHandler] = None,
         quota_manager: Optional[QuotaManager] = None,
+        buffer_manager: Optional[ProjectLogBufferManager] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -92,6 +93,11 @@ class DashboardApp(App):
         self.state_manager = state_manager
         self.log_handler = log_handler
         self.quota_manager = quota_manager
+        self.buffer_manager = (
+            buffer_manager
+            or (log_handler.buffer_manager if log_handler and getattr(log_handler, "buffer_manager", None) else None)
+            or ProjectLogBufferManager()
+        )
         self.selected_project: Optional[str] = None
         self._last_bottom_pane_fingerprint: Optional[str] = None
         self.is_draining: bool = False
@@ -129,10 +135,6 @@ class DashboardApp(App):
 
         if self.log_handler:
             self.log_handler.callback = self._handle_log_record
-            log_view = self.query_one(RichLog)
-            for rec in self.log_handler.records:
-                formatted = self.log_handler.format(rec)
-                log_view.write(formatted)
 
         # Register dashboard to receive live harness stream lines
         AsyncHarnessAdapter.register_stream_listener(self._handle_harness_stream_line)
@@ -140,11 +142,70 @@ class DashboardApp(App):
         # Initial render of project status table
         await self.update_projects_table()
 
+        if self.selected_project:
+            await self.hydrate_project_logs(self.selected_project)
+        elif self.log_handler:
+            log_view = self.query_one(RichLog)
+            for rec in self.log_handler.records:
+                formatted = self.log_handler.format(rec)
+                log_view.write(formatted)
+
         # Set non-blocking 2.0s refresh interval
         self.set_interval(2.0, self.update_projects_table)
 
+    async def hydrate_project_logs(self, project_name: Optional[str]) -> None:
+        """
+        Clears the RichLog pane and populates it with scoped logs from ProjectLogBufferManager.
+        Falls back to disk tailing if in-memory buffer is empty.
+        """
+        try:
+            log_view = self.query_one("#log_view", RichLog)
+        except Exception:
+            return
+
+        log_dir = self.config.settings.resolved_log_dir if (self.config and self.config.settings) else None
+
+        buf = ProjectLogBufferManager.PROJECT_BUFFERS.get(project_name) if project_name else None
+        if buf and len(buf) > 0:
+            lines = list(buf)
+        else:
+            disk_lines = (
+                ProjectLogBufferManager.tail_latest_project_logs(
+                    project_name=project_name,
+                    log_dir=log_dir,
+                    max_lines=100,
+                )
+                if project_name
+                else []
+            )
+            if disk_lines:
+                lines = disk_lines
+            elif self.log_handler and self.log_handler.records:
+                lines = [
+                    self.log_handler.format(rec)
+                    for rec in self.log_handler.records
+                    if (
+                        not project_name
+                        or ProjectLogBufferManager.extract_project_name(rec) in (None, project_name)
+                    )
+                ]
+            else:
+                lines = ProjectLogBufferManager.get_project_logs(
+                    project_name=project_name,
+                    log_dir=log_dir,
+                    max_lines=100,
+                )
+
+        log_view.clear()
+        for line in lines:
+            log_view.write(line)
+
     def _handle_log_record(self, record: logging.LogRecord, formatted: str) -> None:
         """Callback invoked by TextualLogHandler on new log emissions."""
+        rec_project = ProjectLogBufferManager.extract_project_name(record)
+        if self.selected_project and rec_project and rec_project != self.selected_project:
+            return
+
         try:
             log_view = self.query_one(RichLog)
             self.call_from_thread(log_view.write, formatted)
@@ -157,6 +218,12 @@ class DashboardApp(App):
 
     def _handle_harness_stream_line(self, line: str) -> None:
         """Callback invoked by AsyncHarnessAdapter on live subprocess stream emissions."""
+        line_project = ProjectLogBufferManager.extract_project_name(line)
+        self.buffer_manager.add_line(line, project_name=line_project)
+
+        if self.selected_project and line_project and line_project != self.selected_project:
+            return
+
         try:
             log_view = self.query_one(RichLog)
             self.call_from_thread(log_view.write, line)
@@ -285,6 +352,7 @@ class DashboardApp(App):
         if project_name:
             if project_name != self.selected_project:
                 self.selected_project = project_name
+                await self.hydrate_project_logs(project_name)
                 await self._update_bottom_panes(project_name, force=True)
 
     async def _update_bottom_panes(self, project_name: Optional[str], force: bool = False) -> None:
