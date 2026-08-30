@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - Added `architect-approved` and `needs-refactor` to `DEFAULT_MANAGED_LABELS` in `orchestrator/config.py` to ensure complete workflow taxonomy synchronization across local and remote repositories.
+- Added **Keyed In-Place Row Updates & Cell Diffing for Widgets (`orchestrator/ui/widgets.py`, `tests/test_dashboard.py`)**: Replaced destructive `self.clear()` table reconstructions in `SDLCProgressWidget`, `AnomalyAlertsWidget`, and `HarnessQuotaWidget` with non-destructive, keyed in-place cell diffing (`_apply_keyed_diff`). Individual rows are added, updated in-place via bounds-validated `update_cell()`, or removed individually, eliminating UI flicker and preserving row identity and cursor position across background SQLite polling ticks (Issue #72, Closes #72).
 
 
 ## [2.0.0] - 2026-08-30
