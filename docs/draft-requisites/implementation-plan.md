@@ -1,133 +1,105 @@
-The root cause of the empty log pane when selecting a subtask is a misaligned event delegation in the Textual framework, combined with the lack of a persistent project-scoped log buffer.
-
 ### Phase 1: Functional & DX (Developer Experience) Review
 
-**Workflow Analysis & Multi-Pane TUI Journey**
+**Workflow Analysis & SDLC Observability Journey**
+Transforming the `SDLCProgressWidget` from a flat list into a hierarchically ordered, PR-aware project management board requires deterministic state mapping. The workflow operates as follows:
 
-* **The Bug:** Textual data tables emit `DataTable.RowSelected` and `DataTable.RowHighlighted` events upon interaction. Currently, clicking subtask `#455` in the SDLC widget either triggers a destructive `rich_log.clear()` or bubbles up an event that fails to map to a valid log stream.
-* **The Fix:** The `RichLog` pane must be completely decoupled from the *subtask* selection. Its state should be exclusively bound to the *project* selection (e.g., `crosstrainingapp`). Clicking any row in the SDLC widget must be a UI-isolated, non-destructive action.
+1. **Bulk Ingestion:** `orchestrator/poller.py` fetches open issues and cross-references their linked Pull Requests via a single bulk API call (e.g., GraphQL or `--json statusCheckRollup`) to circumvent GitHub secondary rate limits.
+2. **Non-Destructive Persistence:** Data is upserted into `orchestrator/db.py` (`sdlc_items`). The schema is updated safely via `ALTER TABLE` dynamically at startup, strictly prohibiting table drops to preserve historical Blackboard state.
+3. **Smart Visibility Rendering:** `orchestrator/ui/widgets.py` groups subtasks under parent stories using `sequence_order ASC`. To preserve terminal UX, updates are applied via stable row keys (`update_cell`), preventing the cursor from jumping during the 2.0s refresh ticks.
 
 **Edge Cases & Resilience Strategy**
 
-* **Cold-Start Hydration:** When a project is selected but the orchestrator was just restarted, the in-memory log buffer is empty. The system must implement a disk-tail fallback to read the last 100 lines of `~/.config/orchestrator/logs/<project_name>/*.log`.
-* **Event Bubbling:** Textual events bubble up the DOM. If the SDLC widget's highlight event lacks an explicit handler with `event.stop()`, it may trigger the parent container's refresh logic, causing UI flicker.
-* **Dual Stream Ingestion:** Logs originate from two sources: root Python loggers (`orchestrator.*`) and active agent subprocess stdout (via `harness.py`). Both streams must be explicitly tagged with the `project_name` and routed to the same project-scoped memory buffer.
+* **The Orphaned Subtask Trap:** If a parent story is manually closed but its subtasks remain active, filtering strictly by `parent.state == 'closed'` will invisibly drop the subtasks. **Strategy:** Apply the "Smart Visibility Rule"—a story tree is hidden *only* if the parent AND 100% of its child subtasks are closed.
+* **API Rate Exhaustion:** Polling individual PR statuses per issue triggers rate limits. **Strategy:** A single bulk fetch per polling cycle must retrieve PR state (`OPEN`/`MERGED`) and CI status (`PASS`/`PENDING`/`FAIL`) for all linked items.
+* **Schema Evolution on Restart:** Abrupt terminations or updates must not wipe `sdlc_items`. **Strategy:** Use `PRAGMA table_info(sdlc_items)` in `init_db()` to safely inject `pr_status` and `pr_ci_details` if missing.
+* **TUI Cursor Stutter:** **Strategy:** Assign stable text keys (e.g., `story_454`, `subtask_455`) in Textual's `DataTable` to ensure `update_cell` modifies values in-place without triggering `RowHighlighted` resets.
 
 **Acceptance Criteria (BDD Format)**
 
 ```gherkin
-Scenario: Subtask navigation does not destructively clear active logs
-  Given the TUI dashboard is active and project "crosstrainingapp" is selected
-  And the "Logs" pane is streaming execution output for the "devtest" node
-  When the user clicks or navigates through subtasks (e.g., #455) in the SDLC table
-  Then the "Logs" pane must NOT clear its contents
-  And it must continuously append the active node's live execution without interruption.
+Scenario: Smart Visibility rendering prevents orphaned subtask loss
+  Given a parent story is marked "closed" but contains active child subtasks
+  When the UI fetches the SDLC hierarchy from SQLite
+  Then the query must return the parent story and the open subtasks
+  And the TUI must render the parent as a root node to maintain hierarchical context for the active subtasks.
 
-Scenario: Idempotent Log Hydration on Project Selection
-  Given the user switches focus from "graph-engineering" to "crosstrainingapp"
-  When the project selection event fires
-  Then the dashboard must retrieve "crosstrainingapp"'s scoped log buffer
-  And if the memory buffer is empty, it must tail the latest disk log for that project
-  And populate the "RichLog" pane.
+Scenario: Single-pass bulk fetching prevents GitHub rate limits
+  Given the background poller initiates a sync cycle for "graph-engineering"
+  When fetching issue and Pull Request states
+  Then the poller must execute a single bulk API query to retrieve PR linkages, state, and CI status rollups
+  And it must strictly avoid individual per-issue PR queries.
+
+Scenario: In-place TUI diffing maintains cursor stability
+  Given the TUI dashboard is rendering the hierarchical SDLC tree
+  And the operator has highlighted a subtask at row index 4
+  When the 2.0s background refresh updates the PR status column
+  Then the DataTable must use stable string keys to apply "update_cell"
+  And the cursor must remain locked at row index 4 without visual stutter.
+
+Scenario: Non-destructive database schema migration
+  Given a previous version of the SQLite database exists without PR status columns
+  When the orchestrator daemon initializes
+  Then it must execute an "ALTER TABLE" command to append the new columns
+  And existing SDLC item tracking data must remain completely intact.
 
 ```
 
 **CLI UX Guidelines**
 
-* **Log Tagging:** Standardize output in `orchestrator/logging.py` to always prefix the project and node: `[crosstrainingapp|devtest] Running pytest for #455...`.
-* **Visual Scope Indicator:** Update the `RichLog` border or tab title dynamically to indicate the active scope: `Logs [Scope: crosstrainingapp]` to confirm to the operator exactly which node's logs they are reading.
+* **Hierarchical Formatting:** Use Unicode structural characters: `├─` for standard children, `└─` for the terminal child.
+* **PR Status Badges:** Utilize Rich markup for the PR column: `[green]MERGED[/green]`, `[yellow]PENDING[/yellow]`, `[red]FAIL[/red]`.
+* **Empty States:** If no active stories exist, display a dimmed fallback row: `[dim]No active SDLC items found.[/dim]`.
 
 ---
 
 ### Phase 2: Architectural & Implementation Plan
 
-**Codebase Impact & Component Updates**
+**Codebase Impact**
 
 | File Path | Action | Description / Responsibility |
 | --- | --- | --- |
-| `orchestrator/logging.py` | **Modify** | Implement `ProjectLogBufferManager` using a `collections.deque(maxlen=500)` per project and a disk-tailing fallback helper. |
-| `orchestrator/harness.py` | **Modify** | Update `AsyncHarnessAdapter._stream_listeners` signature to pass `(project_name, line)` to route subprocess stdout accurately. |
-| `orchestrator/ui/dashboard.py` | **Modify** | Bind `RichLog` to the `ProjectLogBufferManager`. Add explicit event suppression for `#sdlc_widget` interactions. |
+| `orchestrator/db.py` | **Modify** | Safely alter `sdlc_items` schema. Add `get_active_sdlc_hierarchy()` enforcing the "Smart Visibility Rule". |
+| `orchestrator/poller.py` | **Modify** | Update `poll_project_sdlc_items` to extract PR states via bulk GitHub API queries (GraphQL or batched REST). |
+| `orchestrator/ui/widgets.py` | **Modify** | Refactor `SDLCProgressWidget` to parse tree logic, apply stable row keys, and format Unicode tree characters. |
 
-**Technical Constraints & Safeguards**
+**Technical Constraints**
 
-* **Memory Bounding:** Do not store unbounded logs in memory. Use `defaultdict(lambda: deque(maxlen=500))` to prevent memory leaks during long-running daemon sessions.
-* **Thread-Safe TUI Updates:** Logs emitted from async worker loops must be passed to the Textual UI thread using `app.call_from_thread(rich_log.write, formatted_message)`.
-* **Strict Selectors:** Ensure event decorators target the exact DOM ID. Use `@on(DataTable.RowHighlighted, "#sdlc_widget")` to trap the SDLC table events and call `event.stop()`.
+* **Database Concurrency:** All SQLite operations must execute asynchronously (`aiosqlite`) with `PRAGMA journal_mode=WAL` to prevent read locks during UI refreshes.
+* **Textual DOM Boundaries:** Never use `self.clear()` on the `DataTable` during polling updates.
 
 **Execution Steps**
 
-1. **Buffer Management:** In `orchestrator/logging.py`, build `ProjectLogBufferManager`. Implement `.append(project_name, line)` and `.get_logs(project_name)`. Include a fallback to `tail -n 100` on the project's disk log directory if the memory deque is empty.
-2. **Harness Routing:** In `orchestrator/harness.py`, modify the subprocess stream broadcaster to inject the `project_name` into every emitted log line listener callback.
-3. **Event Suppression:** In `orchestrator/ui/dashboard.py`, add an explicit handler for `#sdlc_widget` to consume clicks without triggering log clears:
-```python
-@on(DataTable.RowSelected, "#sdlc_widget")
-@on(DataTable.RowHighlighted, "#sdlc_widget")
-def on_sdlc_interaction(self, event: DataTable.RowHighlighted) -> None:
-    event.stop()  # Isolate event; prevent log wiping
-
-```
+1. **Database Schema Safeties (`orchestrator/db.py`)**
+* Inspect existing columns via `PRAGMA table_info(sdlc_items)`.
+* Safely execute `ALTER TABLE sdlc_items ADD COLUMN pr_status TEXT DEFAULT NULL;` if missing.
+* Implement `get_active_sdlc_hierarchy(project_name)` using a `LEFT JOIN` or nested grouping that returns parents if `parent.state != 'closed' OR child.state != 'closed'`.
 
 
-4. **Log Hydration:** In `orchestrator/ui/dashboard.py`, update the `#projects_table` selection handler. When `active_project` changes, call `rich_log.clear()`, fetch the buffer via `ProjectLogBufferManager.get_logs(new_project)`, and write the lines to the UI.
+2. **Poller Bulk Ingestion (`orchestrator/poller.py`)**
+* Update the GitHub fetch mechanism to request `statusCheckRollup` and `pull_request` metadata in a single pass.
+* Parse `Parent: #<id>` from issue bodies.
+* Map the extracted CI/PR statuses to the issues and execute `db.upsert_sdlc_item()`.
 
----
 
-# 📋 EPIC: Project-Scoped Reactive Log Tailing & Non-Destructive Navigation
+3. **Stable Widget Rendering (`orchestrator/ui/widgets.py`)**
+* Update `SDLCProgressWidget` initialization to include the "PR Status" column.
+* Map incoming hierarchy data to stable row keys (e.g., `f"issue_{item.id}"`).
+* Apply Unicode prefixes (`├─ ` / `└─ `) dynamically based on the subtask's index within the parent's grouped array.
+* Execute `table.update_cell(row_key, col_id, value)` for all updates.
 
-## 📖 Context & Scope
 
-In the `orchestrator watch` TUI dashboard, interacting with the SDLC subtask table inadvertently interrupts or clears the `RichLog` pane. Operators need the log pane to persistently tail the active node's execution (e.g., `devtest`) for the selected project, regardless of where they click in the subtask hierarchy.
-
-This requires implementing a thread-safe `ProjectLogBufferManager`, routing both Python loggers and async subprocess streams into project-scoped queues, and explicitly isolating Textual UI events to prevent destructive rendering.
-
-## 🧑‍💻 User Story
-
-**As a** Graph Engineering Platform Operator,
-
-**I want** the TUI log pane to continuously tail the active node's output for my selected project and ignore clicks within the SDLC subtask table,
-
-**So that** I can monitor live execution output persistently without the logs wiping or resetting when I inspect different user stories.
-
-## ✅ Acceptance Criteria (BDD Format)
-
-### AC 1: Non-Destructive SDLC Subtask Navigation
-
-* **Given** the dashboard is actively monitoring the `crosstrainingapp` project,
-* **And** the `RichLog` pane contains live execution logs for node `devtest`,
-* **When** the user clicks or highlights subtask `#455` (or any row) in `#sdlc_widget`,
-* **Then** the `RichLog` pane must NOT execute a `.clear()` operation,
-* **And** the background live stream must continue appending to the pane seamlessly.
-
-### AC 2: Idempotent Project-Scoped Hydration
-
-* **Given** the user selects a new project row in the top `#projects_table`,
-* **When** the selection event fires,
-* **Then** the UI must retrieve the scoped log buffer strictly for that project,
-* **And** clear the `RichLog` pane and populate it with the retrieved historical buffer.
-
-### AC 3: Cold-Start Disk Fallback
-
-* **Given** a project is selected but the orchestrator daemon was recently restarted (in-memory deque is empty),
-* **When** the UI requests the project logs,
-* **Then** the log manager must fallback to tailing the last 100 lines from the project's log directory on disk,
-* **And** display them in the `RichLog` pane to provide immediate historical context.
-
-### AC 4: Complete Stream Capture
-
-* **Given** an agent node executes an external LLM CLI harness,
-* **When** the subprocess emits stdout/stderr streams,
-* **Then** the `AsyncHarnessAdapter` must explicitly tag those streams with the `project_name`,
-* **And** route them into the corresponding project's memory buffer so they appear in the TUI.
+4. **Validation (`tests/test_widgets.py` & `tests/test_db.py`)**
+* Add a test mocking a closed parent with an open child to ensure `get_active_sdlc_hierarchy` returns both.
+* Add a test verifying `SDLCProgressWidget` correctly applies the `└─` prefix to the final item in a subtask list.
 
 ---
 
 ## 🔗 GitHub Reference
-- **GitHub Issue:** [Issue #90](https://github.com/AntaresAndBharani/graph-engineering/issues/90)
+- **GitHub Issue:** [Issue #95](https://github.com/AntaresAndBharani/graph-engineering/issues/95)
 - **Label:** `needs-triage`
 
 ## 🔨 Subtasks
-- [ ] feat(logging): ProjectLogBufferManager with in-memory deque and cross-platform disk tailing
-- [ ] feat(harness): inject project_name into AsyncHarnessAdapter stream listener callbacks
-- [ ] feat(ui): project-scoped log hydration and #sdlc_widget event isolation in DashboardApp
-- [ ] test(ui, logging): comprehensive BDD integration tests for project-scoped log streaming
+- [ ] feat(db): schema migration for pr_status and get_active_sdlc_hierarchy in StateManager
+- [ ] feat(poller): single-pass bulk PR and CI statusCheckRollup extraction in poll_project_sdlc_items
+- [ ] feat(ui): hierarchical tree rendering and PR status badge display in SDLCProgressWidget
+- [ ] test(ui, poller, db): comprehensive unit and BDD tests for SDLC hierarchy and smart visibility
