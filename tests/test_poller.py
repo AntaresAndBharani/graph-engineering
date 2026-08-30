@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from pathlib import Path
@@ -164,3 +164,232 @@ async def test_scenario_non_blocking_sdlc_sync_failure(tmp_path: Path, monkeypat
     items = await poller.poll_project_sdlc_items(project, failing_state_manager)
     assert len(items) == 1
     assert items[0]["issue_number"] == 5
+
+
+def test_derive_ci_status_pure_function():
+    """
+    Unit tests for derive_ci_status pure function across various rollup formats.
+    """
+    # 1. None or empty rollup
+    assert poller.derive_ci_status(None) is None
+    assert poller.derive_ci_status([]) is None
+    assert poller.derive_ci_status({}) is None
+
+    # 2. All PASS
+    rollup_pass = [
+        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "lint", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+        {"name": "build", "status": "COMPLETED", "conclusion": "SKIPPED"},
+    ]
+    assert poller.derive_ci_status(rollup_pass) == "PASS"
+
+    # 3. Any FAIL (conclusion)
+    rollup_fail = [
+        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
+    ]
+    assert poller.derive_ci_status(rollup_fail) == "FAIL"
+
+    rollup_timeout = [
+        {"name": "e2e", "status": "COMPLETED", "conclusion": "TIMED_OUT"},
+    ]
+    assert poller.derive_ci_status(rollup_timeout) == "FAIL"
+
+    rollup_error_state = [
+        {"name": "ci", "status": "COMPLETED", "state": "ERROR"},
+    ]
+    assert poller.derive_ci_status(rollup_error_state) == "FAIL"
+
+    # 4. Any RUNNING / PENDING
+    rollup_running = [
+        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "lint", "status": "IN_PROGRESS", "conclusion": ""},
+    ]
+    assert poller.derive_ci_status(rollup_running) == "RUNNING"
+
+    rollup_queued = [
+        {"name": "test", "status": "QUEUED", "conclusion": None},
+    ]
+    assert poller.derive_ci_status(rollup_queued) == "RUNNING"
+
+    # 5. Nested contexts dictionary
+    rollup_dict_contexts = {
+        "contexts": [
+            {"name": "unit", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"name": "integration", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]
+    }
+    assert poller.derive_ci_status(rollup_dict_contexts) == "PASS"
+
+    # 6. Nested nodes dictionary
+    rollup_dict_nodes = {
+        "nodes": [
+            {"name": "check", "status": "COMPLETED", "conclusion": "FAILURE"},
+        ]
+    }
+    assert poller.derive_ci_status(rollup_dict_nodes) == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_bulk_subprocess_output(monkeypatch):
+    """
+    Verifies fetch_open_prs executes gh CLI requesting state and statusCheckRollup,
+    parsing output correctly in a single bulk pass.
+    """
+    import json
+    from unittest.mock import MagicMock
+
+    sample_output = [
+        {
+            "number": 459,
+            "title": "feat(core): subtask implementation",
+            "body": "Closes #455\nParent: #454",
+            "headRefName": "feat/issue-455",
+            "state": "OPEN",
+            "statusCheckRollup": [
+                {"name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+        },
+        {
+            "number": 460,
+            "title": "fix(core): bug fix",
+            "body": "Closes #456",
+            "headRefName": "fix/issue-456",
+            "state": "OPEN",
+            "statusCheckRollup": [
+                {"name": "test", "status": "IN_PROGRESS", "conclusion": ""},
+            ],
+        },
+    ]
+
+    mock_process = MagicMock()
+    mock_process.returncode = 0
+    mock_process.communicate = AsyncMock(
+        return_value=(json.dumps(sample_output).encode("utf-8"), b"")
+    )
+
+    captured_cmd = []
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        captured_cmd.extend(args)
+        return mock_process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_subprocess_exec)
+
+    prs = await poller.fetch_open_prs("AntaresAndBharani/graph-engineering", limit=10)
+
+    assert len(prs) == 2
+    assert prs[0]["number"] == 459
+    assert prs[0]["state"] == "OPEN"
+    assert len(prs[0]["statusCheckRollup"]) == 2
+    assert prs[1]["number"] == 460
+    assert prs[1]["statusCheckRollup"][0]["status"] == "IN_PROGRESS"
+
+    # Verify command requested state and statusCheckRollup
+    assert "gh" in captured_cmd
+    assert "pr" in captured_cmd
+    assert "list" in captured_cmd
+    json_idx = captured_cmd.index("--json")
+    json_fields = captured_cmd[json_idx + 1]
+    assert "state" in json_fields
+    assert "statusCheckRollup" in json_fields
+
+
+@pytest.mark.asyncio
+async def test_scenario_single_pass_bulk_pr_and_ci_rollup_display(tmp_path: Path, monkeypatch):
+    """
+    Scenario 3: Single-Pass Bulk PR & CI Rollup Display
+      Given subtask #455 has an associated open Pull Request #459
+      And GitHub Actions CI checks for PR #459 are all passing
+      When the background poller executes a sync cycle
+      Then it must extract PR #459 and CI status "PASS" in a single bulk PR query
+      And it must persist pr_status="OPEN" and pr_ci_details="PASS" for subtask #455
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=tmp_path / "crosstrainingapp",
+    )
+
+    mock_issues = [
+        {
+            "number": 454,
+            "title": "Story: Email Password Setup",
+            "state": "OPEN",
+            "labels": [{"name": "architect-processed"}],
+            "body": "User Story\n\n## Subtasks\n- [ ] #455\n- [ ] #456",
+            "updatedAt": "2026-08-30T10:00:00Z",
+        },
+        {
+            "number": 455,
+            "title": "Subtask: Extract modular dialog",
+            "state": "OPEN",
+            "labels": [{"name": "dev-implemented"}],
+            "body": "Subtask implementation.\n\nParent: #454",
+            "updatedAt": "2026-08-30T10:05:00Z",
+        },
+        {
+            "number": 456,
+            "title": "Subtask: Sanitize email input",
+            "state": "OPEN",
+            "labels": [{"name": "ready-for-dev"}],
+            "body": "Subtask implementation.\n\nParent: #454",
+            "updatedAt": "2026-08-30T10:10:00Z",
+        },
+    ]
+
+    mock_prs = [
+        {
+            "number": 459,
+            "title": "feat(auth): extract modular dialog",
+            "headRefName": "feat/issue-455",
+            "body": "Closes #455\nParent: #454",
+            "state": "OPEN",
+            "statusCheckRollup": [
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(poller, "fetch_all_open_issues", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=mock_prs))
+
+    # Run poller sweep
+    items = await poller.poll_project_sdlc_items(project, state_manager)
+
+    assert len(items) == 3
+
+    # Check subtask #455
+    subtask_455 = next(item for item in items if item["issue_number"] == 455)
+    assert subtask_455["parent_issue_id"] == 454
+    assert subtask_455["item_type"] == "SUBTASK"
+    assert subtask_455["linked_pr"] == 459
+    assert subtask_455["pr_status"] == "OPEN"
+    assert subtask_455["pr_ci_details"] == "PASS"
+
+    # Check subtask #456 (no PR linked)
+    subtask_456 = next(item for item in items if item["issue_number"] == 456)
+    assert subtask_456["parent_issue_id"] == 454
+    assert subtask_456["linked_pr"] is None
+    assert subtask_456["pr_status"] is None
+    assert subtask_456["pr_ci_details"] is None
+
+    # Check story #454
+    story_454 = next(item for item in items if item["issue_number"] == 454)
+    assert story_454["parent_issue_id"] is None
+    assert story_454["item_type"] == "STORY"
+
+    # Verify persistence in SQLite
+    stored_items = await state_manager.get_sdlc_items("crosstrainingapp")
+    stored_455 = next(s for s in stored_items if s["issue_number"] == 455)
+    assert stored_455["parent_issue_id"] == 454
+    assert stored_455["linked_pr"] == 459
+    assert stored_455["pr_status"] == "OPEN"
+    assert stored_455["pr_ci_details"] == "PASS"
+

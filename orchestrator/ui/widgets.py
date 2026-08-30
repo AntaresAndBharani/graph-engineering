@@ -86,17 +86,54 @@ def _apply_keyed_diff(
         table.refresh()
 
 
+def format_pr_status_badge(
+    linked_pr: Optional[int],
+    pr_status: Optional[str] = None,
+    pr_ci_details: Optional[str] = None,
+) -> str:
+    """
+    Formats PR status badge with Rich color tags:
+    - PASS: #<pr> [green]PASS[/green]
+    - FAIL: #<pr> [red]FAIL[/red]
+    - RUNNING: #<pr> [yellow]RUNNING[/yellow]
+    - MERGED: #<pr> [blue]MERGED[/blue]
+    - If linked_pr present without specific CI: #<pr>
+    - If no linked_pr: '-'
+    """
+    if not linked_pr:
+        return "-"
+
+    status_upper = str(pr_status).upper() if pr_status else ""
+    ci_upper = str(pr_ci_details).upper() if pr_ci_details else ""
+
+    if status_upper == "MERGED":
+        return f"#{linked_pr} [blue]MERGED[/blue]"
+
+    if ci_upper == "PASS":
+        return f"#{linked_pr} [green]PASS[/green]"
+    elif ci_upper == "FAIL":
+        return f"#{linked_pr} [red]FAIL[/red]"
+    elif ci_upper == "RUNNING":
+        return f"#{linked_pr} [yellow]RUNNING[/yellow]"
+
+    if status_upper and status_upper != "OPEN":
+        return f"#{linked_pr} [{status_upper}]"
+
+    return f"#{linked_pr}"
+
+
 class SDLCProgressWidget(DataTable):
     """
-    Read-only DataTable widget rendering active SDLC items (Issues, Subtasks, PRs)
-    for a selected project from local SQLite StateManager.
+    Read-only DataTable widget rendering active SDLC items (Stories, Subtasks, PRs)
+    in a hierarchical tree with live PR and CI check statuses for a selected project
+    from local SQLite StateManager.
     """
 
     TABLE_COLUMNS = [
         "ID",
         "Title",
         "Status/Label",
-        "Linked PR",
+        "PR Status",
     ]
 
     def __init__(
@@ -127,7 +164,7 @@ class SDLCProgressWidget(DataTable):
         await self._render_rows()
 
     async def _render_rows(self) -> None:
-        """Renders SDLC item rows into the DataTable with keyed in-place diffing."""
+        """Renders SDLC hierarchy into DataTable with tree prefixes and keyed in-place diffing."""
         async with self._render_lock:
             if not self.columns:
                 return
@@ -140,11 +177,11 @@ class SDLCProgressWidget(DataTable):
                 return
 
             try:
-                items = await self.state_manager.get_sdlc_items(self.project_name)
+                hierarchy = await self.state_manager.get_active_sdlc_hierarchy(self.project_name)
             except Exception:
-                items = []
+                hierarchy = []
 
-            if not items:
+            if not hierarchy:
                 _apply_keyed_diff(
                     self,
                     [("-empty-", ("-", "No active SDLC items", "-", "-"))],
@@ -152,20 +189,43 @@ class SDLCProgressWidget(DataTable):
                 return
 
             target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
-            for item in items:
-                issue_num = item.get("issue_number") or item.get("id") or item.get("number")
-                issue_id = f"#{issue_num}" if (issue_num is not None and str(issue_num) != "-") else "-"
-                title = str(item.get("title", ""))
+            for root in hierarchy:
+                root_num = root.get("issue_number") or root.get("id") or root.get("number")
+                root_id = f"#{root_num}" if (root_num is not None and str(root_num) != "-") else "-"
+                root_title = str(root.get("title", ""))
 
-                raw_labels = item.get("labels")
-                raw_state = item.get("state") or item.get("status")
+                raw_labels = root.get("labels")
+                raw_state = root.get("state") or root.get("status")
                 status_label = str(raw_labels) if raw_labels else (str(raw_state) if raw_state else "-")
 
-                linked_pr = item.get("linked_pr")
-                pr_str = f"#{linked_pr}" if linked_pr else "-"
+                linked_pr = root.get("linked_pr")
+                pr_status = root.get("pr_status")
+                pr_ci = root.get("pr_ci_details")
+                pr_badge = format_pr_status_badge(linked_pr, pr_status, pr_ci)
 
-                row_key = str(issue_num) if (issue_num is not None and str(issue_num) != "-") else f"item_{title}"
-                target_rows.append((row_key, (issue_id, title, status_label, pr_str)))
+                row_key = str(root_num) if root_num is not None else f"story_{root_title}"
+                target_rows.append((row_key, (root_id, root_title, status_label, pr_badge)))
+
+                subtasks = root.get("subtasks") or root.get("children") or []
+                total_subtasks = len(subtasks)
+                for idx, sub in enumerate(subtasks):
+                    sub_num = sub.get("issue_number") or sub.get("id") or sub.get("number")
+                    sub_id = f"#{sub_num}" if (sub_num is not None and str(sub_num) != "-") else "-"
+                    sub_title = str(sub.get("title", ""))
+                    prefix = "  └─ " if idx == total_subtasks - 1 else "  ├─ "
+                    display_title = f"{prefix}{sub_title}"
+
+                    sub_labels = sub.get("labels")
+                    sub_state = sub.get("state") or sub.get("status")
+                    sub_status_label = str(sub_labels) if sub_labels else (str(sub_state) if sub_state else "-")
+
+                    sub_pr = sub.get("linked_pr")
+                    sub_pr_status = sub.get("pr_status")
+                    sub_pr_ci = sub.get("pr_ci_details")
+                    sub_pr_badge = format_pr_status_badge(sub_pr, sub_pr_status, sub_pr_ci)
+
+                    sub_row_key = str(sub_num) if sub_num is not None else f"sub_{sub_title}"
+                    target_rows.append((sub_row_key, (sub_id, display_title, sub_status_label, sub_pr_badge)))
 
             _apply_keyed_diff(self, target_rows)
 
