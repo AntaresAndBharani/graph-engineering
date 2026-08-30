@@ -1049,4 +1049,11 @@ class StateManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    # Backward-compatible aliases
+    get_window_token_sum = get_window_token_usage
+    get_window_breakdown = get_usage_breakdown
+    get_window_events = get_token_usage_events
+
+
+
 
