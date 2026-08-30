@@ -45,9 +45,10 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
    - **Persistent Append-Only Stream**: Historical log entries persist indefinitely across 2.0s table refresh ticks without calling `clear()`.
    - **Interactive Auto-Scroll & Clear Controls**: Pressing `Space` toggles auto-scrolling (`[Auto-Scroll: ON/OFF]`) allowing the operator to freeze scroll position to inspect historical traces, while `Ctrl+L` manually clears the buffer on demand.
-5. **Native Async Concurrency**:
+5. **Native Dual-Level Async Concurrency**:
    - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
-   - Per-project worker loops execute concurrently in the same loop via `asyncio.gather()` / `asyncio.TaskGroup` with zero cross-thread SQLite collisions.
+   - **Level 1 (Inter-Project Concurrency)**: Per-project worker loops execute concurrently in parallel worker tasks via `asyncio.gather()` with zero cross-thread SQLite collisions.
+   - **Level 2 (Intra-Project Concurrency)**: Within each project cycle (`run_project_cycle`), Architect (producer) and DevTest (consumer) execute concurrently via `asyncio.gather(architect_cycle, devtest_cycle)` in isolated Git worktrees (`.graph/worktrees/`) with failure isolation, falling back gracefully to serial execution on `local_path` when worktrees are disabled.
 6. **Graceful Teardown & Resource Cleanup**:
    - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
    - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.

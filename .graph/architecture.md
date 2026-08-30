@@ -146,7 +146,7 @@ graph TD
    - Pure UI adapter handling command-line arguments, options (`--dashboard/--no-dashboard`, `--headless`), terminal dashboards (`DashboardApp`), and signal handling.
    - Encapsulates modular Textual widgets (`SDLCProgressWidget`, `AnomalyAlertsWidget`, `HarnessQuotaWidget`) as read-only consumers of the SQLite Blackboard and `QuotaManager` via Dependency Injection.
    - Commands: `run`, `watch` (with interactive Textual TUI dashboard and headless fallback), `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `reload`, `artifact`, `artifacts`, `supervisor`.
-   - Coordinates parallel workers across projects and handles graceful daemon shutdown, live reloading, and non-blocking TUI observability.
+   - Coordinates parallel workers across projects (Level 1 Inter-Project Concurrency) and executes Architect (producer) and DevTest (consumer) concurrently per project via `asyncio.gather` (Level 2 Intra-Project Concurrency) with complete failure isolation and non-destructive serial fallback, while handling graceful daemon shutdown, live reloading, and non-blocking TUI observability.
 
 ---
 
