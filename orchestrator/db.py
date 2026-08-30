@@ -1009,28 +1009,6 @@ class StateManager:
                 "nodes": by_node,
             }
 
-    async def get_window_token_sum(
-        self,
-        harness_name: str,
-        window_hours: float = 1.0,
-    ) -> int:
-        """
-        Sums total_tokens for events where created_at >= now(UTC) - window_hours,
-        using strict UTC comparisons. Alias for get_window_token_usage.
-        """
-        return await self.get_window_token_usage(harness_name, window_hours=window_hours)
-
-    async def get_window_breakdown(
-        self,
-        harness_name: str,
-        window_hours: float = 1.0,
-    ) -> Dict[str, Any]:
-        """
-        Returns per-project_name and per-node_name token sums within the window for the given harness.
-        Alias for get_usage_breakdown.
-        """
-        return await self.get_usage_breakdown(harness_name, window_hours=window_hours)
-
     async def get_token_usage_events(
         self,
         harness_name: Optional[str] = None,
