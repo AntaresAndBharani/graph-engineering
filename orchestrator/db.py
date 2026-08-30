@@ -1049,10 +1049,7 @@ class StateManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    # Aliases for QuotaManager compatibility
-    get_window_token_sum = get_window_token_usage
-    get_window_events = get_token_usage_events
-    get_window_breakdown = get_usage_breakdown
+
 
 
 

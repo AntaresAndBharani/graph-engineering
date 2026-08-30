@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -212,7 +212,7 @@ class QuotaManager:
         buffer_minutes = self.quota_settings.buffer_minutes
 
         required_runway = int(avg_tph * (buffer_minutes / 60.0))
-        used_tokens = await self.state_manager.get_window_token_sum(harness_name, window_hours)
+        used_tokens = await self.state_manager.get_window_token_usage(harness_name, window_hours)
         remaining = max(0, limit - used_tokens)
         velocity = round(used_tokens / window_hours, 2) if window_hours > 0 else 0.0
 
@@ -226,7 +226,7 @@ class QuotaManager:
             # excess tokens to age out = used_tokens - (limit - required_runway)
             target_max_used = limit - required_runway
             excess = used_tokens - target_max_used
-            events = await self.state_manager.get_window_events(harness_name, window_hours)
+            events = await self.state_manager.get_token_usage_events(harness_name, window_hours)
 
             now_utc = datetime.now(timezone.utc)
             accumulated = 0
@@ -278,7 +278,7 @@ class QuotaManager:
                 HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
             ),
         )
-        raw = await self.state_manager.get_window_breakdown(harness_name, quota_cfg.window_hours)
+        raw = await self.state_manager.get_usage_breakdown(harness_name, quota_cfg.window_hours)
         total_p = sum(raw.get("by_project", {}).values())
         total_n = sum(raw.get("by_node", {}).values())
 

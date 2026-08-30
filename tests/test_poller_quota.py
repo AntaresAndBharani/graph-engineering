@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -86,7 +86,7 @@ async def test_scenario_cross_project_global_pooling(tmp_path: Path):
         total_tokens=120000,
     )
 
-    events = await state_manager.get_window_events("antigravity", window_hours=1.0)
+    events = await state_manager.get_token_usage_events("antigravity", window_hours=1.0)
     assert len(events) == 1
     assert events[0]["project_name"] == "graph-engineering"
     assert events[0]["node_name"] == "devtest"

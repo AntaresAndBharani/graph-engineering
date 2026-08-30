@@ -626,7 +626,7 @@ async def test_harness_records_token_usage_event_after_execution(tmp_path: Path,
     assert exit_code == 0
 
     # Verify token usage event recorded in StateManager
-    events = await state_manager.get_window_events("antigravity", window_hours=1.0)
+    events = await state_manager.get_token_usage_events("antigravity", window_hours=1.0)
     assert len(events) == 1
     assert events[0]["harness_name"] == "antigravity"
     assert events[0]["model_name"] == "gemini-3.7-flash"
@@ -684,7 +684,7 @@ async def test_harness_records_fallback_tokens_when_no_structured_counts(tmp_pat
 
     assert exit_code == 0
 
-    events = await state_manager.get_window_events("antigravity", window_hours=1.0)
+    events = await state_manager.get_token_usage_events("antigravity", window_hours=1.0)
     assert len(events) == 1
     assert events[0]["total_tokens"] == 1500
     assert events[0]["prompt_tokens"] == 1000
