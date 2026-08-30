@@ -782,8 +782,8 @@ async def test_scenario_live_subprocess_stream_tagging_and_routing(tmp_path: Pat
         buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("graph-engineering")
         assert buf is not None
         assert len(buf) >= 2
-        assert any("Line 1 from harness" in line for line in buf)
-        assert any("Line 2 from harness" in line for line in buf)
+        assert any("Line 1 from harness" in (line[1] if isinstance(line, tuple) else line) for line in buf)
+        assert any("Line 2 from harness" in (line[1] if isinstance(line, tuple) else line) for line in buf)
 
     finally:
         AsyncHarnessAdapter.unregister_stream_listener(stream_listener)

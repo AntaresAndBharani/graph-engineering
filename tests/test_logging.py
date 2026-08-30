@@ -292,7 +292,6 @@ def test_textual_log_handler_emit_error_handling(monkeypatch):
 
 def test_setup_logger_with_textual_handler(tmp_path: Path):
     """Asserts setup_logger attaches TextualLogHandler to root orchestrator logger."""
-    import logging
     from orchestrator.logging import TextualLogHandler, setup_logger
 
     handler = TextualLogHandler(maxlen=500)
@@ -465,8 +464,8 @@ def test_project_log_buffer_manager_bounded_capacity():
         ProjectLogBufferManager.add_line(f"Line {i}", project_name="proj-bounded")
 
     assert len(ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"]) == 500
-    assert ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"][0] == "Line 100"
-    assert ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"][-1] == "Line 599"
+    assert ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"][0] == (None, "Line 100")
+    assert ProjectLogBufferManager.PROJECT_BUFFERS["proj-bounded"][-1] == (None, "Line 599")
 
     # Global buffer has all 600
     assert len(ProjectLogBufferManager.GLOBAL_LOG_BUFFER) == 600
@@ -500,5 +499,188 @@ def test_project_log_buffer_manager_clear_and_reset():
     ProjectLogBufferManager.reset()
     assert len(ProjectLogBufferManager.PROJECT_BUFFERS) == 0
     assert len(ProjectLogBufferManager.GLOBAL_LOG_BUFFER) == 0
+
+
+# ---------------------------------------------------------------------------
+# Gherkin Acceptance Criteria Tests for Node-Scoped Log Buffers (Issue #103)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_node_name():
+    """Asserts extract_node_name extracts node from tags, strings, and LogRecords."""
+    from orchestrator.logging import ProjectLogBufferManager
+
+    # 1. String with [project:node]
+    assert ProjectLogBufferManager.extract_node_name("[crosstrainingapp:supervisor] Error occurred") == "supervisor"
+
+    # 2. String with Rich markup [dim cyan][project:node][/dim cyan]
+    assert ProjectLogBufferManager.extract_node_name("  [dim cyan][ws-gym:devtest][/dim cyan] Tests running") == "devtest"
+
+    # 3. Formatted log string with log level [INFO] preceding project:node tag
+    assert ProjectLogBufferManager.extract_node_name("12:00:00 [INFO] [crosstrainingapp:architect] Story ready") == "architect"
+
+    # 4. String without node (only project)
+    assert ProjectLogBufferManager.extract_node_name("[graph-engineering] Polling 5 issues") is None
+
+    # 5. LogRecord with node_name attribute
+    rec1 = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="Msg", args=(), exc_info=None)
+    setattr(rec1, "node_name", "devtest")
+    assert ProjectLogBufferManager.extract_node_name(rec1) == "devtest"
+
+    # 6. LogRecord with node attribute object
+    class DummyNode:
+        name = "architect"
+    rec2 = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="Msg", args=(), exc_info=None)
+    setattr(rec2, "node", DummyNode())
+    assert ProjectLogBufferManager.extract_node_name(rec2) == "architect"
+
+    # 7. Unscoped LogRecord
+    rec3 = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="Daemon starting", args=(), exc_info=None)
+    assert ProjectLogBufferManager.extract_node_name(rec3) is None
+
+
+def test_scenario_node_scoped_in_memory_buffering():
+    """
+    Scenario: Node-scoped in-memory buffering
+      Given two nodes "architect" and "devtest" are emitting log lines for project "crosstrainingapp"
+      When add_line/add_record is called with an explicit node_name for each line
+      Then PROJECT_BUFFERS["crosstrainingapp"] must store (node_name, line) tuples, still bounded to maxlen=500
+      And existing callers that omit node_name must continue to work without raising (default node_name="unknown" or None)
+    """
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    # Given two nodes "architect" and "devtest" emitting log lines for project "crosstrainingapp"
+    # When add_line is called with explicit node_name
+    ProjectLogBufferManager.add_line("Architect starting INVEST decomposition", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("DevTest running pytest suite", project_name="crosstrainingapp", node_name="devtest")
+
+    # When add_record is called with explicit node_name
+    rec = logging.LogRecord(name="orchestrator", level=logging.INFO, pathname=__file__, lineno=1, msg="DevTest PR created", args=(), exc_info=None)
+    ProjectLogBufferManager.add_record(rec, project_name="crosstrainingapp", node_name="devtest")
+
+    # When caller omits node_name
+    ProjectLogBufferManager.add_line("General project heartbeat", project_name="crosstrainingapp")
+
+    # Then PROJECT_BUFFERS["crosstrainingapp"] must store (node_name, line) tuples
+    buf = ProjectLogBufferManager.PROJECT_BUFFERS["crosstrainingapp"]
+    assert len(buf) == 4
+    assert buf[0] == ("architect", "Architect starting INVEST decomposition")
+    assert buf[1] == ("devtest", "DevTest running pytest suite")
+    assert buf[2] == ("devtest", "DevTest PR created")
+    assert buf[3] == (None, "General project heartbeat")
+
+
+def test_scenario_node_filtered_log_retrieval(tmp_path: Path):
+    """
+    Scenario: Node-filtered log retrieval
+      Given a project buffer containing interleaved (node_name, line) tuples for "architect" and "devtest"
+      When get_project_logs(project_name="crosstrainingapp", node_name="devtest") is called
+      Then only lines tagged with node_name == "devtest" are returned, in original order
+    """
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    # Interleaved entries
+    ProjectLogBufferManager.add_line("Arch line 1", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("Dev line 1", project_name="crosstrainingapp", node_name="devtest")
+    ProjectLogBufferManager.add_line("Arch line 2", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("Dev line 2", project_name="crosstrainingapp", node_name="devtest")
+    ProjectLogBufferManager.add_line("Dev line 3", project_name="crosstrainingapp", node_name="devtest")
+
+    # Retrieve devtest logs
+    dev_logs = ProjectLogBufferManager.get_project_logs(project_name="crosstrainingapp", node_name="devtest", log_dir=tmp_path)
+    assert dev_logs == ["Dev line 1", "Dev line 2", "Dev line 3"]
+
+    # Retrieve architect logs
+    arch_logs = ProjectLogBufferManager.get_project_logs(project_name="crosstrainingapp", node_name="architect", log_dir=tmp_path)
+    assert arch_logs == ["Arch line 1", "Arch line 2"]
+
+    # Retrieve non-existent node returns [] when in-memory buffer has other nodes
+    reviewer_logs = ProjectLogBufferManager.get_project_logs(project_name="crosstrainingapp", node_name="reviewer", log_dir=tmp_path)
+    assert reviewer_logs == []
+
+
+def test_scenario_node_scoped_cold_start_disk_tail_fallback(tmp_path: Path):
+    """
+    Scenario: Node-scoped cold-start disk tail fallback
+      Given the in-memory buffer for the requested (project_name, node_name) is empty
+      When get_project_logs(project_name, node_name) is called
+      Then tail_latest_project_logs must look under "~/.config/orchestrator/logs/<project_name>/<node_name>/*.log" (not just <project_name>/**/*.log)
+      And return the last max_lines of the latest file in that node-specific directory
+    """
+    from orchestrator.logging import ProjectLogBufferManager, tail_latest_project_logs
+
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    arch_dir = logs_root / "crosstrainingapp" / "architect"
+    dev_dir = logs_root / "crosstrainingapp" / "devtest"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    dev_dir.mkdir(parents=True, exist_ok=True)
+
+    # Architect log file
+    arch_file = arch_dir / "20260830_100000_architect_run.log"
+    arch_file.write_text("Arch disk line 1\nArch disk line 2\n", encoding="utf-8")
+
+    # Devtest log file (newer timestamp)
+    dev_file = dev_dir / "20260830_110000_devtest_run.log"
+    dev_content = "\n".join([f"Dev disk line {i:02d}" for i in range(1, 21)])
+    dev_file.write_text(dev_content, encoding="utf-8")
+
+    # Cold start for devtest: in-memory deque empty
+    assert len(ProjectLogBufferManager.PROJECT_BUFFERS.get("crosstrainingapp", [])) == 0
+
+    dev_tail = tail_latest_project_logs("crosstrainingapp", log_dir=logs_root, max_lines=10, node_name="devtest")
+    assert len(dev_tail) == 10
+    assert dev_tail[0] == "Dev disk line 11"
+    assert dev_tail[-1] == "Dev disk line 20"
+    assert not any("Arch" in line for line in dev_tail)
+
+    # Via get_project_logs
+    retrieved_dev = ProjectLogBufferManager.get_project_logs("crosstrainingapp", log_dir=logs_root, max_lines=5, node_name="devtest")
+    assert len(retrieved_dev) == 5
+    assert retrieved_dev == ["Dev disk line 16", "Dev disk line 17", "Dev disk line 18", "Dev disk line 19", "Dev disk line 20"]
+
+    # When requesting architect logs
+    retrieved_arch = ProjectLogBufferManager.get_project_logs("crosstrainingapp", log_dir=logs_root, max_lines=10, node_name="architect")
+    assert retrieved_arch == ["Arch disk line 1", "Arch disk line 2"]
+
+
+def test_scenario_backward_compatible_no_node_retrieval(tmp_path: Path):
+    """
+    Scenario: Backward-compatible no-node retrieval
+      Given node_name is not supplied to get_project_logs
+      Then behavior must remain unchanged (return all lines for the project, global fallback if empty)
+    """
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    # 1. In-memory buffer retrieval with no node_name supplied
+    ProjectLogBufferManager.add_line("Arch line", project_name="crosstrainingapp", node_name="architect")
+    ProjectLogBufferManager.add_line("Dev line", project_name="crosstrainingapp", node_name="devtest")
+
+    all_lines = ProjectLogBufferManager.get_project_logs("crosstrainingapp")
+    assert all_lines == ["Arch line", "Dev line"]
+
+    # 2. Disk fallback with no node_name supplied
+    ProjectLogBufferManager.reset()
+    logs_root = tmp_path / "logs"
+    dev_dir = logs_root / "crosstrainingapp" / "devtest"
+    dev_dir.mkdir(parents=True, exist_ok=True)
+    dev_file = dev_dir / "20260830_120000_devtest_run.log"
+    dev_file.write_text("Disk line 1\nDisk line 2\n", encoding="utf-8")
+
+    disk_fallback_lines = ProjectLogBufferManager.get_project_logs("crosstrainingapp", log_dir=logs_root)
+    assert disk_fallback_lines == ["Disk line 1", "Disk line 2"]
+
+    # 3. Global fallback when no project_name and no disk logs
+    ProjectLogBufferManager.reset()
+    ProjectLogBufferManager.add_line("Global daemon log")
+    assert ProjectLogBufferManager.get_project_logs(None) == ["Global daemon log"]
+
 
 

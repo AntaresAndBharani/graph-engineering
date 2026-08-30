@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import datetime
 import logging
-import os
 from pathlib import Path
 import re
 import time
 from collections import deque
-from typing import Callable, Deque, List, Optional, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Union
 from rich.logging import RichHandler
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -16,12 +15,13 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 class ProjectLogBufferManager:
     """
     In-memory and disk-backed project-scoped log buffer manager.
-    Maintains a global bounded deque buffer (maxlen=1000) and per-project bounded deque buffers (maxlen=500).
+    Maintains a global bounded deque buffer (maxlen=1000) and per-project bounded deque buffers (maxlen=500)
+    storing (node_name, line) tuples.
     Provides recursive pure-Python disk-tailing fallback when the in-memory deque is empty on cold start.
     """
 
     GLOBAL_LOG_BUFFER: Deque[str] = deque(maxlen=1000)
-    PROJECT_BUFFERS: Dict[str, Deque[str]] = {}
+    PROJECT_BUFFERS: Dict[str, Deque[Tuple[Optional[str], str]]] = {}
 
     LOG_LEVEL_NAMES = {
         "INFO",
@@ -87,11 +87,41 @@ class ProjectLogBufferManager:
             return None
 
         cleaned = strip_ansi(msg)
-        for match in re.finditer(r"\[([a-zA-Z0-9_\-\.]+)(?::[a-zA-Z0-9_\-\.]+)?\]", cleaned):
+        for match in re.finditer(r"\[([a-zA-Z0-9_\-\.]+)(?::([a-zA-Z0-9_\-\.]+))?\]", cleaned):
             tag = match.group(1)
             if tag.upper() in cls.IGNORE_TAGS:
                 continue
             return tag
+        return None
+
+    @classmethod
+    def extract_node_name(cls, target: Union[logging.LogRecord, str, Any]) -> Optional[str]:
+        """
+        Extracts node name from LogRecord attributes or bracketed prefix in strings/messages.
+        Examples:
+          - LogRecord(node_name='devtest') -> 'devtest'
+          - LogRecord(node='devtest') -> 'devtest'
+          - '[crosstrainingapp:supervisor] Error...' -> 'supervisor'
+          - '  [dim cyan][crosstrainingapp:devtest][/dim cyan] ...' -> 'devtest'
+        """
+        if isinstance(target, logging.LogRecord):
+            node = getattr(target, "node_name", None) or getattr(target, "node", None)
+            if node:
+                return getattr(node, "name", str(node))
+            msg = target.getMessage()
+        elif isinstance(target, str):
+            msg = target
+        else:
+            return None
+
+        cleaned = strip_ansi(msg)
+        for match in re.finditer(r"\[([a-zA-Z0-9_\-\.]+)(?::([a-zA-Z0-9_\-\.]+))?\]", cleaned):
+            tag = match.group(1)
+            if tag.upper() in cls.IGNORE_TAGS:
+                continue
+            node = match.group(2)
+            if node and node.upper() not in cls.IGNORE_TAGS:
+                return node
         return None
 
     @classmethod
@@ -100,34 +130,38 @@ class ProjectLogBufferManager:
         record: logging.LogRecord,
         formatted: Optional[str] = None,
         project_name: Optional[str] = None,
+        node_name: Optional[str] = None,
     ) -> None:
         """
-        Routes a LogRecord to GLOBAL_LOG_BUFFER and the corresponding project's buffer.
+        Routes a LogRecord to GLOBAL_LOG_BUFFER and the corresponding project's buffer as a (node_name, line) tuple.
         """
         line = formatted or record.getMessage()
         cls.GLOBAL_LOG_BUFFER.append(line)
 
         proj = project_name or cls.extract_project_name(record)
+        node = node_name or cls.extract_node_name(record)
         if proj:
             if proj not in cls.PROJECT_BUFFERS:
                 cls.PROJECT_BUFFERS[proj] = deque(maxlen=500)
-            cls.PROJECT_BUFFERS[proj].append(line)
+            cls.PROJECT_BUFFERS[proj].append((node, line))
 
     @classmethod
     def add_line(
         cls,
         line: str,
         project_name: Optional[str] = None,
+        node_name: Optional[str] = None,
     ) -> None:
         """
-        Routes a raw/stream line to GLOBAL_LOG_BUFFER and the corresponding project's buffer.
+        Routes a raw/stream line to GLOBAL_LOG_BUFFER and the corresponding project's buffer as a (node_name, line) tuple.
         """
         cls.GLOBAL_LOG_BUFFER.append(line)
         proj = project_name or cls.extract_project_name(line)
+        node = node_name or cls.extract_node_name(line)
         if proj:
             if proj not in cls.PROJECT_BUFFERS:
                 cls.PROJECT_BUFFERS[proj] = deque(maxlen=500)
-            cls.PROJECT_BUFFERS[proj].append(line)
+            cls.PROJECT_BUFFERS[proj].append((node, line))
 
     @classmethod
     def tail_latest_project_logs(
@@ -135,10 +169,12 @@ class ProjectLogBufferManager:
         project_name: str,
         log_dir: Optional[Union[Path, str]] = None,
         max_lines: int = 100,
+        node_name: Optional[str] = None,
     ) -> List[str]:
         """
         Pure Python recursive disk-tailing fallback (pathlib.Path.rglob) reading the last max_lines (default 100)
-        from the latest execution log file under <log_dir>/<project_name>/**/*.log.
+        from the latest execution log file under <log_dir>/<project_name>/<node_name>/*.log (if node_name provided)
+        or <log_dir>/<project_name>/**/*.log.
         """
         if not project_name:
             return []
@@ -149,12 +185,16 @@ class ProjectLogBufferManager:
         else:
             resolved_log_dir = Path("~/.config/orchestrator/logs").expanduser()
 
-        project_dir = resolved_log_dir / project_name
-        if not project_dir.exists() or not project_dir.is_dir():
+        if node_name:
+            target_dir = resolved_log_dir / project_name / node_name
+        else:
+            target_dir = resolved_log_dir / project_name
+
+        if not target_dir.exists() or not target_dir.is_dir():
             return []
 
         try:
-            log_files = [p for p in project_dir.rglob("*.log") if p.is_file()]
+            log_files = [p for p in target_dir.rglob("*.log") if p.is_file()]
             if not log_files:
                 return []
             latest_file = max(log_files, key=lambda p: (p.stat().st_mtime, p.name))
@@ -170,30 +210,45 @@ class ProjectLogBufferManager:
         project_name: Optional[str] = None,
         log_dir: Optional[Union[Path, str]] = None,
         max_lines: int = 100,
+        node_name: Optional[str] = None,
     ) -> List[str]:
         """
-        Retrieves scoped historical log lines for the given project.
-        If in-memory deque has entries, returns them.
-        If in-memory deque is empty and project_name is provided, falls back to tailing disk logs.
-        If no disk logs exist or project_name is None, returns global buffer.
+        Retrieves scoped historical log lines for the given project (and optional node).
+        If in-memory deque has entries matching the scope, returns them.
+        If in-memory deque is empty for the requested scope and project_name is provided,
+        falls back to tailing disk logs.
+        If no disk logs exist or project_name is None, returns global buffer (when node_name is None) or [].
         """
         if not project_name:
             return list(cls.GLOBAL_LOG_BUFFER)
 
         buf = cls.PROJECT_BUFFERS.get(project_name)
-        if buf and len(buf) > 0:
-            return list(buf)
+        if buf:
+            if node_name is not None:
+                matching = [
+                    item[1] if isinstance(item, tuple) else item
+                    for item in buf
+                    if isinstance(item, tuple) and item[0] == node_name
+                ]
+                if matching:
+                    return matching
+            else:
+                return [item[1] if isinstance(item, tuple) else item for item in buf]
 
         disk_lines = cls.tail_latest_project_logs(
             project_name=project_name,
             log_dir=log_dir,
             max_lines=max_lines,
+            node_name=node_name,
         )
         if disk_lines:
             if project_name not in cls.PROJECT_BUFFERS:
                 cls.PROJECT_BUFFERS[project_name] = deque(maxlen=500)
-            cls.PROJECT_BUFFERS[project_name].extend(disk_lines)
+            cls.PROJECT_BUFFERS[project_name].extend((node_name, line) for line in disk_lines)
             return disk_lines
+
+        if node_name is not None:
+            return []
 
         return list(cls.GLOBAL_LOG_BUFFER)
 
@@ -206,12 +261,14 @@ def tail_latest_project_logs(
     project_name: str,
     log_dir: Optional[Union[Path, str]] = None,
     max_lines: int = 100,
+    node_name: Optional[str] = None,
 ) -> List[str]:
     """Module-level pure Python recursive disk-tailing fallback."""
     return ProjectLogBufferManager.tail_latest_project_logs(
         project_name=project_name,
         log_dir=log_dir,
         max_lines=max_lines,
+        node_name=node_name,
     )
 
 
