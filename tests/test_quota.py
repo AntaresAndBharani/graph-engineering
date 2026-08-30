@@ -150,7 +150,8 @@ def test_token_extraction_and_fallback():
 @pytest.mark.asyncio
 async def test_resolve_harness_for_node():
     config = GlobalConfig()
-    manager = QuotaManager(config, None)
+    mock_state = AsyncMock()
+    manager = QuotaManager(config, mock_state)
 
     project = ProjectConfig(
         name="test-proj",
@@ -164,10 +165,10 @@ async def test_resolve_harness_for_node():
 
     assert manager.resolve_harness_for_node(project, "architect") == "claude"
     assert manager.resolve_harness_for_node(project, "devtest") == "antigravity"
-    # Fallback when node not explicitly configured
+    # Fallback to NodeConfig default when node not explicitly configured
     assert manager.resolve_harness_for_node(project, "supervisor") == "claude"
     assert manager.resolve_harness_for_node(project, "reviewer") == "claude"
-    assert manager.resolve_harness_for_node(project, "bau") == "antigravity"
+    assert manager.resolve_harness_for_node(project, "bau") == "claude"
 
 
 @pytest.mark.asyncio
@@ -422,11 +423,11 @@ async def test_informative_breakdown_multi_node(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_mocked_state_manager():
     """
-    Tests QuotaManager with mocked StateManager for unit isolation.
+    Tests QuotaManager with mocked StateManager / TokenUsageReader for unit isolation.
     """
     mock_state = AsyncMock()
-    mock_state.get_window_token_sum.return_value = 100_000
-    mock_state.get_window_breakdown.return_value = {
+    mock_state.get_window_token_usage.return_value = 100_000
+    mock_state.get_usage_breakdown.return_value = {
         "by_project": {"p1": 70_000, "p2": 30_000},
         "by_node": {"n1": 60_000, "n2": 40_000},
     }
@@ -455,3 +456,35 @@ async def test_mocked_state_manager():
     assert breakdown["by_project"]["p2"] == 30.0
     assert breakdown["by_node"]["n1"] == 60.0
     assert breakdown["by_node"]["n2"] == 40.0
+
+
+def test_quota_manager_fail_fast_validation():
+    """
+    Asserts that QuotaManager fails fast with TypeError when misconfigured.
+    """
+    mock_state = AsyncMock()
+
+    # Invalid config types
+    with pytest.raises(TypeError, match="Invalid config type"):
+        QuotaManager("invalid_string", mock_state)  # type: ignore
+
+    with pytest.raises(TypeError, match="Invalid config type"):
+        QuotaManager(123, mock_state)  # type: ignore
+
+    with pytest.raises(TypeError, match="Invalid config type"):
+        QuotaManager(None, mock_state)  # type: ignore
+
+    # None state_manager
+    with pytest.raises(TypeError, match="state_manager cannot be None"):
+        QuotaManager(GlobalConfig(), None)  # type: ignore
+
+
+def test_token_usage_reader_protocol(tmp_path: Path):
+    """
+    Asserts that StateManager satisfies the runtime-checkable TokenUsageReader protocol.
+    """
+    from orchestrator.quota import TokenUsageReader
+
+    state_manager = StateManager(tmp_path / "state.db")
+    assert isinstance(state_manager, TokenUsageReader)
+

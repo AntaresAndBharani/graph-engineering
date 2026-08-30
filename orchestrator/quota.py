@@ -5,17 +5,35 @@ from datetime import datetime, timezone, timedelta
 import json
 import math
 import re
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from orchestrator.config import (
     DEFAULT_HARNESS_QUOTAS,
     GlobalConfig,
     HarnessQuotaConfig,
+    NodeConfig,
     ProjectConfig,
     QuotaSettings,
 )
-from orchestrator.db import StateManager
 from orchestrator.logging import strip_ansi
+
+
+@runtime_checkable
+class TokenUsageReader(Protocol):
+    """Protocol defining the required state manager interface for token usage and quota checks."""
+
+    async def get_window_token_usage(self, harness_name: str, window_hours: float = 1.0) -> int:
+        ...
+
+    async def get_usage_breakdown(self, harness_name: str, window_hours: float = 1.0) -> Dict[str, Any]:
+        ...
+
+    async def get_token_usage_events(
+        self,
+        harness_name: Optional[str] = None,
+        window_hours: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        ...
 
 
 def fallback_token_heuristic(prompt: str = "", stdout: str = "") -> int:
@@ -237,7 +255,7 @@ class QuotaManager:
     runway gating, and replenishment ETA projections.
     """
 
-    def __init__(self, config: GlobalConfig | QuotaSettings, state_manager: StateManager | Any):
+    def __init__(self, config: GlobalConfig | QuotaSettings, state_manager: TokenUsageReader):
         if isinstance(config, GlobalConfig):
             self.config = config
             self.quota_settings = config.quota
@@ -245,8 +263,11 @@ class QuotaManager:
             self.config = GlobalConfig(quota=config)
             self.quota_settings = config
         else:
-            self.config = GlobalConfig()
-            self.quota_settings = QuotaSettings()
+            raise TypeError(
+                f"Invalid config type provided to QuotaManager: expected GlobalConfig or QuotaSettings, got {type(config).__name__}"
+            )
+        if state_manager is None:
+            raise TypeError("state_manager cannot be None; a valid TokenUsageReader instance is required.")
         self.state_manager = state_manager
 
     @property
@@ -255,20 +276,14 @@ class QuotaManager:
 
     def resolve_harness_for_node(self, project: ProjectConfig, node_name: str) -> str:
         """
-        Inspects project.nodes[node_name].harness or falls back to global default.
+        Resolves harness for the given node using ProjectConfig.nodes or NodeConfig default.
         """
-        if node_name in project.nodes:
-            node_cfg = project.nodes[node_name]
-            if isinstance(node_cfg, dict):
-                harness = node_cfg.get("harness")
-                if harness:
-                    return str(harness)
-            elif hasattr(node_cfg, "harness") and node_cfg.harness:
-                return str(node_cfg.harness)
-        # Fallback default per architecture standards
-        if node_name in ("architect", "supervisor", "reviewer"):
-            return "claude"
-        return "antigravity"
+        node_cfg = project.nodes.get(node_name)
+        if node_cfg is None:
+            return NodeConfig().harness
+        if isinstance(node_cfg, dict):
+            return str(node_cfg.get("harness") or NodeConfig().harness)
+        return str(node_cfg.harness or NodeConfig().harness)
 
     async def check_harness_capacity(self, harness_name: str) -> QuotaCheckResult:
         """
@@ -288,12 +303,7 @@ class QuotaManager:
         buffer_minutes = self.quota_settings.buffer_minutes
 
         required_runway = calculate_required_runway(avg_tph, buffer_minutes)
-        if hasattr(self.state_manager, "get_window_token_sum"):
-            used_tokens = await self.state_manager.get_window_token_sum(harness_name, window_hours)
-        elif hasattr(self.state_manager, "get_window_token_usage"):
-            used_tokens = await self.state_manager.get_window_token_usage(harness_name, window_hours)
-        else:
-            used_tokens = 0
+        used_tokens = await self.state_manager.get_window_token_usage(harness_name, window_hours)
 
         remaining = calculate_remaining(limit, used_tokens)
         velocity = calculate_velocity(used_tokens, window_hours)
@@ -303,12 +313,10 @@ class QuotaManager:
 
         eta_seconds = 0
         if not allowed:
-            if hasattr(self.state_manager, "get_window_events"):
-                events = await self.state_manager.get_window_events(harness_name, window_hours)
-            elif hasattr(self.state_manager, "get_token_usage_events"):
-                events = await self.state_manager.get_token_usage_events(harness_name, window_hours)
-            else:
-                events = []
+            events = await self.state_manager.get_token_usage_events(
+                harness_name=harness_name,
+                window_hours=window_hours,
+            )
 
             eta_seconds = calculate_replenishment_eta(
                 events=events,
@@ -343,12 +351,7 @@ class QuotaManager:
                 HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
             ),
         )
-        if hasattr(self.state_manager, "get_window_breakdown"):
-            raw = await self.state_manager.get_window_breakdown(harness_name, quota_cfg.window_hours)
-        elif hasattr(self.state_manager, "get_usage_breakdown"):
-            raw = await self.state_manager.get_usage_breakdown(harness_name, quota_cfg.window_hours)
-        else:
-            raw = {"by_project": {}, "by_node": {}}
+        raw = await self.state_manager.get_usage_breakdown(harness_name, quota_cfg.window_hours)
 
         raw_by_project = raw.get("by_project") or raw.get("projects") or {}
         raw_by_node = raw.get("by_node") or raw.get("nodes") or {}

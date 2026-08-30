@@ -1049,29 +1049,7 @@ class StateManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_window_token_sum(
-        self,
-        harness_name: str,
-        window_hours: float = 1.0,
-    ) -> int:
-        """Alias for get_window_token_usage."""
-        return await self.get_window_token_usage(harness_name, window_hours)
 
-    async def get_window_breakdown(
-        self,
-        harness_name: str,
-        window_hours: float = 1.0,
-    ) -> Dict[str, Any]:
-        """Alias for get_usage_breakdown."""
-        return await self.get_usage_breakdown(harness_name, window_hours)
-
-    async def get_window_events(
-        self,
-        harness_name: str,
-        window_hours: float = 1.0,
-    ) -> List[Dict[str, Any]]:
-        """Retrieves raw token usage events for a harness within the specified window."""
-        return await self.get_token_usage_events(harness_name=harness_name, window_hours=window_hours)
 
 
 
