@@ -86,15 +86,15 @@ def calculate_backoff_delay(attempt: int, config: HarnessRetryConfig) -> float:
 
 class AsyncHarnessAdapter:
     _active_processes: set[asyncio.subprocess.Process] = set()
-    _stream_listeners: set[Callable[[str], None]] = set()
+    _stream_listeners: set[Callable[[Optional[str], str], None]] = set()
 
     @classmethod
-    def register_stream_listener(cls, listener: Callable[[str], None]) -> None:
+    def register_stream_listener(cls, listener: Callable[[Optional[str], str], None]) -> None:
         """Registers a callback to receive live real-time output stream lines."""
         cls._stream_listeners.add(listener)
 
     @classmethod
-    def unregister_stream_listener(cls, listener: Callable[[str], None]) -> None:
+    def unregister_stream_listener(cls, listener: Callable[[Optional[str], str], None]) -> None:
         """Unregisters a stream listener callback."""
         cls._stream_listeners.discard(listener)
 
@@ -205,6 +205,7 @@ class AsyncHarnessAdapter:
         env: Dict[str, str],
         log_file: Path,
         console_prefix: Optional[str] = None,
+        project_name: Optional[str] = None,
     ) -> tuple[int, str]:
         """
         Runs a single subprocess attempt, streaming stdout/stderr to disk and console,
@@ -247,7 +248,21 @@ class AsyncHarnessAdapter:
                                     _console.print(formatted_line)
                                     for listener in list(AsyncHarnessAdapter._stream_listeners):
                                         try:
-                                            listener(formatted_line)
+                                            try:
+                                                listener(project_name, formatted_line)
+                                            except TypeError:
+                                                listener(formatted_line)
+                                        except Exception:
+                                            pass
+                        elif cleaned.strip():
+                            for subline in cleaned.splitlines():
+                                if subline.strip():
+                                    for listener in list(AsyncHarnessAdapter._stream_listeners):
+                                        try:
+                                            try:
+                                                listener(project_name, subline)
+                                            except TypeError:
+                                                listener(subline)
                                         except Exception:
                                             pass
 
@@ -312,7 +327,14 @@ class AsyncHarnessAdapter:
         env = self.build_env(extra_env)
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
+        try:
+            returncode, captured_output = await self._execute_once(
+                cmd, cwd, env, log_file, console_prefix, project_name=eff_project_name
+            )
+        except TypeError:
+            returncode, captured_output = await self._execute_once(
+                cmd, cwd, env, log_file, console_prefix
+            )
         await self._record_tokens(
             captured_output=captured_output,
             prompt=prompt,
@@ -384,7 +406,14 @@ class AsyncHarnessAdapter:
 
             await asyncio.sleep(delay)
 
-            returncode, captured_output = await self._execute_once(cmd, cwd, env, log_file, console_prefix)
+            try:
+                returncode, captured_output = await self._execute_once(
+                    cmd, cwd, env, log_file, console_prefix, project_name=eff_project_name
+                )
+            except TypeError:
+                returncode, captured_output = await self._execute_once(
+                    cmd, cwd, env, log_file, console_prefix
+                )
             await self._record_tokens(
                 captured_output=captured_output,
                 prompt=prompt,

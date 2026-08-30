@@ -1797,4 +1797,60 @@ async def test_dashboard_scenario_cold_start_disk_log_fallback(tmp_path: Path):
         assert "Cold-start disk line 150" in rendered[-1]
 
 
+@pytest.mark.asyncio
+async def test_dashboard_harness_stream_line_routing_with_project_tag(tmp_path: Path):
+    """
+    Scenario: Live Subprocess Stream Tagging and Routing in Dashboard
+      Given DashboardApp is active with project "graph-engineering" selected
+      When AsyncHarnessAdapter emits a tagged stream line for "graph-engineering"
+      Then the line is added to ProjectLogBufferManager's "graph-engineering" buffer
+      And it is written to the active RichLog view
+    """
+    from orchestrator.config import ProjectConfig
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    repo_ge = tmp_path / "graph-engineering"
+    repo_ge.mkdir()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="graph-engineering", repo="org/graph-engineering", local_path=repo_ge),
+            ProjectConfig(name="other-proj", repo="org/other-proj", local_path=repo_ge),
+        ]
+    )
+
+    app = DashboardApp(config=config)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        table = app.query_one("#projects_table", DataTable)
+        table.focus()
+        table.move_cursor(row=0)
+        await pilot.pause()
+        assert app.selected_project == "graph-engineering"
+
+        # Emit tagged stream line for graph-engineering
+        app._handle_harness_stream_line("graph-engineering", "  [dim cyan][graph-engineering:devtest][/dim cyan] [dim]Running unit tests...[/dim]")
+
+        # Emit tagged stream line for other project
+        app._handle_harness_stream_line("other-proj", "  [dim cyan][other-proj:devtest][/dim cyan] [dim]Other project tests...[/dim]")
+
+        # Check buffer manager
+        ge_buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("graph-engineering")
+        assert ge_buf is not None
+        assert any("Running unit tests..." in line for line in ge_buf)
+
+        other_buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("other-proj")
+        assert other_buf is not None
+        assert any("Other project tests..." in line for line in other_buf)
+
+        # Check RichLog in UI (only graph-engineering should be rendered)
+        rendered = [line.text for line in log_view.lines]
+        assert any("Running unit tests..." in r for r in rendered)
+        assert not any("Other project tests..." in r for r in rendered)
+
+
+
 

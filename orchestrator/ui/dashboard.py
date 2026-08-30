@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -216,9 +216,14 @@ class DashboardApp(App):
             except Exception:
                 pass
 
-    def _handle_harness_stream_line(self, line: str) -> None:
+    def _handle_harness_stream_line(self, project_name: Optional[str] = None, line: Optional[str] = None) -> None:
         """Callback invoked by AsyncHarnessAdapter on live subprocess stream emissions."""
-        line_project = ProjectLogBufferManager.extract_project_name(line)
+        if line is None:
+            # Fallback for 1-argument calls where line is passed as first argument
+            line = str(project_name) if project_name is not None else ""
+            project_name = None
+
+        line_project = project_name or ProjectLogBufferManager.extract_project_name(line)
         self.buffer_manager.add_line(line, project_name=line_project)
 
         if self.selected_project and line_project and line_project != self.selected_project:
