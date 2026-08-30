@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Added **Append-Only Log Stream Persistence with Auto-Scroll Toggle & Manual Clear (`orchestrator/ui/dashboard.py`, `docs/node-cli.md`, `tests/test_dashboard.py`)**: Enhanced `DashboardApp` with persistent append-only log streaming in the `RichLog` pane across 2.0s table refresh ticks. Bound `Space` to `toggle_auto_scroll` (`[Auto-Scroll: ON/OFF]` in the sub_title) preserving operator scroll position for trace inspection, and bound `Ctrl+L` to `clear_logs` for on-demand buffer clearing (Issue #73).
 - Added `architect-approved` and `needs-refactor` to `DEFAULT_MANAGED_LABELS` in `orchestrator/config.py` to ensure complete workflow taxonomy synchronization across local and remote repositories.
 
 
