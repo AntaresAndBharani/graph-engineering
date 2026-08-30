@@ -2182,6 +2182,187 @@ async def test_scenario_node_scoped_cold_start_disk_tail_fallback_dashboard(tmp_
         assert not any("Arch" in r for r in rendered)
 
 
+# ---------------------------------------------------------------------------
+# Gherkin Acceptance Criteria Tests for Epic #90 / Issue #94
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_non_destructive_sdlc_subtask_navigation(tmp_path: Path, mocker):
+    """
+    Scenario 1: Non-Destructive SDLC Subtask Navigation (Epic #90 / Issue #94)
+      Given the TUI dashboard is active and project "crosstrainingapp" is selected in the top pane
+      And the "Logs" pane is streaming execution output for the "devtest" node
+      When the user clicks or navigates with arrow keys through subtasks (e.g., #455) in "#sdlc_widget"
+      Then the "Logs" pane must NOT clear or reset its contents
+      And it must continuously append the active node's live execution without interruption
+    """
+    ProjectLogBufferManager.reset()
+
+    repo_ct = tmp_path / "crosstrainingapp"
+    repo_ct.mkdir()
+    repo_ge = tmp_path / "graph-engineering"
+    repo_ge.mkdir()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="crosstrainingapp", repo="org/crosstrainingapp", local_path=repo_ct),
+            ProjectConfig(name="graph-engineering", repo="org/graph-engineering", local_path=repo_ge),
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
+    )
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Seed SDLC items with a parent story and subtasks
+    await state_manager.sync_project_sdlc_items(
+        "crosstrainingapp",
+        [
+            {
+                "issue_number": 450,
+                "title": "feat(app): core cross-training workout engine",
+                "item_type": "STORY",
+                "state": "OPEN",
+                "labels": "ready-for-dev",
+            },
+            {
+                "issue_number": 455,
+                "title": "feat(ui): implement workout timer widget",
+                "item_type": "SUBTASK",
+                "parent_issue_id": 450,
+                "state": "OPEN",
+                "labels": "ready-for-dev",
+            },
+            {
+                "issue_number": 456,
+                "title": "test(ui): add unit tests for workout timer",
+                "item_type": "SUBTASK",
+                "parent_issue_id": 450,
+                "state": "OPEN",
+                "labels": "ready-for-dev",
+            },
+        ],
+    )
+
+    log_handler = TextualLogHandler(maxlen=1000)
+    logger = logging.getLogger("orchestrator")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(log_handler)
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        log_handler=log_handler,
+    )
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        log_view = app.query_one("#log_view", RichLog)
+
+        table.focus()
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.selected_project == "graph-engineering"
+
+        # Switch to crosstrainingapp (row 0)
+        await pilot.press("up")
+        await pilot.pause()
+
+        # Project crosstrainingapp is selected
+        assert app.selected_project == "crosstrainingapp"
+        assert "Live Output" in log_view.border_title
+        assert "crosstrainingapp" in log_view.border_title
+
+        # Stream initial logs for devtest node
+        logger.info("[crosstrainingapp:devtest] Running test suite for subtask #455")
+        app._handle_harness_stream_line(
+            project_name="crosstrainingapp",
+            node_name="devtest",
+            line="  [dim cyan][crosstrainingapp:devtest][/dim cyan] [dim]Step 1: Initializing test runner[/dim]",
+        )
+        await pilot.pause()
+
+        # Verify initial logs are present
+        initial_lines = [line.text for line in log_view.lines]
+        assert any("Running test suite for subtask #455" in t for t in initial_lines)
+        assert any("Step 1: Initializing test runner" in t for t in initial_lines)
+
+        # Spy on log_view.clear to assert it is never called during #sdlc_widget interactions
+        clear_spy = mocker.spy(log_view, "clear")
+
+        # Focus SDLC widget and navigate through subtask rows
+        sdlc_widget.focus()
+        await pilot.pause()
+        assert sdlc_widget.row_count >= 2
+
+        # Navigate down through subtasks #455 and #456
+        await pilot.press("down")
+        await pilot.pause()
+
+        await pilot.press("down")
+        await pilot.pause()
+
+        # Simulate row selection (Enter key / Click) on subtask #455
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # Assert log_view.clear was NOT called
+        clear_spy.assert_not_called()
+
+        # Verify all original logs are still present
+        during_nav_lines = [line.text for line in log_view.lines]
+        assert any("Running test suite for subtask #455" in t for t in during_nav_lines)
+        assert any("Step 1: Initializing test runner" in t for t in during_nav_lines)
+
+        # Stream new live execution logs while user is focused/navigating in #sdlc_widget
+        app._handle_harness_stream_line(
+            project_name="crosstrainingapp",
+            node_name="devtest",
+            line="  [dim cyan][crosstrainingapp:devtest][/dim cyan] [dim]Step 2: Subtask #455 assertions passed 100% green[/dim]",
+        )
+        logger.info("[crosstrainingapp:devtest] Subtask #455 completed successfully")
+        await pilot.pause()
+
+        # Verify log pane continuously appended without interruption
+        final_lines = [line.text for line in log_view.lines]
+        assert any("Running test suite for subtask #455" in t for t in final_lines)
+        assert any("Step 1: Initializing test runner" in t for t in final_lines)
+        assert any("Step 2: Subtask #455 assertions passed 100% green" in t for t in final_lines)
+        assert any("Subtask #455 completed successfully" in t for t in final_lines)
+
+
+@pytest.mark.asyncio
+async def test_sdlc_widget_event_stop_isolation(tmp_path: Path):
+    """
+    Asserts @on(DataTable.RowSelected, "#sdlc_widget") and @on(DataTable.RowHighlighted, "#sdlc_widget")
+    call event.stop() to isolate SDLC widget navigation events.
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="proj_test", repo="org/proj_test", local_path=str(tmp_path)),
+        ]
+    )
+    app = DashboardApp(config=config)
+
+    class MockEvent:
+        def __init__(self):
+            self.is_stopped = False
+
+        def stop(self):
+            self.is_stopped = True
+
+    event_selected = MockEvent()
+    app.on_sdlc_row_selected(event_selected)
+    assert event_selected.is_stopped is True
+
+    event_highlighted = MockEvent()
+    app.on_sdlc_row_highlighted(event_highlighted)
+    assert event_highlighted.is_stopped is True
+
+
+
 
 
 

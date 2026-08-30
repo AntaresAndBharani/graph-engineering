@@ -12,6 +12,9 @@ from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 from textual.widgets.data_table import RowDoesNotExist
 
+from rich.markup import escape
+from rich.text import Text
+
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
@@ -86,6 +89,8 @@ class DashboardApp(App):
         log_handler: Optional[TextualLogHandler] = None,
         quota_manager: Optional[QuotaManager] = None,
         buffer_manager: Optional[ProjectLogBufferManager] = None,
+        selected_project: Optional[str] = None,
+        selected_node: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -98,8 +103,8 @@ class DashboardApp(App):
             or (log_handler.buffer_manager if log_handler and getattr(log_handler, "buffer_manager", None) else None)
             or ProjectLogBufferManager()
         )
-        self.selected_project: Optional[str] = None
-        self.selected_node: Optional[str] = None
+        self.selected_project = selected_project
+        self.selected_node = selected_node
         self._last_bottom_pane_fingerprint: Optional[str] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
@@ -170,11 +175,11 @@ class DashboardApp(App):
 
         if project_name:
             if node_name:
-                log_view.border_title = f"Live Output [{project_name} | {node_name}]"
+                log_view.border_title = Text(f"Live Output [{project_name} | {node_name}]")
             else:
-                log_view.border_title = f"Live Output [{project_name}]"
+                log_view.border_title = Text(f"Live Output [{project_name}]")
         else:
-            log_view.border_title = "Live Output"
+            log_view.border_title = Text("Live Output")
 
         log_dir = self.config.settings.resolved_log_dir if (self.config and self.config.settings) else None
 
@@ -440,6 +445,17 @@ class DashboardApp(App):
                 self.selected_node = node_name
                 await self.hydrate_project_logs(project_name, node_name=node_name)
                 await self._update_bottom_panes(project_name, force=True)
+
+    @on(DataTable.RowSelected, "#sdlc_widget")
+    def on_sdlc_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Traps SDLC row selection to prevent bubbling and preserve active log view."""
+        event.stop()
+
+    @on(DataTable.RowHighlighted, "#sdlc_widget")
+    def on_sdlc_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Traps SDLC row highlighting to prevent bubbling and preserve active log view."""
+        event.stop()
+
 
     async def _update_bottom_panes(self, project_name: Optional[str], force: bool = False) -> None:
         """
