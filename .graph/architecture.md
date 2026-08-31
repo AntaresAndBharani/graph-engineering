@@ -12,6 +12,8 @@
 ### System Overview
 `graph-orchestrator` is a decoupled, local-first control-plane daemon engineered to coordinate autonomous multi-agent software engineering pipelines across distributed repositories. It establishes an intelligent bridge between local developer workspaces, cloud code hosting platforms (GitHub), and pluggable AI CLI execution harnesses (Antigravity, Claude Code, Devin).
 
+The default operational architecture is a **Streamlined 2-Node Parallel Engine** consisting of **Architect** (Node 1: Producer) and **3-Amigos DevTest** (Node 2: Consumer) executing concurrently within isolated Git worktrees. Additional specialized governance nodes—**Supervisor** (Node 0: Watchdog & PO-Proxy), **Reviewer Gatekeeper** (Node 3: Auto-Merge Gate), and **BAU Maintenance** (Node 4: Tech Debt Sweep)—are available as modular, **optional/disabled-by-default** components that can be enabled on demand.
+
 The architecture is governed by **Zero-Token Idle Gating**: all repository inspections, issue status checks, label audits, pull request evaluations, and mergeability scans execute deterministically via local CLI tooling (GitHub CLI `gh`, Git, SQLite WAL) with zero token consumption. External AI harnesses are dispatched strictly when actionable tasks require deep reasoning, code implementation, INVEST story decomposition, or semantic conflict resolution.
 
 ```mermaid
@@ -24,12 +26,16 @@ flowchart TD
         Adapter["AsyncHarnessAdapter (`orchestrator/harness.py`)"]
     end
 
-    subgraph Governance & Pipeline Nodes ["Autonomous Pipeline Nodes (`orchestrator/nodes/*`)"]
-        N0["Node 0: Supervisor (Watchdog, SLA Audit & Anomaly Recovery)"]
-        N1["Node 1: Architect (Living Arch Plane & INVEST Decomposition)"]
-        N2["Node 2: 3-Amigos DevTest (TDD Implementation & PR Creation)"]
-        N3["Node 3: Reviewer Gatekeeper (CI Quality Gate & Auto-Merge)"]
-        N4["Node 4: BAU Maintenance (Technical Debt Consolidation Sweep)"]
+    subgraph Default 2-Node Parallel Engine ["Core Pipeline Nodes (Default Active / Worktree Concurrent)"]
+        N1["Node 1: Architect\n(Living Arch Plane & INVEST Decomposition)\n[Default Active: Producer]"]
+        N2["Node 2: 3-Amigos DevTest\n(TDD Implementation & PR Creation)\n[Default Active: Consumer]"]
+        N1 -->|ready-for-dev| N2
+    end
+
+    subgraph Optional Governance Nodes ["Optional Governance Nodes (Disabled by Default)"]
+        N0["Node 0: Supervisor\n(Watchdog, SLA Audit & PO-Proxy)\n[Optional / Disabled]"]
+        N3["Node 3: Reviewer Gatekeeper\n(CI Quality Gate & Auto-Merge)\n[Optional / Disabled]"]
+        N4["Node 4: BAU Maintenance\n(Tech Debt Consolidation Sweep)\n[Optional / Disabled]"]
     end
 
     subgraph Blackboard Layer ["Decoupled Artifact Blackboard"]
@@ -44,22 +50,23 @@ flowchart TD
     CLI --> Core
     Core <--> State
     Core <--> Reloader
-    Core --> N0 & N1 & N2 & N3 & N4
-    N0 & N1 & N2 & N3 & N4 --> Adapter
-    N0 & N1 & N2 & N3 & N4 <--> GH
-    N0 & N1 & N2 & N3 <--> BB
-    N2 & N3 <--> LocalGit
+    Core ==> N1 & N2
+    Core -.-> N0 & N3 & N4
+    N1 & N2 & N0 & N3 & N4 --> Adapter
+    N1 & N2 & N0 & N3 & N4 <--> GH
+    N1 & N2 & N0 & N3 <--> BB
+    N1 & N2 <--> LocalGit
 ```
 
-### 5-Node Graph Pipeline
+### Autonomous Pipeline Nodes & Topology Matrix
 
-| Node | Name | Primary Responsibility | Trigger Condition | Harness / Model Tier |
-|---|---|---|---|---|
-| **Node 0** | **Supervisor** (`supervisor.py`) | Consistency watchdog, 12h SLA audit, proactive PO-proxy requirement evaluation, SHA-256 hash gating, and anomaly self-healing. | Scheduled interval (default 1h) or Label `needs-po-review` | Fast PO Evaluation (`antigravity`/`gemini-3.7-flash-low`) + Zero-token audit |
-| **Node 1** | **Architect** (`architect.py`) | Living architecture sync (7-day SLA), INVEST story decomposition, subtask linking, and PR architectural reviews. | Label `needs-triage` or Weekly SLA trigger | Pluggable Research Harness (`antigravity`/`gemini-3.7-flash-high`) / Primary (`claude-sonnet-5`) |
-| **Node 2** | **3-Amigos DevTest** (`devtest.py`) | Pre-flight git safety check, TDD test suite generation, clean implementation, and autonomous PR opening. | Label `ready-for-dev` | Primary Implementation Harness (`antigravity` / `claude`) |
-| **Node 3** | **Reviewer Gatekeeper** (`reviewer.py`) | Remote CI quality gate verification (100% green required), autonomous merge conflict resolution, and squash auto-merge. | Label `architect-approved` / `needs-architect-review` | Fast Conflict Harness (`antigravity`/`gemini-3.7-flash-low`) + Deterministic `gh` |
-| **Node 4** | **BAU Maintenance** (`bau.py`) | Daily 24h maintenance sweep consolidating `tech-debt` and `enhancement` tickets into structured User Stories. | Daily interval (`bau_interval_seconds`, default 24h) | Cost-effective synthesis (`antigravity`/`gemini-3.7-flash-low`) |
+| Node | Name | Default State | Primary Responsibility | Trigger Condition | Harness / Model Tier |
+|---|---|---|---|---|---|
+| **Node 1** | **Architect** (`architect.py`) | **Active / Enabled** (Producer) | Living architecture sync (7-day SLA), INVEST story decomposition, subtask linking, and PR architectural reviews. | Label `needs-triage` or Weekly SLA trigger | Pluggable Research Harness (`antigravity`/`gemini-3.7-flash-high`) / Primary (`claude-sonnet-5`) |
+| **Node 2** | **3-Amigos DevTest** (`devtest.py`) | **Active / Enabled** (Consumer) | Pre-flight git safety check, TDD test suite generation, clean implementation, and autonomous PR opening / auto-merge. | Label `ready-for-dev` | Primary Implementation Harness (`antigravity` / `claude`) |
+| **Node 0** | **Supervisor** (`supervisor.py`) | **Optional / Disabled** | Consistency watchdog, 12h SLA audit, proactive PO-proxy requirement evaluation, SHA-256 hash gating, and anomaly self-healing. | Scheduled interval (default 1h) or Label `needs-po-review` | Fast PO Evaluation (`antigravity`/`gemini-3.7-flash-low`) + Zero-token audit |
+| **Node 3** | **Reviewer Gatekeeper** (`reviewer.py`) | **Optional / Disabled** | Remote CI quality gate verification (100% green required), autonomous merge conflict resolution, and squash auto-merge. | Label `architect-approved` / `needs-architect-review` | Fast Conflict Harness (`antigravity`/`gemini-3.7-flash-low`) + Deterministic `gh` |
+| **Node 4** | **BAU Maintenance** (`bau.py`) | **Optional / Disabled** | Daily 24h maintenance sweep consolidating `tech-debt` and `enhancement` tickets into structured User Stories. | Daily interval (`bau_interval_seconds`, default 24h) | Cost-effective synthesis (`antigravity`/`gemini-3.7-flash-low`) |
 
 ---
 
@@ -136,11 +143,13 @@ graph TD
 
 3. **Application Pipeline Nodes Layer (`orchestrator/nodes/*`)**:
    - Houses the discrete workflow engines representing each stage of the engineering lifecycle:
-     - `node-supervisor`: Watchdog auditing, 12-hour SLA tracking, and conflict self-healing.
-     - `node-architect`: Story triage, INVEST decomposition, living architecture plane synchronization, and PR architectural reviews.
-     - `node-devtest`: Pre-flight workspace validation, destructive git safety verification, test-driven implementation, Blackboard conflict resolution, and pull request generation.
-     - `node-reviewer`: Remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
-     - `node-bau`: Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
+     - **Default Active 2-Node Parallel Engine**:
+       - `node-architect` (Node 1: Producer): Story triage, INVEST decomposition, living architecture plane synchronization, and PR architectural reviews.
+       - `node-devtest` (Node 2: Consumer): Pre-flight workspace validation, destructive git safety verification, test-driven implementation, local/CI verification, autonomous auto-merge, and pull request generation.
+     - **Modular Optional Governance Nodes (Disabled by Default)**:
+       - `node-supervisor` (Node 0: Watchdog & PO-Proxy): Watchdog auditing, 12-hour SLA tracking, PO-proxy Gherkin evaluation, and conflict self-healing.
+       - `node-reviewer` (Node 3: Quality Gatekeeper): Dedicated remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
+       - `node-bau` (Node 4: Maintenance Sweep): Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
 
 4. **Presentation & CLI Layer (`orchestrator/cli.py`, `orchestrator/ui/dashboard.py`, `orchestrator/ui/widgets.py`)**:
    - Pure UI adapter handling command-line arguments, options (`--dashboard/--no-dashboard`, `--headless`), terminal dashboards (`DashboardApp`), and signal handling.
@@ -245,7 +254,7 @@ sequenceDiagram
     Poller->>Reviewer: PR labeled 'needs-architect-review'
     Reviewer->>Reviewer: Code review PASS, but Merge Conflicts detected
     Reviewer->>Blackboard: upsert_pr_artifact(PR, status='APPROVED_WITH_CONFLICT')
-    Reviewer->>Poller: Set label 'ready-for-dev' (or 'status:merge-conflict')
+    Reviewer->>Poller: Set label 'ready-for-dev'
     Poller->>DevTest: Pick up PR for conflict resolution
     DevTest->>Blackboard: get_pr_artifact(PR) -> 'APPROVED_WITH_CONFLICT'
     DevTest->>DevTest: Fast-path: git merge main & push (Skip logic rewrite)
@@ -333,7 +342,7 @@ To protect against rate-limit throttling and API cost overruns across multi-proj
 
 ---
 
-## 🚫 Architectural Constraints & Anti-Patterns
+## 🚫 Architectural Constraints & Anti-Patterns (e.g. No circular dependencies, No UI logic in Domain)
 
 ### Strict Constraints
 
