@@ -487,3 +487,81 @@ async def test_scenario_bulk_pr_and_ci_rollup_variations(tmp_path: Path, monkeyp
     assert item_30["pr_ci_details"] is None
 
 
+@pytest.mark.asyncio
+async def test_poll_project_sdlc_items_reconciles_closed_issues_when_sweep_complete(tmp_path: Path, monkeypatch):
+    """
+    Given SQLite contains active issues #10 and #20
+    When a complete poller sweep (len < limit) returns only #10 as open
+    Then issue #20 is reconciled to state='CLOSED' in SQLite
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=tmp_path / "crosstrainingapp",
+    )
+
+    # Initial state in SQLite
+    await state_manager.sync_project_sdlc_items(
+        "crosstrainingapp",
+        [
+            {"issue_number": 10, "state": "OPEN", "labels": ["ready-for-dev"]},
+            {"issue_number": 20, "state": "OPEN", "labels": ["ready-for-dev"]},
+        ],
+    )
+
+    # GitHub only returns #10
+    mock_issues = [{"number": 10, "title": "feat: open issue", "state": "OPEN", "labels": []}]
+    monkeypatch.setattr(poller, "fetch_all_open_issues", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=[]))
+
+    await poller.poll_project_sdlc_items(project, state_manager, limit_issues=100)
+
+    sdlc_items = await state_manager.get_sdlc_items("crosstrainingapp")
+    item_map = {i["issue_number"]: i for i in sdlc_items}
+    assert item_map[10]["state"] == "OPEN"
+    assert item_map[20]["state"] == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_poll_project_sdlc_items_skips_reconciliation_when_sweep_hits_limit(tmp_path: Path, monkeypatch):
+    """
+    Given SQLite contains active issues #10 and #20
+    When a poller sweep hits limit (len == limit) and only returns #10
+    Then reconciliation is safely skipped (preventing false closures)
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=tmp_path / "crosstrainingapp",
+    )
+
+    await state_manager.sync_project_sdlc_items(
+        "crosstrainingapp",
+        [
+            {"issue_number": 10, "state": "OPEN", "labels": ["ready-for-dev"]},
+            {"issue_number": 20, "state": "OPEN", "labels": ["ready-for-dev"]},
+        ],
+    )
+
+    mock_issues = [{"number": 10, "title": "feat: open issue", "state": "OPEN", "labels": []}]
+    monkeypatch.setattr(poller, "fetch_all_open_issues", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=[]))
+
+    # limit_issues=1, so len(open_issues) == 1 == limit_issues (hits limit)
+    await poller.poll_project_sdlc_items(project, state_manager, limit_issues=1)
+
+    sdlc_items = await state_manager.get_sdlc_items("crosstrainingapp")
+    item_map = {i["issue_number"]: i for i in sdlc_items}
+    assert item_map[10]["state"] == "OPEN"
+    assert item_map[20]["state"] == "OPEN"  # Preserved as OPEN!
+
+
+

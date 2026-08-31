@@ -1244,6 +1244,83 @@ async def test_devtest_phase3_sqlite_cte_story_lock_end_to_end(tmp_path: Path, m
     assert 93 in dispatched_issues
 
 
+@pytest.mark.asyncio
+async def test_devtest_phase3_aborts_and_cleans_labels_on_closed_target_issue(tmp_path: Path, monkeypatch, caplog):
+    """
+    Given a subtask #126 is resolved from SQLite
+    When fetch_issue_by_number returns state='CLOSED' from GitHub
+    Then DevTest immediately aborts, cleans stale labels, updates SQLite to 'CLOSED', and avoids invoking the harness.
+    """
+    import logging
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(enabled=True, harness="antigravity")},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    config = GlobalConfig()
+
+    items = [
+        {"issue_number": 125, "item_type": "STORY", "state": "OPEN", "labels": ["architect-processed"]},
+        {"issue_number": 126, "parent_issue_id": 125, "item_type": "SUBTASK", "state": "OPEN", "labels": ["ready-for-dev"], "sequence_order": 1},
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # Mock fetch_open_prs to empty
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+
+    # Mock fetch_issue_by_number returning state="CLOSED"
+    mock_issue_payload = {
+        "number": 126,
+        "title": "feat: closed subtask",
+        "state": "CLOSED",
+        "labels": [{"name": "ready-for-dev"}],
+    }
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_issue_by_number", AsyncMock(return_value=mock_issue_payload))
+
+    harness_called = []
+    async def mock_execute(*a, **kw):
+        harness_called.append(True)
+        return 0
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_execute)
+
+    edited_cmds = []
+    class MockProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+        async def communicate(self):
+            return b"", b""
+
+    async def mock_subprocess_exec(*cmd, **kw):
+        edited_cmds.append(list(cmd))
+        return MockProc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda c: "gh")
+
+    with caplog.at_level(logging.WARNING):
+        ran, msg = await run_devtest_node(project, config, state_manager)
+
+    assert ran is False
+    assert "already closed on GitHub" in msg
+    assert len(harness_called) == 0
+
+    # Verify SQLite was updated to CLOSED
+    sdlc_items = await state_manager.get_sdlc_items("graph-engineering")
+    item_map = {item["issue_number"]: item for item in sdlc_items}
+    assert item_map[126]["state"] == "CLOSED"
+
+    # Verify label removal was attempted
+    assert any("--remove-label" in " ".join(cmd) for cmd in edited_cmds)
+
+
+
 
 
 

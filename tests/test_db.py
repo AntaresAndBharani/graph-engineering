@@ -1977,6 +1977,86 @@ async def test_get_next_devtest_task_picks_lowest_open_queued_subtask_in_oldest_
     assert task3 == 98
 
 
+@pytest.mark.asyncio
+async def test_reconcile_completed_stories_auto_closes_story_when_all_subtasks_closed(tmp_path: Path):
+    """
+    Given a parent Story with 2 child subtasks
+    When both child subtasks are transitioned to CLOSED
+    And reconcile_completed_stories is invoked
+    Then the parent story is transitioned to state='CLOSED' and labeled 'dev-implemented'
+    """
+    db_file = tmp_path / "state.db"
+    manager = StateManager(db_file)
+    await manager.init_db()
+
+    items = [
+        {"issue_number": 100, "item_type": "STORY", "state": "OPEN", "labels": ["architect-processed"]},
+        {"issue_number": 101, "parent_issue_id": 100, "item_type": "SUBTASK", "state": "CLOSED", "labels": ["merged"]},
+        {"issue_number": 102, "parent_issue_id": 100, "item_type": "SUBTASK", "state": "CLOSED", "labels": ["merged"]},
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    closed_count = await manager.reconcile_completed_stories("graph-engineering")
+    assert closed_count == 1
+
+    sdlc_items = await manager.get_sdlc_items("graph-engineering")
+    story_map = {item["issue_number"]: item for item in sdlc_items}
+    assert story_map[100]["state"] == "CLOSED"
+    assert "dev-implemented" in story_map[100]["labels"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_untracked_closed_issues_marks_missing_issues_closed(tmp_path: Path):
+    """
+    Given SQLite has 3 open issues for a project
+    When a GitHub polling sweep returns only issue #101 as open
+    And reconcile_untracked_closed_issues is called with {101}
+    Then issues #100 and #102 are transitioned to state='CLOSED' in SQLite
+    """
+    db_file = tmp_path / "state.db"
+    manager = StateManager(db_file)
+    await manager.init_db()
+
+    items = [
+        {"issue_number": 100, "state": "OPEN", "labels": ["ready-for-dev"]},
+        {"issue_number": 101, "state": "OPEN", "labels": ["ready-for-dev"]},
+        {"issue_number": 102, "state": "OPEN", "labels": ["queued"]},
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    closed_count = await manager.reconcile_untracked_closed_issues("graph-engineering", {101})
+    assert closed_count == 2
+
+    sdlc_items = await manager.get_sdlc_items("graph-engineering")
+    item_map = {item["issue_number"]: item for item in sdlc_items}
+    assert item_map[100]["state"] == "CLOSED"
+    assert item_map[101]["state"] == "OPEN"
+    assert item_map[102]["state"] == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_get_next_devtest_task_never_returns_parent_story_id(tmp_path: Path):
+    """
+    Given a parent Story where all subtasks are closed but the story itself was not yet marked closed
+    When get_next_devtest_task is invoked
+    Then it returns None (never returns the parent story ID for coding)
+    """
+    db_file = tmp_path / "state.db"
+    manager = StateManager(db_file)
+    await manager.init_db()
+
+    items = [
+        {"issue_number": 109, "item_type": "STORY", "state": "OPEN", "labels": ["architect-processed"]},
+        {"issue_number": 111, "parent_issue_id": 109, "item_type": "SUBTASK", "state": "CLOSED", "labels": ["merged"]},
+        {"issue_number": 112, "parent_issue_id": 109, "item_type": "SUBTASK", "state": "CLOSED", "labels": ["merged"]},
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    task = await manager.get_next_devtest_task("graph-engineering")
+    assert task is None
+
+
+
 
 
 

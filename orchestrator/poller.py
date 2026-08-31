@@ -137,7 +137,7 @@ async def fetch_issues_with_label(
         "--state",
         "open",
         "--json",
-        "number,title,body,labels,createdAt,url",
+        "number,title,body,state,labels,createdAt,closedAt,url",
         "--limit",
         str(limit),
     ]
@@ -179,7 +179,7 @@ async def fetch_issue_by_number(
         "--repo",
         repo,
         "--json",
-        "number,title,body,labels,createdAt,updatedAt,url",
+        "number,title,body,state,labels,createdAt,updatedAt,closedAt,url",
     ]
 
     try:
@@ -217,7 +217,7 @@ async def fetch_all_open_issues(
         "--state",
         "open",
         "--json",
-        "number,title,body,labels,createdAt,updatedAt,url",
+        "number,title,body,state,labels,createdAt,updatedAt,closedAt,url",
         "--limit",
         str(limit),
     ]
@@ -319,13 +319,21 @@ async def poll_project_sdlc_items(
         parent_match = re.search(r"Parent:\s*#(\d+)", body, re.IGNORECASE)
         parent_issue_id = int(parent_match.group(1)) if parent_match else None
 
+        # Extract label names for deterministic classification
+        lbl_names = [l.get("name", "") if isinstance(l, dict) else str(l) for l in labels]
+        lbl_lower = [l.lower() for l in lbl_names]
+
         # Determine item_type
         if parent_issue_id:
             item_type = "SUBTASK"
-        elif "story" in title.lower():
+        elif (
+            any(s in lbl_lower for s in ("architect-processed", "architect-approved", "planned", "status:planned", "story"))
+            or "story" in title.lower()
+            or "epic" in title.lower()
+        ):
             item_type = "STORY"
         else:
-            item_type = "SUBTASK"
+            item_type = "TASK"
 
         matched_pr = find_linked_pr(int(issue_num), open_prs)
         linked_pr = int(matched_pr["number"]) if matched_pr and matched_pr.get("number") else None
@@ -351,6 +359,11 @@ async def poll_project_sdlc_items(
     if state_manager is not None:
         try:
             await state_manager.sync_project_sdlc_items(project.name, items)
+            # Reconcile untracked closed issues only if fetch was complete (len < limit)
+            if len(open_issues) < limit_issues:
+                open_ids = {int(i["number"]) for i in open_issues if i.get("number")}
+                await state_manager.reconcile_untracked_closed_issues(project.name, open_ids)
+                await state_manager.reconcile_completed_stories(project.name)
         except Exception as e:
             _logger.warning(
                 "[%s] Non-blocking SDLC memory sync failed during polling sweep: %s",

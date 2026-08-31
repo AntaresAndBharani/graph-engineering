@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 import os
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import aiosqlite
 
 
@@ -849,6 +849,100 @@ class StateManager:
                 )
             await db.commit()
 
+    async def reconcile_untracked_closed_issues(self, project_name: str, active_open_issue_ids: Set[int]) -> int:
+        """
+        Reconciles SQLite sdlc_items against active open issue IDs fetched from GitHub.
+        Any issue in SQLite for this project currently marked OPEN / ACTIVE / PLANNED
+        that is absent from active_open_issue_ids is updated to state = 'CLOSED'.
+        Returns the number of reconciled closed issues.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT issue_number, state, labels
+                FROM sdlc_items
+                WHERE project_name = ?
+                  AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                """,
+                (project_name,),
+            )
+            rows = await cursor.fetchall()
+            closed_count = 0
+            for row in rows:
+                issue_num = int(row["issue_number"])
+                if issue_num not in active_open_issue_ids:
+                    # Clean up workflow trigger labels in labels string
+                    curr_labels = [l.strip() for l in (row["labels"] or "").split(",") if l.strip()]
+                    cleaned_labels = [l for l in curr_labels if not any(t in l.lower() for t in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued"))]
+                    await db.execute(
+                        """
+                        UPDATE sdlc_items
+                        SET state = 'CLOSED', labels = ?, updated_at = ?
+                        WHERE project_name = ? AND issue_number = ?
+                        """,
+                        (", ".join(cleaned_labels), now, project_name, issue_num),
+                    )
+                    closed_count += 1
+            if closed_count > 0:
+                await db.commit()
+            return closed_count
+
+    async def reconcile_completed_stories(self, project_name: str) -> int:
+        """
+        Pure state reconciliation method that scans for active/open User Stories whose
+        child subtasks are 100% completed/closed.
+        Updates completed stories to state = 'CLOSED' and adds 'dev-implemented' label.
+        Returns count of newly closed stories.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            query = """
+                SELECT issue_number, labels
+                FROM sdlc_items s
+                WHERE s.project_name = ?
+                  AND UPPER(s.item_type) = 'STORY'
+                  AND UPPER(s.state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                  AND EXISTS (
+                      SELECT 1 FROM sdlc_items sub
+                      WHERE sub.project_name = s.project_name
+                        AND sub.parent_issue_id = s.issue_number
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sdlc_items sub_open
+                      WHERE sub_open.project_name = s.project_name
+                        AND sub_open.parent_issue_id = s.issue_number
+                        AND UPPER(sub_open.state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
+                  );
+            """
+            cursor = await db.execute(query, (project_name,))
+            rows = await cursor.fetchall()
+            closed_count = 0
+            for row in rows:
+                story_id = int(row["issue_number"])
+                curr_labels = [l.strip() for l in (row["labels"] or "").split(",") if l.strip()]
+                if "dev-implemented" not in [l.lower() for l in curr_labels]:
+                    curr_labels.append("dev-implemented")
+                cleaned_labels = [l for l in curr_labels if not any(t in l.lower() for t in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued"))]
+                await db.execute(
+                    """
+                    UPDATE sdlc_items
+                    SET state = 'CLOSED', labels = ?, updated_at = ?
+                    WHERE project_name = ? AND issue_number = ?
+                    """,
+                    (", ".join(cleaned_labels), now, project_name, story_id),
+                )
+                closed_count += 1
+            if closed_count > 0:
+                await db.commit()
+            return closed_count
+
     async def get_sdlc_items(self, project_name: str) -> List[Dict[str, Any]]:
         """
         Retrieves all active SDLC items for a specific project from SQLite.
@@ -1120,10 +1214,13 @@ class StateManager:
                                 AND sub.parent_issue_id = sdlc_items.issue_number
                                 AND UPPER(sub.state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
                           )
-                          OR NOT EXISTS (
-                              SELECT 1 FROM sdlc_items sub2
-                              WHERE sub2.project_name = sdlc_items.project_name
-                                AND sub2.parent_issue_id = sdlc_items.issue_number
+                          OR (
+                              NOT EXISTS (
+                                  SELECT 1 FROM sdlc_items sub2
+                                  WHERE sub2.project_name = sdlc_items.project_name
+                                    AND sub2.parent_issue_id = sdlc_items.issue_number
+                              )
+                              AND (labels LIKE '%ready-for-dev%' OR labels LIKE '%status:ready-for-dev%' OR UPPER(state) IN ('READY-FOR-DEV', 'STATUS:READY-FOR-DEV'))
                           )
                       )
                     ORDER BY sequence_order ASC, issue_number ASC
@@ -1142,21 +1239,7 @@ class StateManager:
         Deterministic CTE query that resolves the single active locked parent story
         and returns only its next sequential subtask, with blocked-story quarantine
         and standalone/planned-promotion fallbacks.
-
-        Workflow:
-        1. CTE ActiveStory: Resolves the single active (non-CLOSED/MERGED, non-PLANNED) STORY item
-           that has uncompleted subtasks (or is open), ordered by sequence_order ASC, issue_number ASC.
-        2. If an active story exists:
-           - Returns the next sequential uncompleted subtask under parent_issue_id = active_story_id.
-           - If the next subtask is 'blocked' / 'orchestration-failed', returns None (lock is held, no fallback).
-           - If the next subtask is 'ready-for-dev', returns its issue_number.
-           - If the next subtask is not 'ready-for-dev' (e.g. queued or in-progress), returns None (lock held).
-        3. If no active story is locked:
-           - Fallback 1: Standalone tasks with parent_issue_id IS NULL and 'ready-for-dev',
-             ordered by sequence_order ASC, issue_number ASC.
-           - Fallback 2: Oldest planned story promotion: promotes the oldest PLANNED story to ACTIVE,
-             unlocks its first queued subtask to 'ready-for-dev', and returns that subtask's issue_number.
-        4. Returns None if no eligible task is found.
+        Parent stories are never returned for code implementation.
         """
         def _is_blocked(state: Optional[str], labels: Optional[str]) -> bool:
             if state:
@@ -1224,7 +1307,17 @@ class StateManager:
                     # Return lowest uncompleted subtask in active story (queued or ready-for-dev)
                     return sub_id
                 else:
-                    # Active story has no child subtasks; check if story itself is unblocked and not in-progress
+                    # Check if story has any child subtasks at all
+                    has_children_cursor = await db.execute(
+                        "SELECT 1 FROM sdlc_items WHERE project_name = ? AND parent_issue_id = ? LIMIT 1",
+                        (project_name, active_story_id),
+                    )
+                    has_children = await has_children_cursor.fetchone()
+                    if has_children:
+                        # All child subtasks are completed; story is done and holds lock until reconciled
+                        return None
+
+                    # Active story never had subtasks (standalone story); check if story itself is ready and not blocked/in-progress
                     story_cursor = await db.execute(
                         """
                         SELECT issue_number, state, labels
@@ -1237,17 +1330,23 @@ class StateManager:
                     if story_row:
                         if _is_blocked(story_row["state"], story_row["labels"]) or _is_in_progress(story_row["state"], story_row["labels"]):
                             return None
-                        return int(story_row["issue_number"])
+                        if _is_ready_for_dev(story_row["state"], story_row["labels"]):
+                            return int(story_row["issue_number"])
                     return None
 
-            # 2. Fallback 1: Standalone tasks (parent_issue_id IS NULL and not a STORY)
+            # 2. Fallback 1: Standalone tasks (parent_issue_id IS NULL and not a STORY/EPIC, with no child subtasks)
             standalone_cursor = await db.execute(
                 """
                 SELECT issue_number, state, labels, sequence_order
                 FROM sdlc_items
                 WHERE project_name = ?
                   AND parent_issue_id IS NULL
-                  AND (item_type IS NULL OR UPPER(item_type) != 'STORY')
+                  AND (item_type IS NULL OR UPPER(item_type) NOT IN ('STORY', 'EPIC'))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sdlc_items child
+                      WHERE child.project_name = sdlc_items.project_name
+                        AND child.parent_issue_id = sdlc_items.issue_number
+                  )
                   AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
                   AND (labels LIKE '%ready-for-dev%' OR labels LIKE '%status:ready-for-dev%' OR UPPER(state) IN ('READY-FOR-DEV', 'STATUS:READY-FOR-DEV'))
                 ORDER BY sequence_order ASC, issue_number ASC

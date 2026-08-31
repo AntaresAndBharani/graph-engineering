@@ -1,149 +1,142 @@
+﻿Here is the critical architectural review of the proposed Implementation Plan for Closed-Issue Guarding, Automatic Parent Story Completion, and SDLC Memory Reconciliation.
+
+### 🧐 Critical Architectural & DX Review
+
+The proposed plan correctly identifies a critical flaw: the DevTest node attempting to implement already-closed issues (like Issue #109) due to blind polling and missing state validations. However, the proposed solution introduces a severe architectural anti-pattern and a dangerous data-loss trap that must be amended before implementation.
+
+**1. The Read-Mutate-Write Anti-Pattern in `db.py**`
+The plan suggests that `get_next_devtest_task` should automatically mark a story `CLOSED` if all its subtasks are completed. A `get_next_*` function must be a pure, side-effect-free database read. Mutating state within a fetch query violates the Single Responsibility Principle (SRP) and will cause SQLite `database is locked` exceptions when multiple threads poll the queue simultaneously. Story completion logic must be extracted to a dedicated `reconcile_story_states()` method.
+
+**2. The Pagination Data-Loss Trap in `poller.py**`
+The plan proposes marking items `CLOSED` in SQLite if they are absent from GitHub's fetched `open_issues` list. If the GitHub API request is paginated, times out, or returns a partial list (e.g., a 500 error on the secondary node), the orchestrator will erroneously wipe the active status of hundreds of valid issues. Reconciliation must strictly validate that a full, successful, un-paginated fetch occurred before executing the exclusion diff.
+
+---
+
 ### Phase 1: Functional & DX (Developer Experience) Review
 
-#### 1. Workflow Analysis & Node Lifecycle Management
+**Workflow Analysis & Multi-Agent Node Flow**
 
-The transition to a streamlined pipeline (`Architect` $\to$ `DevTest`) requires a formal mechanism to disable inactive nodes (`supervisor`, `reviewer`, `bau`) without deleting their implementations from `orchestrator/nodes/`. The orchestrator runtime must dynamically inspect the `enabled` boolean state for every node in `orchestrator/config.py`.
+* **Ingestion (Poller):** The poller fetches open issues and PRs. It must now explicitly request `state` and `closedAt` fields. After a fully successful fetch, it runs a diff against SQLite to close untracked items.
 
-```
-                    [GitHub Issues / Webhook Poller]
-                                   │
-                 ┌─────────────────┴─────────────────┐
-                 ▼                                   ▼
-      [Target: Reviewer/BAU/Sup]           [Target: Architect/DevTest]
-                 │                                   │
-      [Check: node.enabled == False]       [Check: node.enabled == True]
-                 │                                   │
-                 ▼                                   ▼
-        [Skip Polling & Log:                [Dispatch Native Async
-         "Node <name> is disabled"]          Worktree Execution]
-```
 
-* **Friction Points Identified:**
-  * **Hardcoded Polling Queries:** In `orchestrator/poller.py`, status queries currently scan for `status:needs-review` or `status:needs-po-review` even if those nodes are deprecated. This generates unnecessary GitHub API calls.
-  * **Label Schema Divergence:** Discrepancies exist between legacy labels (`status:needs-review`, `status:post-merge-review`) and active labels (`status:ready-for-architecture`, `status:planned`, `status:ready-for-dev`, `status:in-progress`, `status:completed`, `status:blocked`).
-  * **Documentation Staleness:** Documentation files in `docs/node-reviewer.md`, `docs/node-supervisor.md`, `docs/node-bau.md`, and `.graph/architecture.md` depict active 4-hop routing loops rather than documenting them as optional or disabled components.
+* **Queue Resolution (Database):** The database filters out parent stories completely from the task queue. Standalone tasks are strictly validated to ensure they lack child subtasks before dispatch.
 
-#### 2. Edge Cases & Resilience Strategy
 
-* **Disabled Node Issue Ingestion:** If an issue in GitHub carries a legacy label (e.g., `status:needs-review`), the poller must ignore it or emit a single debug log entry rather than throwing an unhandled `KeyError` or dispatching an unconfigured worker.
-* **Config Toggle Drift:** If a node is set to `enabled: false` in `templates/config.example.yaml`, the CLI daemon in `orchestrator/cli.py` must bypass creating worktrees or memory buffers for that node.
-* **Hot-Reloading Node Toggles:** When `orchestrator/reloader.py` detects a configuration change enabling/disabling a node, it must reload active tasks without restarting the entire async event loop.
-* **Database State Isolation:** Inactive node names in `sdlc_items.active_node` must be marked as `IDLE (Disabled)` in `orchestrator/db.py` to prevent the TUI dashboard from expecting live streams.
+* **Execution Guard (DevTest):** Before invoking the LLM, DevTest fetches the issue, verifies `state NOT IN ('CLOSED', 'MERGED')`, and aborts execution if closed—cleaning up stale GitHub labels in the process.
 
-#### 3. Acceptance Criteria (BDD Format)
 
-```gherkin
-Scenario: Node disabled via configuration skips polling and dispatch
-  Given the configuration sets "nodes.reviewer.enabled = false"
-  And an open issue in GitHub is labeled "status:needs-review"
-  When the poller cycle runs in "orchestrator/poller.py"
-  Then the poller must not query or dispatch workers for the reviewer node
-  And the reviewer worktree directory must not be created.
 
-Scenario: Inactive node execution raises explicit disabled error
-  Given the "ReviewerNode" is instantiated with "enabled = false"
-  When the orchestrator attempts to invoke "ReviewerNode.execute()"
-  Then it must raise "NodeDisabledError" or return "NodeResult.DISABLED"
-  And record "[WARN] Attempted execution on disabled node: reviewer" in logs.
+**Edge Cases & Resilience Strategy**
 
-Scenario: Label taxonomy cleanup harmonizes active and legacy states
-  Given a project configuration defining the active label schema
-  When the daemon verifies GitHub label requirements
-  Then only active labels ("status:ready-for-architecture", "status:planned", "status:ready-for-dev", "status:in-progress", "status:completed", "status:blocked") must be provisioned
-  And deprecated reviewer labels must be omitted from auto-creation routines.
-```
+* **Label Removal Permissions:** When DevTest encounters a closed issue, it attempts to run `gh issue edit --remove-label ready-for-dev`. If the bot token lacks permissions to edit closed issues in a specific repo, the subprocess will throw an error. The node must catch `subprocess.CalledProcessError` and gracefully degrade, continuing to update the local SQLite state without crashing.
 
-#### 4. CLI UX & Terminal Feedback Guidelines
 
-* **Startup Configuration Audit:** `orchestrator/cli.py` prints a clean status matrix of active versus dormant nodes on startup:
+* **Manual Parent Story Tampering:** If a human operator manually adds a `ready-for-dev` label to a parent story on GitHub, `db.py` must aggressively filter it out of `get_next_devtest_task` by validating `item_type`.
 
-```text
-[INFO] Node Status Registry:
-       • architect:  ENABLED  (Harness: claude, Worktree: Isolated)
-       • devtest:    ENABLED  (Harness: gemini, Worktree: Isolated)
-       • supervisor: DISABLED (Bypassed)
-       • reviewer:   DISABLED (Bypassed)
-       • bau:        DISABLED (Bypassed)
-```
 
-* **Standardized Log Namespace:** Enforce strict prefixing via `orchestrator/logging.py`:
-  * `[DEBUG] [poller] Skipping disabled node listener: reviewer`
-  * `[INFO] [graph-engineering|architect] Story #95 decomposed. Tagged: status:planned`
+
+**Acceptance Criteria (BDD Format)**
+
+* **Given** a parent story has 0 open subtasks and all child subtasks are marked `CLOSED`,
+* **When** the orchestrator runs the state reconciliation routine,
+* **Then** the parent story state must transition to `CLOSED` with label `dev-implemented` in SQLite,
+
+
+* **And** `get_next_devtest_task` must never return the parent story ID for code implementation.
+
+
+* **Given** `DevTest` selects Subtask #126 and fetches its payload from GitHub,
+* **When** the fetched payload indicates `state == "CLOSED"`,
+
+
+* **Then** `DevTest` must immediately abort execution, remove the `ready-for-dev` label, and update SQLite to `CLOSED` without invoking the LLM harness.
+
+
+* **Given** a network failure results in an incomplete fetch of `open_issues` from GitHub,
+* **When** `poll_project_sdlc_items` attempts SDLC memory reconciliation,
+* **Then** the exclusion diff must abort, preventing active issues from being falsely marked as `CLOSED`.
+
+**CLI UX Guidelines**
+
+* Standardize terminal feedback in `orchestrator/logging.py`:
+* `[WARN] [crosstrainingapp|devtest] Issue #109 is already CLOSED on GitHub. Synchronizing state and aborting.`
+* `[INFO] [crosstrainingapp|poller] SDLC Memory Recon: Reconciled 3 orphaned issues to CLOSED.`
+
+
 
 ---
 
 ### Phase 2: Architectural & Implementation Plan
 
-#### 1. Codebase Impact & Component Updates
+**Codebase Impact**
 
-| File Path | Action | Description / Responsibility |
+| File Path | Action | Description |
 | --- | --- | --- |
-| `orchestrator/config.py` | **Modify** | Add `is_node_enabled(node_name)` helper to `ProjectConfig`. Add `LabelTaxonomyConfig` to unify labels. |
-| `templates/config.example.yaml` | **Modify** | Set `reviewer.enabled: false`, `supervisor.enabled: false`, and `bau.enabled: false`. Update label mappings. |
-| `orchestrator/nodes/reviewer.py` | **Modify** | Enforce `enabled` guard without deleting implementation. |
-| `orchestrator/nodes/supervisor.py` | **Modify** | Enforce `enabled` guard without deleting implementation. |
-| `orchestrator/nodes/bau.py` | **Modify** | Enforce `enabled` guard without deleting implementation. |
-| `orchestrator/poller.py` | **Modify** | Filter dispatch loops against `project.is_node_enabled(node_name)` before polling GitHub. |
-| `orchestrator/cli.py` | **Modify** | Display active/disabled status matrix in startup logs. |
-| `docs/node-reviewer.md` | **Modify** | Mark header with `> **Status:** Deprecated / Disabled by default`. |
-| `docs/node-supervisor.md` | **Modify** | Mark header with `> **Status:** Optional / Disabled by default`. |
-| `docs/node-bau.md` | **Modify** | Mark header with `> **Status:** Optional / Disabled by default`. |
-| `.graph/architecture.md` | **Modify** | Update SDLC pipeline diagrams to reflect the 2-node parallel flow (`Architect` $\to$ `DevTest`). |
-| `README.md` | **Modify** | Update active workflow instructions, label guides, and configuration flags. |
-| `tests/test_config.py` | **Modify** | Add tests for node enablement toggling and label taxonomy parsing. |
-| `tests/test_nodes.py` | **Modify** | Add tests verifying disabled nodes return early without network or disk operations. |
+| `orchestrator/poller.py` | **Modify** | Add `state` and `closedAt` to CLI JSON flags. Implement `_reconcile_closed_issues()` with pagination safeties.
 
----
+ |
+| `orchestrator/db.py` | **Modify** | Update `get_next_devtest_task` to strictly filter out parent stories. Add a new pure-write method `reconcile_completed_stories()`.
 
-#### 2. Label Taxonomy Harmonization
+ |
+| `orchestrator/nodes/devtest.py` | **Modify** | Inject Phase 3 pre-execution state guard to check for `CLOSED`/`MERGED` and clean labels.
 
-| Category | Label String | Target Entity | Lifecycle Role |
-| --- | --- | --- | --- |
-| **Ingestion** | `status:ready-for-architecture` | Parent Story / Issue | Trigger for Architect node decomposition. |
-| **Planning** | `status:planned` | Parent Story | Decomposed story with linked queued subtasks awaiting execution. |
-| **Active Story** | `status:in-progress` | Parent Story | Story currently claimed and undergoing subtask execution. |
-| **Active Subtask** | `status:ready-for-dev` | Subtask Issue | Target for DevTest code implementation and testing. |
-| **Queued Subtask** | `status:queued` | Subtask Issue | Dependent subtask waiting for predecessor completion. |
-| **Terminal** | `status:completed` | Story & Subtask | PR squash-merged and verified. |
-| **Failure / Lock** | `status:blocked` | Story & Subtask | Unresolvable merge conflict or CI check exhaustion. |
-| **Deprecated** | `status:needs-review` | *None* | Disabled with Reviewer node. |
-| **Deprecated** | `status:post-merge-review` | *None* | Disabled with Reviewer node. |
+ |
+| `tests/test_nodes.py` | **Modify** | Add unit tests for DevTest aborting on closed target issues and label cleanup resilience.
 
----
+ |
 
-#### 3. Step-by-Step Implementation Checklist
+**New Components**
 
-* **Step 1: Configuration & Schema Layer (`orchestrator/config.py` & `templates/config.example.yaml`)**
-  * Update `ProjectConfig` to include `is_node_enabled(node_name: str) -> bool`.
-  * Set `reviewer.enabled: false`, `supervisor.enabled: false`, and `bau.enabled: false` in `templates/config.example.yaml`.
-  * Standardize `LabelTaxonomyConfig` with fields for `ready_for_arch`, `planned`, `in_progress`, `ready_for_dev`, `queued`, `completed`, and `blocked`.
+* None required. The logic fits within the existing bounds of `orchestrator/db.py` and `orchestrator/poller.py`.
 
-* **Step 2: Node Guards & Poller Filtering (`orchestrator/nodes/` & `orchestrator/poller.py`)**
-  * In `orchestrator/poller.py` (`fetch_project_workload`), check `project.is_node_enabled(node_type)` before executing GitHub API queries for that node's labels.
-  * In `orchestrator/cli.py` (`run_project_cycle`), bypass calling disabled node routines.
+**Technical Constraints**
 
-* **Step 3: Startup CLI Auditing (`orchestrator/cli.py`)**
-  * In `orchestrator/cli.py`, add a startup Node Status Registry table printing the active/dormant status of all nodes.
+* **Strict Item Classification:** The poller must implement robust classification to definitively tag items as `STORY`, `SUBTASK`, or `TASK` based on `parent_issue_id` and labels. If an item is misclassified as a standalone `TASK`, DevTest might attempt to implement an Epic.
 
-* **Step 4: Documentation Synchronization**
-  * In `.graph/architecture.md`, replace 4-hop diagrams with the streamlined 2-node parallel flow (`Architect` Producer $\to$ `DevTest` Consumer).
-  * In `docs/node-reviewer.md`, `docs/node-supervisor.md`, and `docs/node-bau.md`, add deprecation/disabled callout headers explaining how to enable them if needed.
-  * In `docs/node-architect.md` and `docs/node-devtest.md`, document the worktree isolation, story locking, and automated PR squash-merge operations.
-  * In `README.md`, update quickstart commands, label taxonomy tables, and YAML configuration examples.
 
-* **Step 5: Automated Testing & Verification (`tests/`)**
-  * In `tests/test_config.py`, verify `enabled: false` deserializes correctly from YAML.
-  * In `tests/test_poller.py` and `tests/test_cli.py`, test that disabled node queues and routines are bypassed.
-  * Run `pytest -v tests/` to confirm complete test pass rate across the test suite.
+* **Subprocess Execution Safety:** Stripping stale labels via the `gh` CLI requires `asyncio.create_subprocess_exec`. It must be wrapped in a try/except block to catch non-zero exit codes.
 
----
+**Execution Steps**
 
-## 🔗 GitHub Reference
-- **GitHub Issue:** [Issue #125](https://github.com/AntaresAndBharani/graph-engineering/issues/125)
-- **Label:** `needs-triage`
+1. **Poller Enhancement (`orchestrator/poller.py`)**
+* Append `state,closedAt` to the `--json` flags in all `gh issue list` and `gh issue view` calls.
 
-## 🔨 Subtasks
-- [ ] feat(config, poller): disable dormant nodes by default and gate poller workload queries on node.enabled
-- [ ] feat(cli): startup Node Status Registry table and project cycle dispatch bypass for disabled nodes
-- [ ] docs: harmonize architecture docs, README, and node guides with 2-node parallel topology
-- [ ] test(config, cli, poller): unit tests for node enablement gating, poller bypassing, and label taxonomy
+
+* Implement robust classification: If `parent_issue_id` exists $\to$ `SUBTASK`. If labels contain `story`, `planned`, or `architect-processed` $\to$ `STORY`. Else $\to$ `TASK`.
+
+
+* Implement `_reconcile_closed_issues(fetched_ids, project_name)` at the end of the polling loop, ensuring it only runs if the fetch operation completed 100% successfully.
+
+
+2. **Database Hardening (`orchestrator/db.py`)**
+* Refactor `get_next_devtest_task`. Remove any logic that falls back to `return parent_issue_id`.
+
+
+* Update Fallback 1 (Standalone tasks) to include: `AND NOT EXISTS (SELECT 1 FROM sdlc_items child WHERE child.parent_issue_id = sdlc_items.issue_number)`.
+
+
+* Create `reconcile_completed_stories()` to mark parent stories `CLOSED` if all subtasks are `CLOSED`.
+
+
+3. **DevTest Pre-Flight Guard (`orchestrator/nodes/devtest.py`)**
+* In Phase 3, immediately after `fetch_issue_by_number`, validate: `if target_issue.get("state", "").upper() in ("CLOSED", "MERGED"):`.
+
+
+* If matched, execute `gh issue edit <id> --remove-label ready-for-dev` (catching exceptions).
+* Execute `db.upsert_sdlc_item(..., state="CLOSED")`.
+
+
+* Return early with a `NodeResult.SKIPPED` status.
+
+
+4. **Testing Verification (`tests/`)**
+* Update `tests/test_db.py` to assert that `get_next_devtest_task` never returns a story ID.
+
+
+* Run `pytest -v` to ensure 100% pass rate.
+
+
+
+
+
+Are you ready for me to output the concrete git patch for the `orchestrator/db.py` query modifications, or should we refine the poller reconciliation logic first?

@@ -986,6 +986,11 @@ async def run_devtest_node(
             return False, f"PR #{pr_number} failed CI checks ({ci_details}). Tagged 'needs-refactor'."
 
     # Phase 3: Deterministic Gating for New Implementation Issues via Story Lock (0 Tokens)
+    try:
+        await state_manager.reconcile_completed_stories(project.name)
+    except Exception as e:
+        _logger.debug("[%s:devtest] Non-blocking story reconciliation error: %s", project.name, e)
+
     target_issue_id = await state_manager.get_next_devtest_task(project.name)
     if target_issue_id is None:
         _logger.warning(
@@ -1004,6 +1009,47 @@ async def run_devtest_node(
     target_issue = await fetch_issue_by_number(project.repo, target_issue_id)
     if not target_issue:
         return False, f"Target issue #{target_issue_id} could not be fetched from GitHub."
+
+    # Guard against already-closed or merged issues
+    issue_state = str(target_issue.get("state") or "").upper()
+    if issue_state in ("CLOSED", "MERGED", "DONE", "STATUS:CLOSED", "STATUS:MERGED", "STATUS:DONE"):
+        _logger.warning(
+            "[%s:devtest] Target issue #%d is already closed on GitHub (%s). Synchronizing SDLC state and skipping.",
+            project.name,
+            target_issue_id,
+            issue_state,
+        )
+        # Attempt to remove stale trigger labels if any
+        curr_labels = [
+            l.get("name", "") if isinstance(l, dict) else str(l)
+            for l in target_issue.get("labels", [])
+        ]
+        stale_labels = [lbl for lbl in curr_labels if any(t in lbl.lower() for t in (trigger, "ready-for-dev", "queued", "status:ready-for-dev", "status:queued"))]
+        if stale_labels and shutil.which("gh"):
+            cmd = ["gh", "issue", "edit", str(target_issue_id), "--repo", project.repo]
+            for s_lbl in stale_labels:
+                cmd.extend(["--remove-label", s_lbl])
+            try:
+                p_clean = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await p_clean.wait()
+            except Exception as e:
+                _logger.debug("[%s:devtest] Graceful fallback on label cleanup for closed issue #%d: %s", project.name, target_issue_id, e)
+
+        # Synchronize CLOSED state into SQLite
+        await state_manager.sync_project_sdlc_items(
+            project.name,
+            [{
+                "issue_number": target_issue_id,
+                "title": target_issue.get("title", ""),
+                "state": "CLOSED",
+                "labels": [lbl for lbl in curr_labels if not any(t in lbl.lower() for t in (trigger, "ready-for-dev", "queued", "status:ready-for-dev", "status:queued"))],
+            }],
+        )
+        return False, f"Target issue #{target_issue_id} is already closed on GitHub. Synchronized state and skipped."
 
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
