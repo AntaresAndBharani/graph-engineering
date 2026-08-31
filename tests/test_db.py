@@ -1056,6 +1056,9 @@ async def test_token_usage_empty_and_isolation(tmp_path: Path):
     # Empty window sum returns 0
     assert await manager.get_window_token_usage("nonexistent") == 0
 
+    # Empty multi-window usage returns (0, 0)
+    assert await manager.get_multi_window_usage("nonexistent") == (0, 0)
+
     # Empty breakdown returns empty dicts
     breakdown = await manager.get_usage_breakdown("nonexistent")
     assert breakdown["by_project"] == {}
@@ -1064,6 +1067,218 @@ async def test_token_usage_empty_and_isolation(tmp_path: Path):
     # Empty raw events list
     events = await manager.get_token_usage_events("nonexistent")
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_multi_window_token_usage_dual_window_calculation(tmp_path: Path):
+    """
+    Scenario: Single query returns both window totals
+      Given `token_usage_events` contains rows for a harness spanning more than 168 hours
+      When `get_multi_window_usage(harness_name, short_window_hours, long_window_hours=168.0)` is called
+      Then it returns both the short-window token total and the long-window (weekly) token total
+      And both totals are computed from UTC cutoffs (`now - window_hours`) with zero timezone drift
+      And the call completes in a single SQL round-trip (no duplicate queries against the table)
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Event 1: 2 hours ago (within 5h short window AND 168h weekly window) -> 150,000 tokens
+    t1 = now_utc - timedelta(hours=2)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="architect",
+        issue_number=101,
+        prompt_tokens=100000,
+        completion_tokens=50000,
+        total_tokens=150000,
+        created_at=t1,
+    )
+
+    # Event 2: 4 hours ago (within 5h short window AND 168h weekly window) -> 200,000 tokens
+    t2 = now_utc - timedelta(hours=4)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="crosstrainingapp",
+        node_name="devtest",
+        issue_number=102,
+        prompt_tokens=150000,
+        completion_tokens=50000,
+        total_tokens=200000,
+        created_at=t2,
+    )
+
+    # Event 3: 24 hours ago (OUTSIDE 5h short window, INSIDE 168h weekly window) -> 500,000 tokens
+    t3 = now_utc - timedelta(hours=24)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="devtest",
+        issue_number=103,
+        prompt_tokens=400000,
+        completion_tokens=100000,
+        total_tokens=500000,
+        created_at=t3,
+    )
+
+    # Event 4: 120 hours ago (5 days ago, OUTSIDE 5h, INSIDE 168h weekly window) -> 1,000,000 tokens
+    t4 = now_utc - timedelta(hours=120)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="reviewer",
+        issue_number=104,
+        prompt_tokens=800000,
+        completion_tokens=200000,
+        total_tokens=1000000,
+        created_at=t4,
+    )
+
+    # Event 5: 170 hours ago (>168h, OUTSIDE BOTH short and weekly windows) -> 2,000,000 tokens
+    t5 = now_utc - timedelta(hours=170)
+    await manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-3-7-sonnet",
+        project_name="graph-engineering",
+        node_name="bau",
+        issue_number=105,
+        prompt_tokens=1500000,
+        completion_tokens=500000,
+        total_tokens=2000000,
+        created_at=t5,
+    )
+
+    # Event 6: Different harness event within 1h (should be ignored for claude query)
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="graph-engineering",
+        node_name="architect",
+        issue_number=106,
+        prompt_tokens=50000,
+        completion_tokens=20000,
+        total_tokens=70000,
+        created_at=now_utc - timedelta(hours=1),
+    )
+
+    # Short window (5h) total: Event 1 (150k) + Event 2 (200k) = 350k
+    # Long window (168h) total: Event 1 (150k) + Event 2 (200k) + Event 3 (500k) + Event 4 (1000k) = 1,850,000
+    # Event 5 (170h ago) is excluded from both
+    short_total, long_total = await manager.get_multi_window_usage(
+        harness_name="claude",
+        short_window_hours=5.0,
+        long_window_hours=168.0,
+    )
+
+    assert short_total == 350000
+    assert long_total == 1850000
+
+
+@pytest.mark.asyncio
+async def test_multi_window_token_usage_empty_and_zero_handling(tmp_path: Path):
+    """
+    Scenario: Empty ledger returns zero usage
+      Given no rows exist for the harness in `token_usage_events`
+      When `get_multi_window_usage()` is called
+      Then both returned totals are 0, with no exceptions raised
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Empty DB call
+    short_usage, long_usage = await manager.get_multi_window_usage(
+        harness_name="nonexistent",
+        short_window_hours=5.0,
+        long_window_hours=168.0,
+    )
+    assert short_usage == 0
+    assert long_usage == 0
+
+    # Default parameters call
+    short_default, long_default = await manager.get_multi_window_usage("nonexistent")
+    assert short_default == 0
+    assert long_default == 0
+
+
+@pytest.mark.asyncio
+async def test_multi_window_token_usage_global_pooling_and_custom_windows(tmp_path: Path):
+    """
+    Scenario: Global multi-project pooling and flexible window definitions
+      Given events across multiple projects for harness "antigravity"
+      When get_multi_window_usage is called with custom window hours
+      Then totals aggregate across all projects accurately in a single round trip
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Project 1 Event: 30 mins ago -> 80,000 tokens
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="project-alpha",
+        node_name="devtest",
+        issue_number=1,
+        prompt_tokens=60000,
+        completion_tokens=20000,
+        total_tokens=80000,
+        created_at=now_utc - timedelta(minutes=30),
+    )
+
+    # Project 2 Event: 3 hours ago -> 120,000 tokens
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="project-beta",
+        node_name="reviewer",
+        issue_number=2,
+        prompt_tokens=100000,
+        completion_tokens=20000,
+        total_tokens=120000,
+        created_at=now_utc - timedelta(hours=3),
+    )
+
+    # Project 3 Event: 12 hours ago -> 200,000 tokens
+    await manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="project-gamma",
+        node_name="architect",
+        issue_number=3,
+        prompt_tokens=160000,
+        completion_tokens=40000,
+        total_tokens=200000,
+        created_at=now_utc - timedelta(hours=12),
+    )
+
+    # Test 1h short window vs 24h long window:
+    # 1h window: Project 1 only = 80,000
+    # 24h window: Project 1 (80k) + Project 2 (120k) + Project 3 (200k) = 400,000
+    short_1h, long_24h = await manager.get_multi_window_usage(
+        harness_name="antigravity",
+        short_window_hours=1.0,
+        long_window_hours=24.0,
+    )
+    assert short_1h == 80000
+    assert long_24h == 400000
+
+    # Inverted window test (short_window > long_window)
+    res_inv = await manager.get_multi_window_usage(
+        harness_name="antigravity",
+        short_window_hours=24.0,
+        long_window_hours=1.0,
+    )
+    assert res_inv == (400000, 80000)
 
 
 @pytest.mark.asyncio

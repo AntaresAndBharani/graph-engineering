@@ -1623,6 +1623,44 @@ class StateManager:
                 return int(row[0])
             return 0
 
+    async def get_multi_window_usage(
+        self,
+        harness_name: str,
+        short_window_hours: float = 5.0,
+        long_window_hours: float = 168.0,
+    ) -> tuple[int, int]:
+        """
+        Queries token_usage_events for both the short rolling window and the long (weekly) window
+        in a single async SQL round-trip using UTC cutoffs with zero timezone drift.
+        Returns a tuple of (short_window_tokens, long_window_tokens).
+        """
+        now_utc = datetime.now(timezone.utc)
+        short_cutoff = now_utc - timedelta(hours=short_window_hours)
+        long_cutoff = now_utc - timedelta(hours=long_window_hours)
+        short_cutoff_str = short_cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        long_cutoff_str = long_cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        min_cutoff_str = min(short_cutoff_str, long_cutoff_str)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN created_at >= ? THEN total_tokens ELSE 0 END), 0) AS short_usage,
+                    COALESCE(SUM(CASE WHEN created_at >= ? THEN total_tokens ELSE 0 END), 0) AS long_usage
+                FROM token_usage_events
+                WHERE harness_name = ? AND created_at >= ?
+                """,
+                (short_cutoff_str, long_cutoff_str, harness_name, min_cutoff_str),
+            )
+            row = await cursor.fetchone()
+            if row:
+                short_val = int(row[0]) if row[0] is not None else 0
+                long_val = int(row[1]) if row[1] is not None else 0
+                return (short_val, long_val)
+            return (0, 0)
+
     async def get_usage_breakdown(
         self,
         harness_name: str,
