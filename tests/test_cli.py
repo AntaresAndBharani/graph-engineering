@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import pytest
 from typer.testing import CliRunner
-from orchestrator.cli import app
+from orchestrator.cli import app, run_project_cycle
+from orchestrator.config import GlobalConfig, ProjectConfig
+from orchestrator.db import StateManager
 
 runner = CliRunner()
 
@@ -47,7 +51,7 @@ def test_cli_doctor(tmp_path):
     assert "Orchestrator System Diagnostics" in result.stdout
 
 
-def test_cli_init(tmp_path):
+def test_cli_init(tmp_path, monkeypatch):
     config_file = tmp_path / "config.yaml"
     posix_path = tmp_path.as_posix()
     config_file.write_text(
@@ -63,6 +67,10 @@ projects:
         """,
         encoding="utf-8",
     )
+    async def mock_sync(repo, managed_labels):
+        return {lbl.name: True for lbl in managed_labels}
+    monkeypatch.setattr("orchestrator.cli.sync_repository_labels", mock_sync)
+
     result = runner.invoke(app, ["init", "--config", str(config_file)])
     assert result.exit_code == 0
     assert "Initializing Graph Orchestrator" in result.stdout
@@ -75,15 +83,8 @@ def test_cli_labels_help():
     assert "Provisions and synchronizes workflow taxonomy labels" in result.stdout
 
 
-import pytest
-from pathlib import Path
-from orchestrator.config import GlobalConfig, ProjectConfig
-from orchestrator.db import StateManager
-from orchestrator.cli import run_project_cycle
-
-
 @pytest.mark.asyncio
-async def test_run_project_cycle_idle(tmp_path: Path):
+async def test_run_project_cycle_idle(tmp_path: Path, monkeypatch):
     config = GlobalConfig()
     project = ProjectConfig(name="test", repo="org/repo", local_path=str(tmp_path))
     state_manager = StateManager(tmp_path / "state.db")
@@ -94,6 +95,13 @@ async def test_run_project_cycle_idle(tmp_path: Path):
     graph_dir.mkdir(parents=True, exist_ok=True)
     (graph_dir / "architecture.md").write_text("# Architecture Standards\n", encoding="utf-8")
     await state_manager.record_node_run("architect_research", project.repo)
+
+    async def mock_issues(repo, label):
+        return []
+    async def mock_prs(repo, label):
+        return []
+    monkeypatch.setattr("orchestrator.poller.fetch_issues_with_label", mock_issues)
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_prs)
 
     # When no issues or PRs exist, all nodes report idle (0 tokens) -> False
     work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
@@ -182,6 +190,17 @@ projects:
         }
 
     monkeypatch.setattr("orchestrator.poller.fetch_issue_by_number", mock_fetch_issue)
+
+    async def mock_exec(*cmd, **kwargs):
+        class MockProc:
+            returncode = 0
+            async def communicate(self):
+                return (b"", b"")
+            async def wait(self):
+                return 0
+        return MockProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_exec)
 
     result = runner.invoke(app, ["supervisor", "evaluate", "20", "-p", "alpha", "--config", str(config_file)])
     assert result.exit_code == 0
@@ -302,7 +321,7 @@ def test_cli_watch_headless_flag(tmp_path: Path, monkeypatch):
     assert len(called_headless) == 1
 
 
-def test_run_command_clears_stale_stop_signal(tmp_path: Path):
+def test_run_command_clears_stale_stop_signal(tmp_path: Path, monkeypatch):
     """Asserts that manual orchestrator run clears stale stop_requested flags in state.db."""
     from orchestrator.db import StateManager
     db_path = tmp_path / "state.db"
@@ -325,6 +344,10 @@ projects:
         """,
         encoding="utf-8",
     )
+
+    async def mock_prs(repo, label):
+        return []
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_prs)
 
     async def prep():
         sm = StateManager(db_path)
@@ -521,7 +544,7 @@ def test_scenario_startup_node_status_registry_table_ux(tmp_path: Path):
     assert "Serial (Maintenance)" in output
 
 
-def test_cli_run_renders_startup_node_status_table(tmp_path: Path):
+def test_cli_run_renders_startup_node_status_table(tmp_path: Path, monkeypatch):
     """Verifies that orchestrator run displays the Autonomous Node Status Registry table at startup."""
     config_file = tmp_path / "config.yaml"
     posix_path = tmp_path.as_posix()
@@ -552,6 +575,20 @@ projects:
         """,
         encoding="utf-8",
     )
+
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Architecture Standards\n", encoding="utf-8")
+
+    async def mock_issues(repo, label):
+        return []
+    async def mock_prs(repo, label):
+        return []
+    async def mock_all_issues(repo):
+        return []
+    monkeypatch.setattr("orchestrator.poller.fetch_issues_with_label", mock_issues)
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_prs)
+    monkeypatch.setattr("orchestrator.poller.fetch_all_open_issues", mock_all_issues)
 
     result = runner.invoke(app, ["run", "-p", "table-proj", "--config", str(config_file)])
     assert result.exit_code == 0

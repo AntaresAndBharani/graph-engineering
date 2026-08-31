@@ -1,5 +1,9 @@
 # Reviewer & Gatekeeper Node (`node-reviewer`)
 
+> [!NOTE]
+> **Status: Optional / Disabled by Default** (`enabled: false`).  
+> In the streamlined 2-node parallel topology, `node-devtest` autonomously handles pre-flight validation, TDD implementation, local test suite execution, remote GitHub Actions CI verification, and squash auto-merge (`auto_merge_approved: true`). `node-reviewer` is dormant by default and can be optionally enabled in `config.yaml` for dedicated dual-pass review gates.
+
 **Module**: [`orchestrator/nodes/reviewer.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/reviewer.py)
 
 The **Reviewer Node** acts as Node 3 in the pipeline—a deterministic quality gatekeeper and Blackboard recorder that verifies remote CI test suites, checks git mergeability, and merges approved PRs into `main`.
@@ -64,7 +68,7 @@ projects:
     repo: "AntaresAndBharani/crosstrainingapp"
     nodes:
       reviewer:
-        enabled: true
+        enabled: false               # Optional / Disabled by default
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"

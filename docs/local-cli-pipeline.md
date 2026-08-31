@@ -14,12 +14,16 @@ flowchart TD
         CLI --> Harness["Agnostic Harness Adapter\n(Claude / Antigravity / Devin)"]
     end
 
-    subgraph Autonomous 5-Node Graph
-        Poller -->|Anomalies / 12h SLA| N1["1. Supervisor Node"]
-        Poller -->|needs-triage| N2["2. Architect Node (Triage & Decomposition)"]
-        Poller -->|ready-for-dev| N3["3. DevTest Node (3-Amigos Implementation)"]
-        Poller -->|needs-architect-review| N4["4. Reviewer Node (CI & Auto-Merge)"]
-        Poller -->|tech-debt / enhancement| N5["5. BAU Maintenance Node (Daily Sweep)"]
+    subgraph Core 2-Node Parallel Engine ["Core Pipeline (Default Active / Worktree Concurrent)"]
+        Poller -->|needs-triage| N2["Node 1: Architect (Triage & Decomposition)"]
+        Poller -->|ready-for-dev| N3["Node 2: DevTest (3-Amigos Implementation)"]
+        N2 -->|ready-for-dev| N3
+    end
+
+    subgraph Optional Governance Nodes ["Optional Governance Nodes (Disabled by Default)"]
+        Poller -.->|Anomalies / 12h SLA| N1["Node 0: Supervisor (Watchdog & PO-Proxy)"]
+        Poller -.->|needs-architect-review| N4["Node 3: Reviewer (CI & Auto-Merge)"]
+        Poller -.->|tech-debt / enhancement| N5["Node 4: BAU Maintenance (Daily Sweep)"]
     end
 
     Harness -->|Local OAuth Session| TargetRepo["Target Project Repositories\n(GitHub CLI + Local Git)"]
@@ -33,15 +37,19 @@ flowchart TD
    - The poller queries GitHub issue and PR metadata using `gh` CLI JSON output before invoking any LLM.
    - When no work is waiting, nodes idle with **0 LLM tokens consumed**.
 
-2. **Agnostic AI Harness Adapter**:
+2. **Streamlined 2-Node Parallel Engine**:
+   - Executes Architect (Node 1: Producer) and DevTest (Node 2: Consumer) concurrently via isolated Git worktrees (`.graph/worktrees/`).
+   - DevTest autonomously validates builds, runs test suites, verifies remote CI checks, and executes squash auto-merges.
+
+3. **Agnostic AI Harness Adapter**:
    - Seamlessly switches between **Claude Code CLI** (`claude`), **Antigravity CLI** (`agy`), or **Devin CLI** (`devin`) via YAML configuration without altering application code.
    - Leverages active local developer subscriptions (`Claude Pro/Max`, `Google Antigravity`).
 
-3. **Concurrency Control & TTL State Database (`state.db`)**:
+4. **Concurrency Control & TTL State Database (`state.db`)**:
    - SQLite WAL database (`~/.config/orchestrator/state.db` or `%USERPROFILE%\.orchestrator\state.db`) manages atomic run locks.
    - Locks automatically expire after node timeouts (`ttl_minutes`), preventing deadlocks from abrupt process termination.
 
-4. **Multi-Project Support**:
+5. **Multi-Project Support**:
    - Concurrently monitors and processes multiple repositories defined in `config.yaml`.
 
 ---
@@ -51,7 +59,7 @@ flowchart TD
 Configuration is stored at `~/.config/orchestrator/config.yaml` (Linux/macOS) or `%USERPROFILE%\.orchestrator\config.yaml` (Windows).
 
 ```yaml
-version: "1.0"
+version: 2
 
 settings:
   poll_interval_seconds: 300          # 5 minutes polling interval for daemon
@@ -62,11 +70,11 @@ settings:
 
 harnesses:
   claude:
-    command: "claude"
+    binary: "claude"
     args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
     timeout_minutes: 30
   antigravity:
-    command: "agy"
+    binary: "agy"
     args: ["-p", "{prompt}", "--dangerously-skip-permissions", "--print-timeout", "45m"]
     timeout_minutes: 45
 
@@ -95,36 +103,36 @@ projects:
     repo: "AntaresAndBharani/crosstrainingapp"
     local_path: "c:/Users/rogal/workspaces/ws-setups/crosstrainingapp"
     context_files:
-      - "architecture.md"
+      - ".graph/architecture.md"
     nodes:
-      supervisor:
-        enabled: true
-        harness: "antigravity"
-        model: "gemini-3.7-flash-low"
       architect:
-        enabled: true
+        enabled: true                 # Default enabled (Producer)
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
       devtest:
-        enabled: true
+        enabled: true                 # Default enabled (Consumer)
         harness: "antigravity"
         model: "gemini-3.7-flash-medium"
         label_trigger: "ready-for-dev"
         label_output: "needs-architect-review"
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
+      supervisor:
+        enabled: false                # Optional / Disabled by default
+        harness: "antigravity"
+        model: "gemini-3.7-flash-low"
       reviewer:
-        enabled: true
+        enabled: false                # Optional / Disabled by default
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"
         label_trigger: "needs-architect-review"
         auto_merge_approved: true
       bau:
-        enabled: true
+        enabled: false                # Optional / Disabled by default
         harness: "antigravity"
         model: "gemini-3.7-flash-low"
 ```
