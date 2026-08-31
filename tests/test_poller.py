@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
 
-from orchestrator.config import ProjectConfig
+from orchestrator.config import ProjectConfig, NodeConfig
 from orchestrator.db import StateManager
 from orchestrator import poller
 
@@ -573,7 +573,6 @@ async def test_scenario_disabled_nodes_bypass_github_poller_queries(tmp_path: Pa
     Then it must query ONLY labels for enabled nodes (architect and devtest)
     And it must strictly avoid making GitHub API calls for reviewer or supervisor labels.
     """
-    from orchestrator.config import NodeConfig
 
     project = ProjectConfig(
         name="dormant-nodes-proj",
@@ -626,7 +625,6 @@ async def test_scenario_disabled_architect_skips_architect_queries(tmp_path: Pat
     """
     Asserts fetch_project_workload bypasses architect queries when architect.enabled = False.
     """
-    from orchestrator.config import NodeConfig
 
     project = ProjectConfig(
         name="no-architect-proj",
@@ -661,7 +659,6 @@ async def test_scenario_disabled_devtest_skips_devtest_and_pr_queries(tmp_path: 
     """
     Asserts fetch_project_workload bypasses devtest and PR queries when devtest.enabled = False.
     """
-    from orchestrator.config import NodeConfig
 
     project = ProjectConfig(
         name="no-devtest-proj",
@@ -704,7 +701,6 @@ async def test_scenario_disabled_project_skips_all_workload_queries(tmp_path: Pa
     """
     Asserts fetch_project_workload makes 0 GitHub queries when project.enabled = False.
     """
-    from orchestrator.config import NodeConfig
 
     project = ProjectConfig(
         name="disabled-project",
@@ -739,6 +735,74 @@ async def test_scenario_disabled_project_skips_all_workload_queries(tmp_path: Pa
     assert workload["architect"] == []
     assert workload["devtest"] == []
     assert workload["prs"] == []
+
+
+@pytest.mark.asyncio
+async def test_scenario_label_taxonomy_dual_format_resolution(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Label taxonomy dual-format resolution
+    Given both shorthand ("ready-for-dev", "architect-processed") and prefixed ("status:ready-for-dev", "status:architect-processed") labels
+    When poller label-matching and classification logic runs
+    Then both formats resolve accurately to the canonical classification and matching.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="taxonomy-proj",
+        repo="org/taxonomy-proj",
+        local_path=tmp_path / "taxonomy-proj",
+    )
+
+    mock_issues = [
+        {
+            "number": 1,
+            "title": "Story with status prefix",
+            "state": "OPEN",
+            "labels": [{"name": "status:architect-processed"}],
+            "body": "User Story\n\n## Subtasks\n- [ ] #2",
+        },
+        {
+            "number": 2,
+            "title": "Subtask with status prefix",
+            "state": "OPEN",
+            "labels": [{"name": "status:ready-for-dev"}],
+            "body": "Subtask\n\nParent: #1",
+        },
+        {
+            "number": 3,
+            "title": "Story with shorthand label",
+            "state": "OPEN",
+            "labels": [{"name": "architect-processed"}],
+            "body": "User Story\n\n## Subtasks\n- [ ] #4",
+        },
+        {
+            "number": 4,
+            "title": "Subtask with shorthand label",
+            "state": "OPEN",
+            "labels": [{"name": "ready-for-dev"}],
+            "body": "Subtask\n\nParent: #3",
+        },
+    ]
+
+    monkeypatch.setattr(poller, "fetch_all_open_issues", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=[]))
+
+    items = await poller.poll_project_sdlc_items(project, state_manager)
+
+    item_map = {i["issue_number"]: i for i in items}
+
+    # Both prefix and shorthand stories classified as STORY
+    assert item_map[1]["item_type"] == "STORY"
+    assert item_map[3]["item_type"] == "STORY"
+
+    # Both subtasks classified as SUBTASK with proper parent linkage
+    assert item_map[2]["item_type"] == "SUBTASK"
+    assert item_map[2]["parent_issue_id"] == 1
+    assert item_map[4]["item_type"] == "SUBTASK"
+    assert item_map[4]["parent_issue_id"] == 3
+
 
 
 
