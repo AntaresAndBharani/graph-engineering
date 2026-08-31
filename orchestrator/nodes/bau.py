@@ -34,7 +34,7 @@ async def run_bau_node(
             model="gemini-3.7-flash-low",
         ),
     )
-    if not node_cfg.enabled:
+    if not project.is_node_enabled("bau"):
         return False, "BAU node disabled for project."
 
     # 1. Schedule Gating (Once a Day / 86400s)

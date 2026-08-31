@@ -466,7 +466,7 @@ async def run_supervisor_node(
     Zero-token gating: if no anomalies and no pending PO reviews, returns (False, 'Idle').
     """
     node_cfg = project.nodes.get("supervisor", NodeConfig(harness="antigravity", model="gemini-3.7-flash-low"))
-    if not node_cfg.enabled:
+    if not project.is_node_enabled("supervisor"):
         return False, "Supervisor node disabled for project."
 
     # 1. Schedule Gating (Default: 3600s / 1 hour)
