@@ -1681,7 +1681,6 @@ async def test_dashboard_scenario_idempotent_project_scoped_log_hydration(tmp_pa
       And clear the RichLog pane and populate it with the retrieved historical lines
       And incoming live logs from other projects must accumulate in the background without polluting the active view
     """
-    from orchestrator.config import ProjectConfig, SettingsConfig
     from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
 
     ProjectLogBufferManager.reset()
@@ -1704,11 +1703,12 @@ async def test_dashboard_scenario_idempotent_project_scoped_log_hydration(tmp_pa
     logger.setLevel(logging.INFO)
     logger.addHandler(log_handler)
 
-    # Seed historical logs
-    logger.info("[graph-engineering:architect] Historical GE story triage")
-    logger.info("[crosstrainingapp:supervisor] Historical CT watchdog check")
-
     app = DashboardApp(config=config, log_handler=log_handler)
+
+    # Seed historical logs
+    app.buffer_manager.add_line("[graph-engineering:architect] Historical GE story triage", project_name="graph-engineering", node_name="architect")
+    app.buffer_manager.add_line("[crosstrainingapp:supervisor] Historical CT watchdog check", project_name="crosstrainingapp", node_name="supervisor")
+
     async with app.run_test() as pilot:
         log_view = app.query_one("#log_view", RichLog)
         table = app.query_one("#projects_table", DataTable)
@@ -1716,7 +1716,7 @@ async def test_dashboard_scenario_idempotent_project_scoped_log_hydration(tmp_pa
         await pilot.pause()
 
         # Switch selection to graph-engineering (row 1 because alphabetical sort)
-        await pilot.press("down")
+        table.move_cursor(row=1)
         await pilot.pause()
         assert app.selected_project == "graph-engineering"
 
@@ -1725,7 +1725,7 @@ async def test_dashboard_scenario_idempotent_project_scoped_log_hydration(tmp_pa
         assert not any("Historical CT watchdog check" in t for t in rendered_ge)
 
         # When user switches project selection to crosstrainingapp (row 0)
-        await pilot.press("up")
+        table.move_cursor(row=0)
         await pilot.pause()
         assert app.selected_project == "crosstrainingapp"
 
@@ -1762,7 +1762,6 @@ async def test_dashboard_scenario_cold_start_disk_log_fallback(tmp_path: Path):
       Then the log manager must fallback to tailing the last 100 lines from the latest disk log file in "~/.config/orchestrator/logs/crosstrainingapp/"
       And display them in the RichLog pane with immediate historical context
     """
-    from orchestrator.config import ProjectConfig, SettingsConfig
     from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
 
     ProjectLogBufferManager.reset()
@@ -1785,6 +1784,7 @@ async def test_dashboard_scenario_cold_start_disk_log_fallback(tmp_path: Path):
 
     log_handler = TextualLogHandler(maxlen=1000)
     app = DashboardApp(config=config, log_handler=log_handler)
+    app.buffer_manager.reset()
 
     async with app.run_test() as pilot:
         log_view = app.query_one("#log_view", RichLog)
@@ -1793,7 +1793,7 @@ async def test_dashboard_scenario_cold_start_disk_log_fallback(tmp_path: Path):
         await pilot.pause()
 
         # Trigger project selection
-        await pilot.press("down")
+        table.move_cursor(row=0)
         await pilot.pause()
 
         rendered = [line.text for line in log_view.lines]
@@ -1811,7 +1811,6 @@ async def test_dashboard_harness_stream_line_routing_with_project_tag(tmp_path: 
       Then the line is added to ProjectLogBufferManager's "graph-engineering" buffer
       And it is written to the active RichLog view
     """
-    from orchestrator.config import ProjectConfig
     from orchestrator.logging import ProjectLogBufferManager
 
     ProjectLogBufferManager.reset()
@@ -1843,11 +1842,11 @@ async def test_dashboard_harness_stream_line_routing_with_project_tag(tmp_path: 
         app._handle_harness_stream_line("other-proj", "  [dim cyan][other-proj:devtest][/dim cyan] [dim]Other project tests...[/dim]")
 
         # Check buffer manager
-        ge_buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("graph-engineering")
+        ge_buf = app.buffer_manager.PROJECT_BUFFERS.get("graph-engineering")
         assert ge_buf is not None
         assert any("Running unit tests..." in (item[1] if isinstance(item, tuple) else item) for item in ge_buf)
 
-        other_buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("other-proj")
+        other_buf = app.buffer_manager.PROJECT_BUFFERS.get("other-proj")
         assert other_buf is not None
         assert any("Other project tests..." in (item[1] if isinstance(item, tuple) else item) for item in other_buf)
 
@@ -1866,7 +1865,6 @@ async def test_scenario_dashboard_harness_stream_3_arg_node_name_wiring(tmp_path
       Then ProjectLogBufferManager.add_line(line, project_name=project_name, node_name=node_name) must be called,
       populating the node-scoped tuple buffer
     """
-    from orchestrator.config import GlobalConfig, ProjectConfig, SettingsConfig
     from orchestrator.logging import ProjectLogBufferManager
     from orchestrator.ui.dashboard import DashboardApp
     from textual.widgets import DataTable, RichLog
@@ -2130,7 +2128,6 @@ async def test_scenario_node_scoped_cold_start_disk_tail_fallback_dashboard(tmp_
       Then the returned lines match the tail of that node-specific file, not a sibling node directory
     """
     from unittest.mock import AsyncMock
-    from orchestrator.config import SettingsConfig
 
     ProjectLogBufferManager.reset()
 

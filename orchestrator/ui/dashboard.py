@@ -183,7 +183,7 @@ class DashboardApp(App):
 
         log_dir = self.config.settings.resolved_log_dir if (self.config and self.config.settings) else None
 
-        lines = ProjectLogBufferManager.get_project_logs(
+        lines = self.buffer_manager.get_project_logs(
             project_name=project_name,
             log_dir=log_dir,
             max_lines=100,
@@ -195,11 +195,11 @@ class DashboardApp(App):
                 for rec in self.log_handler.records
                 if (
                     not project_name
-                    or ProjectLogBufferManager.extract_project_name(rec) in (None, project_name)
+                    or self.buffer_manager.extract_project_name(rec) in (None, project_name)
                 )
                 and (
                     not node_name
-                    or ProjectLogBufferManager.extract_node_name(rec) in (None, node_name)
+                    or self.buffer_manager.extract_node_name(rec) in (None, node_name)
                 )
             ]
 
@@ -209,8 +209,8 @@ class DashboardApp(App):
 
     def _handle_log_record(self, record: logging.LogRecord, formatted: str) -> None:
         """Callback invoked by TextualLogHandler on new log emissions."""
-        rec_project = ProjectLogBufferManager.extract_project_name(record)
-        rec_node = ProjectLogBufferManager.extract_node_name(record)
+        rec_project = self.buffer_manager.extract_project_name(record)
+        rec_node = self.buffer_manager.extract_node_name(record)
         if self.selected_project and rec_project and rec_project != self.selected_project:
             return
         if self.selected_node and rec_node and rec_node != self.selected_node:
@@ -245,8 +245,8 @@ class DashboardApp(App):
         if line is None:
             line = ""
 
-        line_project = project_name or ProjectLogBufferManager.extract_project_name(line)
-        line_node = node_name or ProjectLogBufferManager.extract_node_name(line)
+        line_project = project_name or self.buffer_manager.extract_project_name(line)
+        line_node = node_name or self.buffer_manager.extract_node_name(line)
         self.buffer_manager.add_line(line, project_name=line_project, node_name=line_node)
 
         if self.selected_project and line_project and line_project != self.selected_project:

@@ -1008,6 +1008,24 @@ async def run_devtest_node(
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 
+    # Ensure issue is active with trigger label on GitHub if it was queued
+    curr_labels = [
+        l.get("name", "") if isinstance(l, dict) else str(l)
+        for l in target_issue.get("labels", [])
+    ]
+    queue_labels = [lbl for lbl in curr_labels if any(q in lbl.lower() for q in ("queued", "awaiting-approval", "pending-review"))]
+    if queue_labels or not any(trigger in lbl.lower() for lbl in curr_labels):
+        if shutil.which("gh"):
+            cmd = ["gh", "issue", "edit", str(issue_id), "--repo", project.repo, "--add-label", trigger]
+            for q_lbl in queue_labels:
+                cmd.extend(["--remove-label", q_lbl])
+            try:
+                p_relbl = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                await p_relbl.wait()
+            except Exception as e:
+                _logger.warning("[%s:devtest] Failed to update labels on Subtask #%d: %s", project.name, issue_id, e)
+        console.print(f"  [bold cyan][{project.name}:devtest][/bold cyan] [bold yellow]⚡ Activating lowest open Subtask #{issue_id} ({', '.join(queue_labels) or 'unlabeled'} -> {trigger})[/bold yellow]")
+
     # Sync picked-up issue into SDLC Blackboard memory
     await state_manager.sync_project_sdlc_items(
         project.name,

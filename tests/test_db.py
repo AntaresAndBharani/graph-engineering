@@ -1889,6 +1889,95 @@ async def test_oldest_planned_story_tiebreaking_sequence_and_created_at(tmp_path
     assert story_b["state"] == "PLANNED"
 
 
+@pytest.mark.asyncio
+async def test_get_next_devtest_task_picks_lowest_open_queued_subtask_in_oldest_story(tmp_path: Path):
+    """
+    Scenario: DevTest picks lowest open queued subtask in oldest user story
+      Given Active Story A (#90) has subtasks #93 (queued) and #94 (queued)
+      And Story B (#95) has subtask #98 (queued)
+      When DevTest queries get_next_devtest_task
+      Then it returns subtask #93
+      When subtask #93 is closed
+      Then DevTest queries get_next_devtest_task and returns #94
+      When subtask #94 is closed and Story A is closed
+      Then DevTest queries get_next_devtest_task and returns #98 (Story B).
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 90,
+            "title": "Story A",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+            "created_at": 1000.0,
+        },
+        {
+            "issue_number": 93,
+            "title": "Subtask A1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 94,
+            "title": "Subtask A2",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 90,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 2,
+        },
+        {
+            "issue_number": 95,
+            "title": "Story B",
+            "item_type": "STORY",
+            "state": "PLANNED",
+            "sequence_order": 2,
+            "created_at": 2000.0,
+        },
+        {
+            "issue_number": 98,
+            "title": "Subtask B1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 95,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    # 1. First subtask of oldest story
+    task1 = await manager.get_next_devtest_task("graph-engineering")
+    assert task1 == 93
+
+    # 2. Close subtask #93 -> next is #94
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 93, "state": "CLOSED", "labels": ["merged"]}],
+    )
+    task2 = await manager.get_next_devtest_task("graph-engineering")
+    assert task2 == 94
+
+    # 3. Close subtask #94 and Story A (#90) -> moves to Story B (#95) -> returns #98
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [
+            {"issue_number": 94, "state": "CLOSED", "labels": ["merged"]},
+            {"issue_number": 90, "state": "CLOSED", "labels": ["merged"]},
+        ],
+    )
+    task3 = await manager.get_next_devtest_task("graph-engineering")
+    assert task3 == 98
+
+
+
 
 
 

@@ -1169,6 +1169,17 @@ class StateManager:
                     return True
             return False
 
+        def _is_in_progress(state: Optional[str], labels: Optional[str]) -> bool:
+            if state:
+                s = str(state).strip().upper()
+                if any(p in s for p in ("IN_PROGRESS", "IN-PROGRESS", "STATUS:IN-PROGRESS")):
+                    return True
+            if labels:
+                lbls = str(labels).lower()
+                if any(p in lbls for p in ("in-progress", "status:in-progress")):
+                    return True
+            return False
+
         def _is_ready_for_dev(state: Optional[str], labels: Optional[str]) -> bool:
             if labels:
                 lbls = str(labels).lower()
@@ -1207,16 +1218,13 @@ class StateManager:
                     sub_state = subtask_row["state"]
                     sub_labels = subtask_row["labels"]
 
-                    if _is_blocked(sub_state, sub_labels):
+                    if _is_blocked(sub_state, sub_labels) or _is_in_progress(sub_state, sub_labels):
                         return None
 
-                    if _is_ready_for_dev(sub_state, sub_labels):
-                        return sub_id
-
-                    # Next subtask in sequence is not ready (e.g. queued/in-progress) -> hold lock, return None
-                    return None
+                    # Return lowest uncompleted subtask in active story (queued or ready-for-dev)
+                    return sub_id
                 else:
-                    # Active story has no child subtasks; check if story itself is ready
+                    # Active story has no child subtasks; check if story itself is unblocked and not in-progress
                     story_cursor = await db.execute(
                         """
                         SELECT issue_number, state, labels
@@ -1227,10 +1235,9 @@ class StateManager:
                     )
                     story_row = await story_cursor.fetchone()
                     if story_row:
-                        if _is_blocked(story_row["state"], story_row["labels"]):
+                        if _is_blocked(story_row["state"], story_row["labels"]) or _is_in_progress(story_row["state"], story_row["labels"]):
                             return None
-                        if _is_ready_for_dev(story_row["state"], story_row["labels"]):
-                            return int(story_row["issue_number"])
+                        return int(story_row["issue_number"])
                     return None
 
             # 2. Fallback 1: Standalone tasks (parent_issue_id IS NULL and not a STORY)
@@ -1253,7 +1260,7 @@ class StateManager:
                 s_id = int(standalone_row["issue_number"])
                 s_state = standalone_row["state"]
                 s_labels = standalone_row["labels"]
-                if not _is_blocked(s_state, s_labels):
+                if not _is_blocked(s_state, s_labels) and not _is_in_progress(s_state, s_labels):
                     return s_id
                 return None
 

@@ -5,10 +5,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class HarnessRetryConfig(BaseModel):
+class OrchestratorBaseModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class HarnessRetryConfig(OrchestratorBaseModel):
     max_retries: int = Field(default=3, ge=0)
     initial_delay_seconds: float = Field(default=5.0, ge=0.5)
     backoff_factor: float = Field(default=2.0, ge=1.0)
@@ -19,7 +23,7 @@ class HarnessRetryConfig(BaseModel):
     ])
 
 
-class HarnessConfig(BaseModel):
+class HarnessConfig(OrchestratorBaseModel):
     binary: str
     args: List[str] = Field(default_factory=list)
     model_flag: Optional[str] = None
@@ -30,13 +34,13 @@ class HarnessConfig(BaseModel):
     retry: HarnessRetryConfig = Field(default_factory=HarnessRetryConfig)
 
 
-class LabelConfig(BaseModel):
+class LabelConfig(OrchestratorBaseModel):
     name: str
     color: str = "ededed"
     description: str = ""
 
 
-class NodeConfig(BaseModel):
+class NodeConfig(OrchestratorBaseModel):
     enabled: bool = True
     harness: str = "claude"
     model: Optional[str] = None
@@ -96,7 +100,7 @@ DEFAULT_CONTEXT_FILES: List[str] = [
 ]
 
 
-class ProjectConfig(BaseModel):
+class ProjectConfig(OrchestratorBaseModel):
     name: str
     repo: str
     local_path: Path
@@ -120,7 +124,7 @@ class ProjectConfig(BaseModel):
         return resolve_path(v)
 
 
-class SettingsConfig(BaseModel):
+class SettingsConfig(OrchestratorBaseModel):
     poll_interval_seconds: int = 300
     supervisor_interval_seconds: int = 3600
     bau_interval_seconds: int = 86400  # 1 day / 24 hours interval for BAU maintenance
@@ -194,7 +198,7 @@ DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
 }
 
 
-class HarnessQuotaConfig(BaseModel):
+class HarnessQuotaConfig(OrchestratorBaseModel):
     window_hours: float = Field(default=1.0, gt=0)
     window_token_limit: int = Field(default=2_000_000, gt=0)
     avg_tokens_per_hour: int = Field(default=400_000, gt=0)
@@ -208,12 +212,12 @@ DEFAULT_HARNESS_QUOTAS: Dict[str, HarnessQuotaConfig] = {
 }
 
 
-class QuotaSettings(BaseModel):
+class QuotaSettings(OrchestratorBaseModel):
     buffer_minutes: int = Field(default=30, ge=0)
     harnesses: Dict[str, HarnessQuotaConfig] = Field(default_factory=lambda: dict(DEFAULT_HARNESS_QUOTAS))
 
 
-class GlobalConfig(BaseModel):
+class GlobalConfig(OrchestratorBaseModel):
     version: int = 2
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
     managed_labels: List[LabelConfig] = Field(default_factory=lambda: list(DEFAULT_MANAGED_LABELS))
