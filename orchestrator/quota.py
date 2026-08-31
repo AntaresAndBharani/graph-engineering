@@ -25,6 +25,14 @@ class TokenUsageReader(Protocol):
     async def get_window_token_usage(self, harness_name: str, window_hours: float = 1.0) -> int:
         ...
 
+    async def get_multi_window_usage(
+        self,
+        harness_name: str,
+        short_window_hours: float = 5.0,
+        long_window_hours: float = 168.0,
+    ) -> tuple[int, int]:
+        ...
+
     async def get_usage_breakdown(self, harness_name: str, window_hours: float = 1.0) -> Dict[str, Any]:
         ...
 
