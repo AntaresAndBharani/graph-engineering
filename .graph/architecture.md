@@ -347,6 +347,17 @@ To protect against rate-limit throttling and API cost overruns across multi-proj
 - **Global Harness Pooling & Shared Gating**: Gating checks (`check_harness_capacity`) evaluate total consumption across all projects sharing the same AI execution harness (e.g. `claude`, `antigravity`, `devin`). If the remaining quota within the configured rolling window ($W_{\text{hours}}$) is insufficient for the required safety runway ($R_{\text{runway}} = \text{avg\_tokens\_per\_hour} \times \frac{\text{buffer\_minutes}}{60}$), the harness is throttled before subprocess dispatch.
 - **Replenishment Countdown ETA**: When throttled, `calculate_replenishment_eta()` computes the exact seconds remaining until aging token usage events roll out of the sliding window, providing precise countdown telemetry to the dashboard.
 
+### 8. Ephemeral Worktree Isolation & Fallback Pattern (`WorktreeManager`)
+To enable safe concurrent node execution (e.g. Architect living documentation updates while DevTest is implementing code), `WorktreeManager` allocates dedicated, isolated worktrees under `.graph/worktrees/<project>/<node>`:
+- **Zero-Interference Workspace**: Each node operates on its own HEAD branch and working directory, avoiding dirty index clashes and working tree locking.
+- **Lifecycle Cleanup**: Completed or aborted runs automatically release and prune worktrees.
+- **Serial Fallback**: If git worktree creation fails or is not supported by the underlying repository configuration, the orchestrator seamlessly falls back to serialized project-level execution without aborting tasks.
+
+### 9. Single-Pass Bulk PR State & CI Status Rollup Extraction Pattern (`poller.py`)
+To minimize GitHub CLI rate limit consumption and round-trip latency, `poller.py` extracts open PR metadata, mergeability status, and CI check statuses (`statusCheckRollup`) in a single bulk GraphQL/CLI query per cycle:
+- **Atomic Inspection**: Obtains CI state, branch names, labels, and merge conflicts simultaneously.
+- **Zero-Token Status Surfacing**: Populates the Blackboard (`sdlc_items`) and TUI dashboard without initiating additional network requests or LLM queries.
+
 ---
 
 ## 🚫 Architectural Constraints & Anti-Patterns (e.g. No circular dependencies, No UI logic in Domain)
