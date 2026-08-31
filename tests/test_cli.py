@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 from orchestrator.cli import app, run_project_cycle
-from orchestrator.config import GlobalConfig, ProjectConfig
+from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
 from orchestrator.db import StateManager
 
 runner = CliRunner()
@@ -597,6 +597,75 @@ projects:
     assert "ENABLED" in result.stdout
     assert "DISABLED" in result.stdout
     assert "Serial (Primary)" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_scenario_disabled_nodes_bypass_execution_dispatch_in_cli_loop(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Disabled Nodes Bypass Execution Dispatch in CLI Loop
+    Given "reviewer", "supervisor", and "bau" are set to "enabled = false"
+    When cli.run_project_cycle processes the project workload
+    Then it must not invoke run_reviewer_node, run_supervisor_node, or run_bau_node
+    And it must not allocate Git worktrees or memory buffers for disabled nodes.
+    """
+    from unittest.mock import AsyncMock
+
+    project = ProjectConfig(
+        name="test-bypass-proj",
+        repo="org/test-bypass",
+        local_path=str(tmp_path),
+        worktrees_enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=True),
+            "devtest": NodeConfig(enabled=True),
+            "reviewer": NodeConfig(enabled=False),
+            "supervisor": NodeConfig(enabled=False),
+            "bau": NodeConfig(enabled=False),
+        },
+    )
+    config = GlobalConfig()
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    invoked_nodes: list[str] = []
+
+    async def mock_arch(p, c, sm, **kw):
+        invoked_nodes.append("architect")
+        return False, "idle"
+
+    async def mock_devtest(p, c, sm, **kw):
+        invoked_nodes.append("devtest")
+        return False, "idle"
+
+    async def mock_reviewer(p, c, sm, **kw):
+        invoked_nodes.append("reviewer")
+        return False, "idle"
+
+    async def mock_supervisor(p, c, sm, **kw):
+        invoked_nodes.append("supervisor")
+        return False, "idle"
+
+    async def mock_bau(p, c, sm, **kw):
+        invoked_nodes.append("bau")
+        return False, "idle"
+
+    monkeypatch.setattr("orchestrator.cli.run_architect_node", mock_arch)
+    monkeypatch.setattr("orchestrator.cli.run_devtest_node", mock_devtest)
+    monkeypatch.setattr("orchestrator.cli.run_reviewer_node", mock_reviewer)
+    monkeypatch.setattr("orchestrator.cli.run_supervisor_node", mock_supervisor)
+    monkeypatch.setattr("orchestrator.cli.run_bau_node", mock_bau)
+
+    await run_project_cycle(project, config, state_manager, silent_idle=True)
+
+    # Active enabled nodes were evaluated
+    assert "architect" in invoked_nodes
+    assert "devtest" in invoked_nodes
+
+    # Disabled nodes were strictly bypassed
+    assert "reviewer" not in invoked_nodes
+    assert "supervisor" not in invoked_nodes
+    assert "bau" not in invoked_nodes
+
 
 
 

@@ -6,6 +6,7 @@ import pytest
 from orchestrator.config import (
     HarnessConfig,
     HarnessQuotaConfig,
+    NodeConfig,
     ProjectConfig,
     QuotaSettings,
     SettingsConfig,
@@ -425,8 +426,6 @@ def test_project_config_is_node_enabled_helper(tmp_path: Path):
     """
     Asserts ProjectConfig.is_node_enabled accurately respects project and node level flags.
     """
-    from orchestrator.config import NodeConfig
-
     proj = ProjectConfig(
         name="test-project",
         repo="org/repo",

@@ -314,3 +314,10 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
             q_data["harnesses"] = merged_harnesses
 
     return GlobalConfig(**raw_data)
+
+
+# Rebuild Pydantic models to ensure forward reference resolution across reload cycles
+NodeConfig.model_rebuild()
+ProjectConfig.model_rebuild()
+GlobalConfig.model_rebuild()
+
