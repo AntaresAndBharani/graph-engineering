@@ -7,7 +7,7 @@
 
 ---
 
-## 🏛️ System Overview & Technology Stack
+## System Overview & Technology Stack
 
 ### System Overview
 `graph-orchestrator` is a decoupled, local-first control-plane daemon engineered to coordinate autonomous multi-agent software engineering pipelines across distributed repositories. It establishes an intelligent bridge between local developer workspaces, cloud code hosting platforms (GitHub), and pluggable AI CLI execution harnesses (Antigravity, Claude Code, Devin).
@@ -90,7 +90,7 @@ flowchart TD
 
 ---
 
-## 🧱 Layer Boundaries & Clean Architecture (Domain, Data, Presentation/UI separation of concerns)
+## Layer Boundaries & Clean Architecture (Domain, Data, Presentation/UI separation of concerns)
 
 The system follows a strict **Concentric Clean Architecture (Hexagonal / Ports and Adapters)**. The fundamental architectural invariant is the **Dependency Rule**: dependencies point strictly inward toward Domain and Application cores. External infrastructure, databases, and UI CLI commands must never dictate or leak into domain models.
 
@@ -164,7 +164,7 @@ graph TD
 
 ---
 
-## 📁 Directory & Package Structure Guidelines
+## Directory & Package Structure Guidelines
 
 ```text
 graph-engineering/
@@ -239,7 +239,7 @@ graph-engineering/
 
 ---
 
-## 🎨 Design Patterns, State Management & Dependency Injection
+## Design Patterns, State Management & Dependency Injection
 
 ### 1. Decoupled Artifact Blackboard Pattern (`pr_artifacts`, `po_tracking`, `sdlc_items`, `anomaly_events` & `token_usage_events`)
 To prevent brittle multi-agent state machines and communication loss between asynchronous nodes, the system implements an **Artifact Blackboard** pattern stored in SQLite WAL:
@@ -360,7 +360,7 @@ To minimize GitHub CLI rate limit consumption and round-trip latency, `poller.py
 
 ---
 
-## 🚫 Architectural Constraints & Anti-Patterns (e.g. No circular dependencies, No UI logic in Domain)
+## Architectural Constraints & Anti-Patterns (e.g. No circular dependencies, No UI logic in Domain)
 
 ### Strict Constraints
 
