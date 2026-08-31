@@ -210,17 +210,43 @@ DEFAULT_HARNESSES: Dict[str, HarnessConfig] = {
 }
 
 
+class WindowLimitConfig(OrchestratorBaseModel):
+    hours: float = Field(default=168.0, gt=0)
+    token_limit: int = Field(gt=0)
+
+
 class HarnessQuotaConfig(OrchestratorBaseModel):
     window_hours: float = Field(default=1.0, gt=0)
     window_token_limit: int = Field(default=2_000_000, gt=0)
     avg_tokens_per_hour: int = Field(default=400_000, gt=0)
+    weekly: Optional[WindowLimitConfig] = None
 
 
 DEFAULT_HARNESS_QUOTAS: Dict[str, HarnessQuotaConfig] = {
-    "antigravity": HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
-    "claude": HarnessQuotaConfig(window_hours=5.0, window_token_limit=5_000_000, avg_tokens_per_hour=300_000),
-    "devin": HarnessQuotaConfig(window_hours=5.0, window_token_limit=2_500_000, avg_tokens_per_hour=150_000),
-    "openai": HarnessQuotaConfig(window_hours=1.0, window_token_limit=1_500_000, avg_tokens_per_hour=300_000),
+    "antigravity": HarnessQuotaConfig(
+        window_hours=1.0,
+        window_token_limit=2_000_000,
+        avg_tokens_per_hour=400_000,
+        weekly=WindowLimitConfig(hours=168.0, token_limit=20_000_000),
+    ),
+    "claude": HarnessQuotaConfig(
+        window_hours=5.0,
+        window_token_limit=5_000_000,
+        avg_tokens_per_hour=300_000,
+        weekly=WindowLimitConfig(hours=168.0, token_limit=20_000_000),
+    ),
+    "devin": HarnessQuotaConfig(
+        window_hours=5.0,
+        window_token_limit=2_500_000,
+        avg_tokens_per_hour=150_000,
+        weekly=WindowLimitConfig(hours=168.0, token_limit=10_000_000),
+    ),
+    "openai": HarnessQuotaConfig(
+        window_hours=1.0,
+        window_token_limit=1_500_000,
+        avg_tokens_per_hour=300_000,
+        weekly=WindowLimitConfig(hours=168.0, token_limit=10_000_000),
+    ),
 }
 
 
@@ -302,7 +328,14 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
                     user_h = q_data["harnesses"][k]
                     if isinstance(user_h, dict):
                         d = default_cfg.model_dump()
-                        d.update(user_h)
+                        if isinstance(user_h.get("weekly"), dict) and isinstance(d.get("weekly"), dict):
+                            merged_weekly = dict(d["weekly"])
+                            merged_weekly.update(user_h["weekly"])
+                            d_copy = dict(user_h)
+                            d_copy["weekly"] = merged_weekly
+                            d.update(d_copy)
+                        else:
+                            d.update(user_h)
                         merged_harnesses[k] = d
                     else:
                         merged_harnesses[k] = user_h
@@ -317,6 +350,9 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
 
 
 # Rebuild Pydantic models to ensure forward reference resolution across reload cycles
+WindowLimitConfig.model_rebuild()
+HarnessQuotaConfig.model_rebuild()
+QuotaSettings.model_rebuild()
 NodeConfig.model_rebuild()
 ProjectConfig.model_rebuild()
 GlobalConfig.model_rebuild()

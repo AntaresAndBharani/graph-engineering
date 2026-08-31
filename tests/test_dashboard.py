@@ -1907,7 +1907,7 @@ async def test_scenario_dashboard_harness_stream_3_arg_node_name_wiring(tmp_path
         )
 
         # Check ProjectLogBufferManager has (node_name, line) tuples
-        buf = ProjectLogBufferManager.PROJECT_BUFFERS.get("crosstrainingapp")
+        buf = app.buffer_manager.PROJECT_BUFFERS.get("crosstrainingapp")
         assert buf is not None
         assert len(buf) == 2
         assert buf[0][0] == "devtest"

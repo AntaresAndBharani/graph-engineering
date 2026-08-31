@@ -112,18 +112,30 @@ quota:
       window_hours: 1.0               # 1-hour rolling window
       window_token_limit: 2000000     # 2.0M tokens per window
       avg_tokens_per_hour: 400000     # Baseline velocity estimate
+      weekly:
+        hours: 168.0                  # Weekly rolling window (7 days)
+        token_limit: 20000000         # 20.0M weekly token ceiling
     claude:
       window_hours: 5.0               # 5-hour rolling window
       window_token_limit: 5000000     # 5.0M tokens per window
       avg_tokens_per_hour: 300000     # Baseline velocity estimate
+      weekly:
+        hours: 168.0                  # Weekly rolling window (7 days)
+        token_limit: 20000000         # 20.0M weekly token ceiling
     devin:
       window_hours: 5.0               # 5-hour rolling window
       window_token_limit: 2500000     # 2.5M tokens per window
       avg_tokens_per_hour: 150000     # Baseline velocity estimate
+      weekly:
+        hours: 168.0                  # Weekly rolling window (7 days)
+        token_limit: 10000000         # 10.0M weekly token ceiling
     openai:
       window_hours: 1.0               # 1-hour rolling window
       window_token_limit: 1500000     # 1.5M tokens per window
       avg_tokens_per_hour: 300000     # Baseline velocity estimate
+      weekly:
+        hours: 168.0                  # Weekly rolling window (7 days)
+        token_limit: 10000000         # 10.0M weekly token ceiling
 
 # Managed Projects Registry
 projects:
