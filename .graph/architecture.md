@@ -24,6 +24,8 @@ flowchart TD
         State[("SQLite WAL State Manager (`orchestrator/db.py`)")]
         Reloader["SourceWatcher & Hot Reloader (`orchestrator/reloader.py`)"]
         Adapter["AsyncHarnessAdapter (`orchestrator/harness.py`)"]
+        WorktreeMgr["WorktreeManager (`orchestrator/worktree.py`)"]
+        QuotaMgr["QuotaManager (`orchestrator/quota.py`)"]
     end
 
     subgraph Default 2-Node Parallel Engine ["Core Pipeline Nodes (Default Active / Worktree Concurrent)"]
@@ -39,7 +41,7 @@ flowchart TD
     end
 
     subgraph Blackboard Layer ["Decoupled Artifact Blackboard"]
-        BB[("Decoupled Blackboard (pr_artifacts & po_tracking)")]
+        BB[("Decoupled Blackboard (pr_artifacts, po_tracking, sdlc_items, anomaly_events, token_usage_events)")]
     end
 
     subgraph Managed Target Repositories ["Managed Application Workspaces"]
@@ -50,6 +52,8 @@ flowchart TD
     CLI --> Core
     Core <--> State
     Core <--> Reloader
+    Core <--> WorktreeMgr
+    Core <--> QuotaMgr
     Core ==> N1 & N2
     Core -.-> N0 & N3 & N4
     N1 & N2 & N0 & N3 & N4 --> Adapter
@@ -113,6 +117,7 @@ graph TD
         GitHubPoller["Zero-Token GitHub Poller (`orchestrator/poller.py`)"]
         Housekeeping["Label Provisioner (`orchestrator/housekeeping.py`)"]
         ReloaderWatcher["Source Watcher (`orchestrator/reloader.py`)"]
+        WorktreeMgr["Worktree Manager (`orchestrator/worktree.py`)"]
     end
 
     subgraph Layer 1: Domain Core & Configuration
@@ -229,6 +234,8 @@ graph-engineering/
 - **Zero-Token Pre-Gating**: Node entry functions must check deterministic conditions (labels, SLAs, schedule intervals) before performing any state locking or subprocess spawning.
 - **Pure Function Extraction**: Business logic (e.g. anomaly detection, git URL parsing, timestamp parsing) must be separated into pure helper functions to ensure 100% testability with unit mocks.
 - **Explicit Typing**: All functions must have complete type annotations (`from __future__ import annotations`).
+- **Disabled Node Resource Isolation**: CLI loops and schedulers must never allocate resources (memory buffers, git worktrees) for disabled nodes (`node.enabled == False`).
+- **Startup Node Status Registry**: CLI daemon initialization must render a formatted Rich status table registering all project nodes, their enabled status, harness, and concurrency mode.
 
 ---
 
@@ -362,18 +369,21 @@ To protect against rate-limit throttling and API cost overruns across multi-proj
    - Label synchronization via `sync_repository_labels` must use `gh label create --force` to prevent duplicate or conflicting label definitions.
 7. **Non-Blocking SQLite Access**:
    - Always configure SQLite with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` to prevent database locks across asynchronous coroutines.
+8. **Disabled Node Resource Isolation**:
+   - When a node is disabled in `config.yaml` (`enabled: false`), the orchestrator cycle must completely bypass its execution, worktree allocation, and memory buffer initialization.
 
 ### Anti-Patterns to Avoid
 
 | Anti-Pattern | Violation | Required Architecture Solution |
 |---|---|---|
 | **Speculative LLM Polling** | Prompting an LLM on every loop cycle to see if an issue needs attention. | Deterministic GitHub GraphQL/CLI label filtering (0 tokens). |
-| **Framework Bleed into Domain** | Importing Typer or Rich inside `orchestrator/config.py` or `orchestrator/db.py`. | Keep presentation formatting exclusively inside `orchestrator/cli.py`. |
+| **Framework Bleed into Domain** | Importing Typer, Rich, or Textual inside `orchestrator/config.py` or `orchestrator/db.py`. | Keep presentation formatting exclusively inside `orchestrator/cli.py` and `orchestrator/ui/`. |
 | **Unbounded Process Execution** | Running CLI subprocesses without timeout guards. | Strict timeout wrapping with `asyncio.wait_for` and `psutil` process tree termination. |
 | **Blind Git Operations** | Modifying working trees without verifying remote origin identity. | Remote origin URL verification in `verify_git_safety`. |
 | **Tight Polling on Background Tasks** | Polling subprocess status in a tight loop. | Async line-by-line stream reading (`await process.stdout.readline()`). |
 | **Tightly Coupled State Machines** | Hardcoding sequential transitions between nodes. | Decoupled Router (GitHub Labels) + Blackboard (SQLite). |
 | **Hardcoded Platform Paths** | Using raw `/home/...` or `C:\...` strings. | Cross-platform normalization via `resolve_path()` supporting `~`, `$HOME`, `%USERPROFILE%`. |
+| **Silent Failure Masking in DI** | Falling back to silent dummy objects when DI fails. | Strict fail-fast typing assertions (`isinstance(dep, ExpectedType)`) raising `TypeError`. |
 
 ---
 
