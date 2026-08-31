@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import math
 from typing import Any, List, Optional, Tuple
 
 from textual.widgets import DataTable
@@ -347,16 +348,17 @@ class AnomalyAlertsWidget(DataTable):
 
 class HarnessQuotaWidget(DataTable):
     """
-    Read-only DataTable widget rendering global harness quota capacities,
-    rolling window limits, progress bars, OK/THROTTLED statuses with countdown,
-    and by-project / by-node percentage breakdowns from local SQLite StateManager.
+    Read-only DataTable widget rendering dual progress gauges (5-hour and weekly limits)
+    with visual threshold coloring, predictive operational runway forecasts, replenishment
+    countdowns, and by-project / by-node percentage breakdowns from local SQLite StateManager.
     """
 
     TABLE_COLUMNS = [
         "Harness",
-        "Capacity",
-        "Window",
-        "Status",
+        "5-Hour Limit",
+        "Weekly Limit",
+        "Runway",
+        "Reset Countdown",
         "By Project",
         "By Node",
     ]
@@ -419,9 +421,35 @@ class HarnessQuotaWidget(DataTable):
         else:
             return str(tokens)
 
-    @staticmethod
-    def _render_progress_bar(used: int, limit: int, width: int = 16) -> str:
-        """Renders a visual capacity progress bar [████████░░░░░░░░]."""
+    @classmethod
+    def _render_gauge(cls, remaining: int, limit: int, width: int = 10) -> str:
+        """
+        Renders a progress gauge with visual status threshold coloring:
+        - Remaining capacity >= 40%: [green]
+        - Remaining capacity between 15% and 39%: [yellow]
+        - Remaining capacity < 15%: [bold red]
+        Displays exact tokens remaining, limit, and percentage (e.g. "3.8M / 5.0M (76%)").
+        """
+        if limit <= 0:
+            return "-"
+        fraction = min(1.0, max(0.0, remaining / limit))
+        pct = round(fraction * 100)
+        filled = int(round(fraction * width))
+        empty = max(0, width - filled)
+        bar = f"[{'█' * filled}{'░' * empty}]"
+
+        if pct >= 40:
+            color = "green"
+        elif pct >= 15:
+            color = "yellow"
+        else:
+            color = "bold red"
+
+        return f"[{color}]{bar} {cls._format_tokens(remaining)} / {cls._format_tokens(limit)} ({pct}%)[/{color}]"
+
+    @classmethod
+    def _render_progress_bar(cls, used: int, limit: int, width: int = 16) -> str:
+        """Backwards-compatible progress bar helper."""
         if limit <= 0:
             return f"[{'░' * width}]"
         fraction = min(1.0, max(0.0, used / limit))
@@ -429,8 +457,44 @@ class HarnessQuotaWidget(DataTable):
         empty = max(0, width - filled)
         return f"[{'█' * filled}{'░' * empty}]"
 
+    @classmethod
+    def _format_runway(cls, metrics: Any) -> str:
+        """
+        Formats operational runway forecast string:
+        - Idle: "Runway: Idle (∞)"
+        - Active: "~12.6h runway remaining @ 300k tok/hr"
+        """
+        forecast = getattr(metrics, "runway_forecast", None) if metrics else None
+        if (
+            not forecast
+            or getattr(forecast, "is_idle", False)
+            or forecast.burn_rate <= 0
+            or math.isinf(forecast.runway_hours)
+        ):
+            return "Runway: Idle (∞)"
+
+        burn_str = cls._format_tokens(int(round(forecast.burn_rate)))
+        return f"~{forecast.formatted} runway remaining @ {burn_str} tok/hr"
+
+    @classmethod
+    def _format_countdown(cls, metrics: Any) -> str:
+        """
+        Formats reset countdown string:
+        - Short window countdown or weekly window countdown (e.g. "Resets in 26 min", "Full Capacity (0s)")
+        """
+        if not metrics:
+            return "Full Capacity (0s)"
+        short_w = getattr(metrics, "short_window", None)
+        weekly_w = getattr(metrics, "weekly_window", None)
+
+        if weekly_w and getattr(weekly_w, "eta_seconds", 0) > getattr(short_w, "eta_seconds", 0):
+            return str(weekly_w.formatted_countdown)
+        if short_w and hasattr(short_w, "formatted_countdown"):
+            return str(short_w.formatted_countdown)
+        return "Full Capacity (0s)"
+
     async def _render_rows(self) -> None:
-        """Renders harness quota rows into the DataTable with keyed in-place diffing."""
+        """Renders dual-window harness quota rows into the DataTable with keyed in-place diffing."""
         async with self._render_lock:
             if not self.columns:
                 return
@@ -438,7 +502,7 @@ class HarnessQuotaWidget(DataTable):
             if not self.quota_manager:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "No quota data", "-", "-", "-", "-"))],
+                    [("-empty-", ("-", "No quota data", "-", "-", "-", "-", "-"))],
                 )
                 return
 
@@ -447,42 +511,39 @@ class HarnessQuotaWidget(DataTable):
             if not harness_dict:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "No harnesses configured", "-", "-", "-", "-"))],
+                    [("-empty-", ("-", "No harnesses configured", "-", "-", "-", "-", "-"))],
                 )
                 return
 
             target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
             for harness_name in sorted(harness_dict.keys()):
-                quota_cfg = harness_dict[harness_name]
-                window_hours = quota_cfg.window_hours
-                limit = quota_cfg.window_token_limit
-
                 try:
-                    res = await self.quota_manager.check_harness_capacity(harness_name)
+                    metrics = await self.quota_manager.calculate_dashboard_metrics(harness_name)
                     breakdown = await self.quota_manager.get_informative_breakdown(harness_name)
                 except Exception:
-                    res = None
+                    metrics = None
                     breakdown = {"by_project": {}, "by_node": {}}
 
-                # 1. Window format
-                w_str = f"{int(window_hours) if window_hours.is_integer() else window_hours}h Window"
-
-                # 2. Capacity progress bar and token limits
-                used = res.used if res else 0
-                remaining = res.remaining if res else limit
-                progress_bar = self._render_progress_bar(used, limit)
-                capacity_str = f"{progress_bar} {self._format_tokens(remaining)} / {self._format_tokens(limit)}"
-
-                # 3. Status string with badge & ETA
-                if res and not res.allowed:
-                    status_str = f"[bold red]THROTTLED ({self._format_tokens(res.remaining)} / {self._format_tokens(res.limit)} - Ready in {res.formatted_eta})[/bold red]"
-                elif res:
-                    pct_left = round((res.remaining / res.limit) * 100) if res.limit > 0 else 100
-                    status_str = f"[bold green]OK ({self._format_tokens(res.remaining)} / {self._format_tokens(res.limit)} - {pct_left}% left)[/bold green]"
+                if metrics and metrics.short_window:
+                    short_gauge = self._render_gauge(
+                        metrics.short_window.remaining,
+                        metrics.short_window.limit,
+                    )
                 else:
-                    status_str = "[dim]UNKNOWN[/dim]"
+                    short_gauge = "-"
 
-                # 4. By-project breakdown
+                if metrics and metrics.weekly_window and metrics.weekly_window.limit > 0:
+                    weekly_gauge = self._render_gauge(
+                        metrics.weekly_window.remaining,
+                        metrics.weekly_window.limit,
+                    )
+                else:
+                    weekly_gauge = "-"
+
+                runway_str = self._format_runway(metrics)
+                countdown_str = self._format_countdown(metrics)
+
+                # By-project breakdown
                 by_project = breakdown.get("by_project", {})
                 if by_project:
                     project_parts = [
@@ -493,7 +554,7 @@ class HarnessQuotaWidget(DataTable):
                 else:
                     project_str = "-"
 
-                # 5. By-node breakdown
+                # By-node breakdown
                 by_node = breakdown.get("by_node", {})
                 if by_node:
                     node_parts = [
@@ -509,9 +570,10 @@ class HarnessQuotaWidget(DataTable):
                         harness_name,
                         (
                             harness_name,
-                            capacity_str,
-                            w_str,
-                            status_str,
+                            short_gauge,
+                            weekly_gauge,
+                            runway_str,
+                            countdown_str,
                             project_str,
                             node_str,
                         ),
@@ -519,4 +581,5 @@ class HarnessQuotaWidget(DataTable):
                 )
 
             _apply_keyed_diff(self, target_rows)
+
 

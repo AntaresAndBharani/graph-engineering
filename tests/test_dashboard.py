@@ -980,7 +980,7 @@ async def test_harness_quota_widget_formatting_and_render(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_harness_quota_widget_ok_and_throttled_states(tmp_path: Path):
     """
-    Asserts HarnessQuotaWidget renders OK vs THROTTLED statuses with breakdown.
+    Asserts HarnessQuotaWidget renders capacity gauges, countdowns, and breakdowns.
     """
     from textual.app import App, ComposeResult
 
@@ -1012,7 +1012,8 @@ async def test_harness_quota_widget_ok_and_throttled_states(tmp_path: Path):
         widget = app.query_one(HarnessQuotaWidget)
         assert widget.row_count == 1
         row = widget.get_row_at(0)
-        assert "OK" in str(row[3])
+        assert "1.0M / 1.0M (100%)" in str(row[1])
+        assert "Full Capacity (0s)" in str(row[4])
 
         # Record high usage causing throttle
         await state_manager.record_token_usage_event(
@@ -1029,9 +1030,10 @@ async def test_harness_quota_widget_ok_and_throttled_states(tmp_path: Path):
         await widget.update_quotas()
         assert widget.row_count == 1
         row_throttled = widget.get_row_at(0)
-        assert "THROTTLED" in str(row_throttled[3])
-        assert '"proj-alpha": 100%' in str(row_throttled[4])
-        assert '"devtest": 100%' in str(row_throttled[5])
+        assert "[bold red]" in str(row_throttled[1])
+        assert "100k / 1.0M (10%)" in str(row_throttled[1])
+        assert '"proj-alpha": 100%' in str(row_throttled[5])
+        assert '"devtest": 100%' in str(row_throttled[6])
 
 
 @pytest.mark.asyncio
@@ -1578,7 +1580,7 @@ async def test_harness_quota_widget_keyed_inplace_diffing_preserves_cursor(tmp_p
         await pilot.pause()
         assert widget.cursor_row == 1
         row_claude = widget.get_row("claude")
-        assert "OK" in str(row_claude[3])
+        assert "2.0M / 2.0M (100%)" in str(row_claude[1])
 
         clear_spy = mocker.spy(widget, "clear")
 
@@ -1603,8 +1605,9 @@ async def test_harness_quota_widget_keyed_inplace_diffing_preserves_cursor(tmp_p
 
         # Check in-place cell update for claude
         row_claude_after = widget.get_row("claude")
-        assert "THROTTLED" in str(row_claude_after[3])
-        assert '"proj-x": 100%' in str(row_claude_after[4])
+        assert "[bold red]" in str(row_claude_after[1])
+        assert "100k / 2.0M (5%)" in str(row_claude_after[1])
+        assert '"proj-x": 100%' in str(row_claude_after[5])
 
 
 @pytest.mark.asyncio
