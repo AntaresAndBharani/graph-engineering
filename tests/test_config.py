@@ -10,6 +10,7 @@ from orchestrator.config import (
     ProjectConfig,
     QuotaSettings,
     SettingsConfig,
+    WindowLimitConfig,
     load_config,
 )
 
@@ -137,6 +138,7 @@ def test_default_quota_config_available_with_no_user_overrides(tmp_path: Path):
       Then `QuotaSettings` defaults to buffer_minutes=30
       And harnesses "antigravity", "claude", "devin", "openai" have their documented
           window_hours, window_token_limit, and avg_tokens_per_hour defaults
+      And harnesses have sensible default weekly limits configured
     """
     yaml_file = tmp_path / "default_quota_config.yaml"
     yaml_file.write_text(
@@ -156,21 +158,33 @@ settings:
     assert antigravity.window_hours == 1.0
     assert antigravity.window_token_limit == 2_000_000
     assert antigravity.avg_tokens_per_hour == 400_000
+    assert antigravity.weekly is not None
+    assert antigravity.weekly.hours == 168.0
+    assert antigravity.weekly.token_limit == 20_000_000
 
     claude = loaded.quota.harnesses["claude"]
     assert claude.window_hours == 5.0
     assert claude.window_token_limit == 5_000_000
     assert claude.avg_tokens_per_hour == 300_000
+    assert claude.weekly is not None
+    assert claude.weekly.hours == 168.0
+    assert claude.weekly.token_limit == 20_000_000
 
     devin = loaded.quota.harnesses["devin"]
     assert devin.window_hours == 5.0
     assert devin.window_token_limit == 2_500_000
     assert devin.avg_tokens_per_hour == 150_000
+    assert devin.weekly is not None
+    assert devin.weekly.hours == 168.0
+    assert devin.weekly.token_limit == 10_000_000
 
     openai = loaded.quota.harnesses["openai"]
     assert openai.window_hours == 1.0
     assert openai.window_token_limit == 1_500_000
     assert openai.avg_tokens_per_hour == 300_000
+    assert openai.weekly is not None
+    assert openai.weekly.hours == 168.0
+    assert openai.weekly.token_limit == 10_000_000
 
 
 def test_partial_user_override_preserves_other_harness_defaults(tmp_path: Path):
@@ -179,7 +193,7 @@ def test_partial_user_override_preserves_other_harness_defaults(tmp_path: Path):
       Given config.yaml sets `quota.harnesses.claude.window_token_limit: 3000000`
       When configuration is loaded
       Then `GlobalConfig.quota.harnesses["claude"].window_token_limit == 3000000`
-      And unspecified fields retain their documented defaults
+      And unspecified fields (including weekly limit) retain their documented defaults
     """
     yaml_file = tmp_path / "partial_override_config.yaml"
     yaml_file.write_text(
@@ -197,27 +211,119 @@ quota:
     loaded = load_config(yaml_file)
     assert loaded.quota.buffer_minutes == 45
 
-    # Claude was partially overridden: window_token_limit updated, window_hours & avg_tokens_per_hour retained
+    # Claude was partially overridden: window_token_limit updated, window_hours & avg_tokens_per_hour & weekly retained
     claude = loaded.quota.harnesses["claude"]
     assert claude.window_token_limit == 3_000_000
     assert claude.window_hours == 5.0
     assert claude.avg_tokens_per_hour == 300_000
+    assert claude.weekly is not None
+    assert claude.weekly.hours == 168.0
+    assert claude.weekly.token_limit == 20_000_000
 
     # Antigravity, devin, openai retained defaults
     antigravity = loaded.quota.harnesses["antigravity"]
     assert antigravity.window_hours == 1.0
     assert antigravity.window_token_limit == 2_000_000
     assert antigravity.avg_tokens_per_hour == 400_000
+    assert antigravity.weekly is not None
+    assert antigravity.weekly.token_limit == 20_000_000
 
     devin = loaded.quota.harnesses["devin"]
     assert devin.window_hours == 5.0
     assert devin.window_token_limit == 2_500_000
     assert devin.avg_tokens_per_hour == 150_000
+    assert devin.weekly is not None
+    assert devin.weekly.token_limit == 10_000_000
 
     openai = loaded.quota.harnesses["openai"]
     assert openai.window_hours == 1.0
     assert openai.window_token_limit == 1_500_000
     assert openai.avg_tokens_per_hour == 300_000
+    assert openai.weekly is not None
+    assert openai.weekly.token_limit == 10_000_000
+
+
+def test_dual_window_schema_backward_compatibility():
+    """
+    Scenario: Backward-compatible dual-window schema
+      Given the existing single-window `HarnessQuotaConfig` (window_hours, window_token_limit, avg_tokens_per_hour)
+      When a new `WindowLimitConfig` (hours, token_limit) is introduced
+      And `HarnessQuotaConfig` is extended with an optional `weekly: WindowLimitConfig` field defaulting to None
+      Then existing config instantiations without a `weekly` block continue to load and validate without error
+    """
+    # Single-window without weekly block defaults weekly to None
+    single = HarnessQuotaConfig(window_hours=2.0, window_token_limit=1_000_000, avg_tokens_per_hour=200_000)
+    assert single.window_hours == 2.0
+    assert single.window_token_limit == 1_000_000
+    assert single.avg_tokens_per_hour == 200_000
+    assert single.weekly is None
+
+    # WindowLimitConfig defaults hours to 168.0
+    w_limit = WindowLimitConfig(token_limit=15_000_000)
+    assert w_limit.hours == 168.0
+    assert w_limit.token_limit == 15_000_000
+
+    # Dual-window with explicit weekly block
+    dual = HarnessQuotaConfig(
+        window_hours=5.0,
+        window_token_limit=5_000_000,
+        avg_tokens_per_hour=300_000,
+        weekly=WindowLimitConfig(hours=168.0, token_limit=20_000_000),
+    )
+    assert dual.weekly is not None
+    assert dual.weekly.hours == 168.0
+    assert dual.weekly.token_limit == 20_000_000
+
+
+def test_weekly_quota_override_from_yaml(tmp_path: Path):
+    """
+    Asserts weekly limits can be fully or partially overridden in config.yaml.
+    """
+    yaml_file = tmp_path / "weekly_override_config.yaml"
+    yaml_file.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    claude:
+      weekly:
+        hours: 120.0
+        token_limit: 30000000
+    antigravity:
+      weekly:
+        token_limit: 25000000
+    custom_ai:
+      window_hours: 2.0
+      window_token_limit: 1000000
+      avg_tokens_per_hour: 200000
+      weekly:
+        hours: 168.0
+        token_limit: 8000000
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(yaml_file)
+
+    # Claude: weekly fully overridden
+    claude = loaded.quota.harnesses["claude"]
+    assert claude.weekly is not None
+    assert claude.weekly.hours == 120.0
+    assert claude.weekly.token_limit == 30_000_000
+    assert claude.window_hours == 5.0
+    assert claude.window_token_limit == 5_000_000
+
+    # Antigravity: weekly partially overridden (token_limit changed, hours inherited default)
+    antigravity = loaded.quota.harnesses["antigravity"]
+    assert antigravity.weekly is not None
+    assert antigravity.weekly.hours == 168.0
+    assert antigravity.weekly.token_limit == 25_000_000
+
+    # Custom AI harness with weekly block
+    custom_ai = loaded.quota.harnesses["custom_ai"]
+    assert custom_ai.weekly is not None
+    assert custom_ai.weekly.hours == 168.0
+    assert custom_ai.weekly.token_limit == 8_000_000
 
 
 def test_invalid_quota_values_raise_validation_error(tmp_path: Path):
@@ -241,6 +347,94 @@ quota:
 
     with pytest.raises(ValidationError):
         load_config(yaml_file)
+
+
+def test_invalid_weekly_quota_values_raise_validation_error(tmp_path: Path):
+    """
+    Scenario: Validation rejects malformed weekly config
+      Given a `weekly.hours` or `weekly.token_limit` <= 0
+      When the config is loaded via Pydantic
+      Then a validation error is raised at load time (fail-fast), not at query time
+    """
+    # Negative weekly.hours via YAML
+    yaml_hours_neg = tmp_path / "invalid_weekly_hours_neg.yaml"
+    yaml_hours_neg.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    claude:
+      weekly:
+        hours: -5.0
+        token_limit: 20000000
+        """,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(yaml_hours_neg)
+
+    # Zero weekly.hours via YAML
+    yaml_hours_zero = tmp_path / "invalid_weekly_hours_zero.yaml"
+    yaml_hours_zero.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    claude:
+      weekly:
+        hours: 0
+        token_limit: 20000000
+        """,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(yaml_hours_zero)
+
+    # Negative weekly.token_limit via YAML
+    yaml_token_neg = tmp_path / "invalid_weekly_token_neg.yaml"
+    yaml_token_neg.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    claude:
+      weekly:
+        token_limit: -1000
+        """,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(yaml_token_neg)
+
+    # Zero weekly.token_limit via YAML
+    yaml_token_zero = tmp_path / "invalid_weekly_token_zero.yaml"
+    yaml_token_zero.write_text(
+        """
+version: 2
+quota:
+  harnesses:
+    claude:
+      weekly:
+        token_limit: 0
+        """,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(yaml_token_zero)
+
+
+def test_window_limit_config_validation_errors():
+    # Negative and zero hours on WindowLimitConfig
+    with pytest.raises(ValidationError):
+        WindowLimitConfig(hours=0, token_limit=1_000_000)
+    with pytest.raises(ValidationError):
+        WindowLimitConfig(hours=-10.0, token_limit=1_000_000)
+
+    # Negative and zero token_limit on WindowLimitConfig
+    with pytest.raises(ValidationError):
+        WindowLimitConfig(hours=168.0, token_limit=0)
+    with pytest.raises(ValidationError):
+        WindowLimitConfig(hours=168.0, token_limit=-500)
 
 
 def test_custom_harness_quota_merged(tmp_path: Path):
