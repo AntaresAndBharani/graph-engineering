@@ -1,22 +1,39 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+import logging
+import math
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 import pytest
 
-from orchestrator.config import GlobalConfig, HarnessQuotaConfig, NodeConfig, ProjectConfig, QuotaSettings
+from orchestrator.config import (
+    GlobalConfig,
+    HarnessQuotaConfig,
+    NodeConfig,
+    ProjectConfig,
+    QuotaSettings,
+    WindowLimitConfig,
+)
 from orchestrator.db import StateManager
 from orchestrator.quota import (
+    DashboardQuotaMetrics,
     QuotaCheckResult,
     QuotaManager,
+    RunwayForecast,
+    WindowMetric,
+    calculate_operational_runway,
     calculate_remaining,
     calculate_replenishment_eta,
     calculate_required_runway,
+    calculate_runway,
     calculate_velocity,
     extract_token_counts,
     extract_token_usage,
     fallback_token_heuristic,
+    format_replenishment_countdown,
+    format_reset_countdown,
+    format_runway,
 )
 
 
@@ -487,4 +504,337 @@ def test_token_usage_reader_protocol(tmp_path: Path):
 
     state_manager = StateManager(tmp_path / "state.db")
     assert isinstance(state_manager, TokenUsageReader)
+
+
+# ===========================================================================
+# Acceptance Criteria Tests for Issue #137 (Multi-Window Quota & Runway)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_scenario_dual_window_dashboard_metrics(tmp_path: Path):
+    """
+    Scenario: Dual-window dashboard metrics
+      Given a harness with both a short-window and weekly WindowLimitConfig
+      When QuotaManager.calculate_dashboard_metrics(harness_name) is called
+      Then it returns remaining tokens, percentage, and window size for both windows independently
+      And percentages are computed via calculate_remaining / limit consistently with existing single-window logic
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                    weekly=WindowLimitConfig(hours=168.0, token_limit=20_000_000),
+                )
+            },
+        )
+    )
+    quota_mgr = QuotaManager(config, state_manager)
+
+    now_utc = datetime.now(timezone.utc)
+    # Event 2 hours ago (within both 5h short window and 168h weekly window): 1,200,000 tokens
+    recent_time = (now_utc - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    await state_manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-sonnet-5",
+        project_name="proj-a",
+        node_name="devtest",
+        issue_number=10,
+        prompt_tokens=1_000_000,
+        completion_tokens=200_000,
+        total_tokens=1_200_000,
+        created_at=recent_time,
+    )
+
+    # Event 20 hours ago (outside 5h short window, within 168h weekly window): 3,800,000 tokens
+    older_time = (now_utc - timedelta(hours=20)).strftime("%Y-%m-%d %H:%M:%S")
+    await state_manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-sonnet-5",
+        project_name="proj-b",
+        node_name="architect",
+        issue_number=11,
+        prompt_tokens=3_000_000,
+        completion_tokens=800_000,
+        total_tokens=3_800_000,
+        created_at=older_time,
+    )
+
+    # When calculate_dashboard_metrics is called
+    metrics = await quota_mgr.calculate_dashboard_metrics("claude")
+
+    # Then it returns remaining tokens, percentage, and window size for both windows independently
+    assert isinstance(metrics, DashboardQuotaMetrics)
+    assert metrics.harness_name == "claude"
+
+    # Short Window (5h): used = 1,200,000, limit = 5,000,000, remaining = 3,800,000
+    assert isinstance(metrics.short_window, WindowMetric)
+    assert metrics.short_window.window_hours == 5.0
+    assert metrics.short_window.limit == 5_000_000
+    assert metrics.short_window.used == 1_200_000
+    assert metrics.short_window.remaining == 3_800_000
+    # percentage = (3,800,000 / 5,000,000) * 100 = 76.0%
+    assert metrics.short_window.percentage == 76.0
+
+    # Weekly Window (168h): used = 1,200,000 + 3,800,000 = 5,000,000, limit = 20,000,000, remaining = 15,000,000
+    assert metrics.weekly_window is not None
+    assert isinstance(metrics.weekly_window, WindowMetric)
+    assert metrics.weekly_window.window_hours == 168.0
+    assert metrics.weekly_window.limit == 20_000_000
+    assert metrics.weekly_window.used == 5_000_000
+    assert metrics.weekly_window.remaining == 15_000_000
+    # percentage = (15,000,000 / 20,000,000) * 100 = 75.0%
+    assert metrics.weekly_window.percentage == 75.0
+
+    # Verify dict and alias access consistency
+    assert metrics.short.remaining == 3_800_000
+    assert metrics.weekly.remaining == 15_000_000
+    assert metrics["short"]["remaining"] == 3_800_000
+    assert metrics["weekly"]["remaining"] == 15_000_000
+    assert metrics.remaining_short == 3_800_000
+    assert metrics.remaining_weekly == 15_000_000
+
+
+@pytest.mark.asyncio
+async def test_scenario_predictive_runway_forecast(tmp_path: Path):
+    """
+    Scenario: Predictive runway forecast
+      Given the "claude" harness has 3,800,000 tokens remaining in its short window
+      And the configured or measured burn rate is 300,000 tokens/hour
+      When the operational forecast is evaluated
+      Then it returns a runway of approximately 12.6 hours
+      And when burn rate is 0 (idle), it returns an "Idle" / infinite runway result without raising ZeroDivisionError
+    """
+    # 1. Pure calculation tests
+    remaining = 3_800_000
+    burn_rate = 300_000
+
+    runway = calculate_runway(remaining, burn_rate)
+    # 3,800,000 / 300,000 = 12.6666... approx 12.6 - 12.7 hours
+    assert 12.6 <= runway <= 12.7
+    assert round(runway, 1) == 12.7
+    assert format_runway(runway) == "12.7h"
+
+    forecast = calculate_operational_runway(remaining, burn_rate)
+    assert isinstance(forecast, RunwayForecast)
+    assert 12.6 <= forecast.runway_hours <= 12.7
+    assert forecast.is_idle is False
+    assert forecast.formatted == "12.7h"
+
+    # 2. Idle / Zero burn rate test without raising ZeroDivisionError
+    idle_runway = calculate_runway(remaining, 0)
+    assert math.isinf(idle_runway)
+    assert format_runway(idle_runway) == "Idle"
+
+    idle_forecast = calculate_operational_runway(remaining, 0)
+    assert isinstance(idle_forecast, RunwayForecast)
+    assert math.isinf(idle_forecast.runway_hours)
+    assert idle_forecast.is_idle is True
+    assert idle_forecast.formatted == "Idle"
+    assert str(idle_forecast) == "Idle"
+
+    # Negative burn rate safety
+    neg_forecast = calculate_operational_runway(remaining, -500)
+    assert math.isinf(neg_forecast.runway_hours)
+    assert neg_forecast.is_idle is True
+    assert neg_forecast.formatted == "Idle"
+
+    # 3. Integration with QuotaManager
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            harnesses={
+                "claude": HarnessQuotaConfig(
+                    window_hours=5.0,
+                    window_token_limit=5_000_000,
+                    avg_tokens_per_hour=300_000,
+                )
+            }
+        )
+    )
+    quota_mgr = QuotaManager(config, state_manager)
+
+    # 1,200,000 used -> 3,800,000 remaining
+    await state_manager.record_token_usage_event(
+        harness_name="claude",
+        model_name="claude-sonnet-5",
+        project_name="proj",
+        node_name="devtest",
+        issue_number=1,
+        prompt_tokens=1_000_000,
+        completion_tokens=200_000,
+        total_tokens=1_200_000,
+    )
+
+    mgr_forecast = await quota_mgr.calculate_runway_forecast("claude")
+    assert 12.6 <= mgr_forecast.runway_hours <= 12.7
+    assert mgr_forecast.formatted == "12.7h"
+
+    # With explicit burn_rate override = 0
+    mgr_idle_forecast = await quota_mgr.calculate_runway_forecast("claude", burn_rate=0)
+    assert math.isinf(mgr_idle_forecast.runway_hours)
+    assert mgr_idle_forecast.formatted == "Idle"
+
+
+def test_scenario_formatted_replenishment_countdown():
+    """
+    Scenario: Formatted replenishment countdown
+      Given a harness quota state with a known ETA in seconds
+      When the countdown is formatted for display
+      Then short ETAs render as "Resets in 26 min" and longer/weekly ETAs render as "Resets Sun, 00:00"
+      And 0 seconds ETA at full capacity renders as "Full Capacity (0s)"
+    """
+    # 1. Zero ETA at full capacity
+    assert format_replenishment_countdown(0) == "Full Capacity (0s)"
+    assert format_replenishment_countdown(-10) == "Full Capacity (0s)"
+    assert format_reset_countdown(0) == "Full Capacity (0s)"
+
+    # 2. Short ETA: 26 minutes (1560 seconds) -> "Resets in 26 min"
+    assert format_replenishment_countdown(1560) == "Resets in 26 min"
+    assert format_replenishment_countdown(26 * 60) == "Resets in 26 min"
+    assert format_reset_countdown(1560) == "Resets in 26 min"
+
+    # Other short ETA variants (< 60s, hours + mins)
+    assert format_replenishment_countdown(45) == "Resets in 45s"
+    assert format_replenishment_countdown(3600) == "Resets in 1h"
+    assert format_replenishment_countdown(3720) == "Resets in 1h 2m"
+
+    # 3. Longer / weekly ETA: e.g. resets on Sunday 00:00
+    # Reference now: Thursday 2026-09-03 00:00:00 UTC
+    ref_now = datetime(2026, 9, 3, 0, 0, 0, tzinfo=timezone.utc)
+    # 3 days later is Sunday 2026-09-06 00:00:00 UTC (3 * 86400 = 259200 seconds)
+    eta_sunday = 259200
+    assert format_replenishment_countdown(eta_sunday, now=ref_now) == "Resets Sun, 00:00"
+
+    # Explicit reset_time provided
+    sun_target = datetime(2026, 9, 6, 0, 0, 0, tzinfo=timezone.utc)
+    assert format_replenishment_countdown(100, reset_time=sun_target) == "Resets Sun, 00:00"
+
+    # Window hours >= 24 with weekly ETA
+    assert format_replenishment_countdown(3600, now=datetime(2026, 9, 5, 23, 0, 0, tzinfo=timezone.utc), window_hours=168.0) == "Resets Sun, 00:00"
+
+    # 4. QuotaCheckResult.formatted_countdown
+    res_full = QuotaCheckResult(
+        harness_name="claude",
+        allowed=True,
+        remaining=5_000_000,
+        required=150_000,
+        used=0,
+        limit=5_000_000,
+        velocity=0.0,
+        eta_seconds=0,
+        deficit=0,
+        window_hours=5.0,
+    )
+    assert res_full.formatted_countdown == "Full Capacity (0s)"
+
+    res_short = QuotaCheckResult(
+        harness_name="claude",
+        allowed=False,
+        remaining=100_000,
+        required=150_000,
+        used=4_900_000,
+        limit=5_000_000,
+        velocity=980_000.0,
+        eta_seconds=1560,
+        deficit=50_000,
+        window_hours=5.0,
+    )
+    assert res_short.formatted_countdown == "Resets in 26 min"
+
+
+@pytest.mark.asyncio
+async def test_scenario_critical_threshold_logging(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """
+    Scenario: Critical threshold logging
+      Given a harness short-window remaining capacity drops below 15%
+      When check_harness_capacity (or the new dashboard metrics evaluator) runs
+      Then a warning is emitted to the orchestrator log stream: "[WARN] [quota:<harness>] Quota critical (<15% remaining)."
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        quota=QuotaSettings(
+            buffer_minutes=30,
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=1_000_000,
+                    avg_tokens_per_hour=200_000,
+                )
+            },
+        )
+    )
+    quota_mgr = QuotaManager(config, state_manager)
+
+    # 1. Normal capacity (80% remaining -> 200k used): no warning emitted
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="proj",
+        node_name="devtest",
+        issue_number=1,
+        prompt_tokens=150_000,
+        completion_tokens=50_000,
+        total_tokens=200_000,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        caplog.clear()
+        res_ok = await quota_mgr.check_harness_capacity("antigravity")
+        assert res_ok.remaining == 800_000
+        assert res_ok.is_critical is False
+        assert not any("Quota critical" in rec.message for rec in caplog.records)
+
+    # 2. Capacity drops below 15% (e.g. 880k used -> 120k remaining = 12% < 15%)
+    await state_manager.record_token_usage_event(
+        harness_name="antigravity",
+        model_name="gemini-3.7-flash",
+        project_name="proj",
+        node_name="devtest",
+        issue_number=2,
+        prompt_tokens=500_000,
+        completion_tokens=180_000,
+        total_tokens=680_000,
+    )
+
+    # When check_harness_capacity runs
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        caplog.clear()
+        res_crit = await quota_mgr.check_harness_capacity("antigravity")
+        assert res_crit.remaining == 120_000
+        assert res_crit.is_critical is True
+
+        # Then a warning is emitted to the orchestrator log stream:
+        # "[WARN] [quota:<harness>] Quota critical (<15% remaining)."
+        warning_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING and "[quota:antigravity] Quota critical (<15% remaining)." in rec.message
+        ]
+        assert len(warning_records) >= 1
+
+    # When calculate_dashboard_metrics runs
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        caplog.clear()
+        dashboard_metrics = await quota_mgr.calculate_dashboard_metrics("antigravity")
+        assert dashboard_metrics.short_window.remaining == 120_000
+        assert dashboard_metrics.short_window.percentage == 12.0
+
+        warning_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING and "[quota:antigravity] Quota critical (<15% remaining)." in rec.message
+        ]
+        assert len(warning_records) >= 1
 

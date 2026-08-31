@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import json
+import logging
 import math
 import re
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
@@ -16,6 +17,8 @@ from orchestrator.config import (
     QuotaSettings,
 )
 from orchestrator.logging import strip_ansi
+
+_logger = logging.getLogger("orchestrator")
 
 
 @runtime_checkable
@@ -179,6 +182,109 @@ def calculate_velocity(used: int, window_hours: float) -> float:
     return round(used / window_hours, 2)
 
 
+def calculate_runway(remaining_tokens: int, burn_rate: float | int) -> float:
+    """
+    Calculates operational runway in hours = remaining_tokens / burn_rate.
+    Returns float('inf') when burn_rate <= 0 (idle) without raising ZeroDivisionError.
+    """
+    if burn_rate <= 0:
+        return float("inf")
+    return remaining_tokens / burn_rate
+
+
+def format_runway(runway_hours: float) -> str:
+    """
+    Formats operational runway into human-readable string:
+    - infinite / <= 0 / NaN: "Idle"
+    - otherwise e.g. "12.7h" (or "12.6h")
+    """
+    if math.isinf(runway_hours) or math.isnan(runway_hours) or runway_hours < 0:
+        return "Idle"
+    return f"{runway_hours:.1f}h"
+
+
+@dataclass
+class RunwayForecast:
+    runway_hours: float
+    formatted: str
+    burn_rate: float
+    remaining_tokens: int
+
+    @property
+    def display(self) -> str:
+        return self.formatted
+
+    @property
+    def is_idle(self) -> bool:
+        return math.isinf(self.runway_hours) or self.burn_rate <= 0
+
+    def __str__(self) -> str:
+        return self.formatted
+
+
+def calculate_operational_runway(
+    remaining_tokens: int,
+    burn_rate: float | int,
+) -> RunwayForecast:
+    """
+    Calculates predictive operational runway forecast from remaining tokens and burn rate.
+    Safely handles idle / zero burn rate without raising ZeroDivisionError.
+    """
+    hours = calculate_runway(remaining_tokens, burn_rate)
+    formatted = format_runway(hours)
+    return RunwayForecast(
+        runway_hours=hours,
+        formatted=formatted,
+        burn_rate=float(burn_rate),
+        remaining_tokens=remaining_tokens,
+    )
+
+
+def format_replenishment_countdown(
+    eta_seconds: int,
+    now: Optional[datetime] = None,
+    reset_time: Optional[datetime] = None,
+    window_hours: Optional[float] = None,
+) -> str:
+    """
+    Formats replenishment countdown into human-readable string:
+    - eta_seconds <= 0: "Full Capacity (0s)"
+    - short ETAs (<24h / <86400s when no reset_time and window_hours < 24):
+        - <3600s: "Resets in <N> min" (or "Resets in <N>s" if <60s)
+        - >=3600s: "Resets in <H>h <M>m" or "Resets in <H>h"
+    - longer/weekly ETAs (>=86400s or window_hours >= 24 or reset_time provided):
+        - "Resets Sun, 00:00" (formatted as %a, %H:%M)
+    """
+    if eta_seconds <= 0:
+        return "Full Capacity (0s)"
+
+    # Longer / weekly ETA formatting
+    if reset_time is not None or eta_seconds >= 86400 or (window_hours is not None and window_hours >= 24):
+        target_dt = reset_time
+        if target_dt is None:
+            ref_now = now or datetime.now(timezone.utc)
+            if ref_now.tzinfo is None:
+                ref_now = ref_now.replace(tzinfo=timezone.utc)
+            target_dt = ref_now + timedelta(seconds=eta_seconds)
+        return target_dt.strftime("Resets %a, %H:%M")
+
+    # Short ETA formatting
+    if eta_seconds < 60:
+        return f"Resets in {eta_seconds}s"
+    elif eta_seconds < 3600:
+        minutes = max(1, round(eta_seconds / 60))
+        return f"Resets in {minutes} min"
+    else:
+        hours = eta_seconds // 3600
+        mins = round((eta_seconds % 3600) / 60)
+        if mins > 0:
+            return f"Resets in {hours}h {mins}m"
+        return f"Resets in {hours}h"
+
+
+format_reset_countdown = format_replenishment_countdown
+
+
 def calculate_replenishment_eta(
     events: list[dict[str, Any]],
     used_tokens: int,
@@ -229,6 +335,67 @@ def calculate_replenishment_eta(
 
 
 @dataclass
+class WindowMetric:
+    window_hours: float
+    limit: int
+    used: int
+    remaining: int
+    percentage: float
+    eta_seconds: int = 0
+    formatted_countdown: str = "Full Capacity (0s)"
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+
+@dataclass
+class DashboardQuotaMetrics:
+    harness_name: str
+    short_window: WindowMetric
+    weekly_window: Optional[WindowMetric] = None
+    runway_forecast: Optional[RunwayForecast] = None
+
+    @property
+    def short(self) -> WindowMetric:
+        return self.short_window
+
+    @property
+    def weekly(self) -> Optional[WindowMetric]:
+        return self.weekly_window
+
+    @property
+    def runway_hours(self) -> float:
+        return self.runway_forecast.runway_hours if self.runway_forecast else float("inf")
+
+    @property
+    def runway_display(self) -> str:
+        return self.runway_forecast.formatted if self.runway_forecast else "Idle"
+
+    @property
+    def remaining_short(self) -> int:
+        return self.short_window.remaining
+
+    @property
+    def remaining_weekly(self) -> int:
+        return self.weekly_window.remaining if self.weekly_window else 0
+
+    @property
+    def percentage_short(self) -> float:
+        return self.short_window.percentage
+
+    @property
+    def percentage_weekly(self) -> float:
+        return self.weekly_window.percentage if self.weekly_window else 0.0
+
+    def __getitem__(self, item: str) -> Any:
+        if item in ("short", "short_window"):
+            return self.short_window
+        if item in ("weekly", "weekly_window"):
+            return self.weekly_window
+        return getattr(self, item)
+
+
+@dataclass
 class QuotaCheckResult:
     harness_name: str
     allowed: bool
@@ -240,6 +407,14 @@ class QuotaCheckResult:
     eta_seconds: int
     deficit: int
     window_hours: float
+
+    @property
+    def is_critical(self) -> bool:
+        return self.limit > 0 and (self.remaining / self.limit) < 0.15
+
+    @property
+    def formatted_countdown(self) -> str:
+        return format_replenishment_countdown(self.eta_seconds, window_hours=self.window_hours)
 
     @property
     def formatted_eta(self) -> str:
@@ -322,6 +497,9 @@ class QuotaManager:
         remaining = calculate_remaining(limit, used_tokens)
         velocity = calculate_velocity(used_tokens, window_hours)
 
+        if limit > 0 and (remaining / limit) < 0.15:
+            _logger.warning("[quota:%s] Quota critical (<15%% remaining).", harness_name)
+
         allowed = remaining >= required_runway
         deficit = max(0, required_runway - remaining)
 
@@ -353,6 +531,129 @@ class QuotaManager:
             deficit=deficit,
             window_hours=window_hours,
         )
+
+    async def calculate_dashboard_metrics(
+        self,
+        harness_name: str,
+        burn_rate: Optional[float] = None,
+        now: Optional[datetime] = None,
+    ) -> DashboardQuotaMetrics:
+        """
+        Evaluates dual-window (short-window and weekly) quota metrics, predictive
+        operational runway forecast, and human-readable replenishment countdowns.
+        """
+        quota_cfg = self.quota_settings.harnesses.get(
+            harness_name,
+            DEFAULT_HARNESS_QUOTAS.get(
+                harness_name,
+                HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
+            ),
+        )
+        short_hours = quota_cfg.window_hours
+        short_limit = quota_cfg.window_token_limit
+        weekly_cfg = quota_cfg.weekly
+        long_hours = weekly_cfg.hours if weekly_cfg else 168.0
+        long_limit = weekly_cfg.token_limit if weekly_cfg else 0
+
+        short_used, long_used = await self.state_manager.get_multi_window_usage(
+            harness_name,
+            short_window_hours=short_hours,
+            long_window_hours=long_hours,
+        )
+
+        short_remaining = calculate_remaining(short_limit, short_used)
+        short_percentage = round((short_remaining / short_limit) * 100, 1) if short_limit > 0 else 0.0
+
+        if short_limit > 0 and (short_remaining / short_limit) < 0.15:
+            _logger.warning("[quota:%s] Quota critical (<15%% remaining).", harness_name)
+
+        required_runway = calculate_required_runway(quota_cfg.avg_tokens_per_hour, self.quota_settings.buffer_minutes)
+        short_eta = 0
+        if short_remaining < required_runway:
+            events = await self.state_manager.get_token_usage_events(
+                harness_name=harness_name,
+                window_hours=short_hours,
+            )
+            short_eta = calculate_replenishment_eta(
+                events=events,
+                used_tokens=short_used,
+                limit=short_limit,
+                required_runway=required_runway,
+                window_hours=short_hours,
+                now=now,
+                avg_tokens_per_hour=quota_cfg.avg_tokens_per_hour,
+            )
+
+        short_countdown = format_replenishment_countdown(short_eta, now=now, window_hours=short_hours)
+        short_metric = WindowMetric(
+            window_hours=short_hours,
+            limit=short_limit,
+            used=short_used,
+            remaining=short_remaining,
+            percentage=short_percentage,
+            eta_seconds=short_eta,
+            formatted_countdown=short_countdown,
+        )
+
+        weekly_metric: Optional[WindowMetric] = None
+        if weekly_cfg:
+            weekly_remaining = calculate_remaining(long_limit, long_used)
+            weekly_percentage = round((weekly_remaining / long_limit) * 100, 1) if long_limit > 0 else 0.0
+            weekly_eta = 0
+            if weekly_remaining < required_runway:
+                events_weekly = await self.state_manager.get_token_usage_events(
+                    harness_name=harness_name,
+                    window_hours=long_hours,
+                )
+                weekly_eta = calculate_replenishment_eta(
+                    events=events_weekly,
+                    used_tokens=long_used,
+                    limit=long_limit,
+                    required_runway=required_runway,
+                    window_hours=long_hours,
+                    now=now,
+                    avg_tokens_per_hour=quota_cfg.avg_tokens_per_hour,
+                )
+            weekly_countdown = format_replenishment_countdown(weekly_eta, now=now, window_hours=long_hours)
+            weekly_metric = WindowMetric(
+                window_hours=long_hours,
+                limit=long_limit,
+                used=long_used,
+                remaining=weekly_remaining,
+                percentage=weekly_percentage,
+                eta_seconds=weekly_eta,
+                formatted_countdown=weekly_countdown,
+            )
+
+        eff_burn_rate = burn_rate if burn_rate is not None else float(quota_cfg.avg_tokens_per_hour)
+        forecast = calculate_operational_runway(short_remaining, eff_burn_rate)
+
+        return DashboardQuotaMetrics(
+            harness_name=harness_name,
+            short_window=short_metric,
+            weekly_window=weekly_metric,
+            runway_forecast=forecast,
+        )
+
+    async def calculate_runway_forecast(
+        self,
+        harness_name: str,
+        burn_rate: Optional[float] = None,
+    ) -> RunwayForecast:
+        """
+        Calculates operational runway forecast for the specified harness.
+        """
+        quota_cfg = self.quota_settings.harnesses.get(
+            harness_name,
+            DEFAULT_HARNESS_QUOTAS.get(
+                harness_name,
+                HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
+            ),
+        )
+        used_tokens = await self.state_manager.get_window_token_usage(harness_name, quota_cfg.window_hours)
+        remaining = calculate_remaining(quota_cfg.window_token_limit, used_tokens)
+        eff_burn_rate = burn_rate if burn_rate is not None else float(quota_cfg.avg_tokens_per_hour)
+        return calculate_operational_runway(remaining, eff_burn_rate)
 
     async def get_informative_breakdown(self, harness_name: str) -> dict[str, Any]:
         """
