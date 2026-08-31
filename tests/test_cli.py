@@ -345,5 +345,223 @@ projects:
     asyncio.run(verify())
 
 
+@pytest.mark.asyncio
+async def test_scenario_disabled_nodes_bypass_execution_dispatch_in_cli_loop(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Disabled Nodes Bypass Execution Dispatch in CLI Loop
+      Given "reviewer" is set to "enabled = false"
+      When cli.run_project_cycle processes the project workload
+      Then it must not invoke run_reviewer_node
+      And it must not allocate Git worktrees or memory buffers for the reviewer node.
+    """
+    from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
+    from orchestrator.db import StateManager
+    from orchestrator.cli import run_project_cycle
+    import orchestrator.cli as cli_mod
+    from orchestrator.worktree import WorktreeManager
+    from orchestrator.logging import ProjectLogBufferManager
+
+    invoked_nodes = []
+
+    async def mock_run_supervisor(project, config, state_manager, force=False):
+        invoked_nodes.append("supervisor")
+        return False, "Supervisor idle"
+
+    async def mock_run_architect(project, config, state_manager):
+        invoked_nodes.append("architect")
+        return False, "Architect idle"
+
+    async def mock_run_devtest(project, config, state_manager):
+        invoked_nodes.append("devtest")
+        return False, "DevTest idle"
+
+    async def mock_run_reviewer(project, config, state_manager):
+        invoked_nodes.append("reviewer")
+        return False, "Reviewer idle"
+
+    async def mock_run_bau(project, config, state_manager, force=False):
+        invoked_nodes.append("bau")
+        return False, "BAU idle"
+
+    monkeypatch.setattr(cli_mod, "run_supervisor_node", mock_run_supervisor)
+    monkeypatch.setattr(cli_mod, "run_architect_node", mock_run_architect)
+    monkeypatch.setattr(cli_mod, "run_devtest_node", mock_run_devtest)
+    monkeypatch.setattr(cli_mod, "run_reviewer_node", mock_run_reviewer)
+    monkeypatch.setattr(cli_mod, "run_bau_node", mock_run_bau)
+
+    allocated_worktrees = []
+    async def mock_ensure_worktree(project, node_name, **kwargs):
+        allocated_worktrees.append(node_name)
+        return project.local_path / f"worktree_{node_name}"
+
+    monkeypatch.setattr(WorktreeManager, "ensure_worktree", mock_ensure_worktree)
+
+    ProjectLogBufferManager.reset()
+
+    # Configure project with reviewer disabled
+    project = ProjectConfig(
+        name="test-bypass",
+        repo="org/test-bypass",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(enabled=True),
+            "devtest": NodeConfig(enabled=True),
+            "reviewer": NodeConfig(enabled=False),
+            "supervisor": NodeConfig(enabled=True),
+            "bau": NodeConfig(enabled=True),
+        },
+    )
+    config = GlobalConfig(projects=[project])
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
+    assert work_done is False
+
+    # Reviewer must NOT be invoked
+    assert "reviewer" not in invoked_nodes
+    assert "reviewer" not in allocated_worktrees
+
+    # Other enabled nodes must be invoked
+    assert "supervisor" in invoked_nodes
+    assert "architect" in invoked_nodes
+    assert "devtest" in invoked_nodes
+    assert "bau" in invoked_nodes
+
+
+@pytest.mark.asyncio
+async def test_scenario_all_nodes_disabled_bypasses_all_dispatch(tmp_path: Path, monkeypatch):
+    """Asserts that when all nodes are disabled, none are invoked."""
+    from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
+    from orchestrator.db import StateManager
+    from orchestrator.cli import run_project_cycle
+    import orchestrator.cli as cli_mod
+
+    invoked_nodes = []
+
+    monkeypatch.setattr(cli_mod, "run_supervisor_node", lambda *a, **kw: invoked_nodes.append("supervisor"))
+    monkeypatch.setattr(cli_mod, "run_architect_node", lambda *a, **kw: invoked_nodes.append("architect"))
+    monkeypatch.setattr(cli_mod, "run_devtest_node", lambda *a, **kw: invoked_nodes.append("devtest"))
+    monkeypatch.setattr(cli_mod, "run_reviewer_node", lambda *a, **kw: invoked_nodes.append("reviewer"))
+    monkeypatch.setattr(cli_mod, "run_bau_node", lambda *a, **kw: invoked_nodes.append("bau"))
+
+    project = ProjectConfig(
+        name="dormant-proj",
+        repo="org/dormant",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(enabled=False),
+            "devtest": NodeConfig(enabled=False),
+            "reviewer": NodeConfig(enabled=False),
+            "supervisor": NodeConfig(enabled=False),
+            "bau": NodeConfig(enabled=False),
+        },
+    )
+    config = GlobalConfig(projects=[project])
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    work_done = await run_project_cycle(project, config, state_manager, silent_idle=True)
+    assert work_done is False
+    assert len(invoked_nodes) == 0
+
+
+def test_scenario_startup_node_status_registry_table_ux(tmp_path: Path):
+    """
+    Scenario: Startup Node Status Registry Table UX
+      Given the orchestrator daemon initializes
+      When the CLI boots up
+      Then it must render a formatted Rich table displaying the enabled/disabled status, harness, and concurrency mode of all nodes.
+    """
+    from rich.console import Console
+    import io
+    from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
+    from orchestrator.cli import render_node_status_table
+
+    project = ProjectConfig(
+        name="alpha-project",
+        repo="org/alpha-project",
+        local_path=str(tmp_path),
+        worktrees_enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=True, harness="claude", model="sonnet-5"),
+            "devtest": NodeConfig(enabled=True, harness="antigravity"),
+            "reviewer": NodeConfig(enabled=False, harness="claude"),
+            "supervisor": NodeConfig(enabled=True, harness="antigravity", model="gemini-3.7-flash-low"),
+            "bau": NodeConfig(enabled=False, harness="antigravity"),
+        },
+    )
+    config = GlobalConfig(projects=[project])
+
+    buf = io.StringIO()
+    test_console = Console(file=buf, force_terminal=False, color_system=None, width=120)
+
+    table = render_node_status_table(config, console_out=test_console)
+    output = buf.getvalue()
+
+    # Table metadata & headers
+    assert table.title == "Autonomous Node Status Registry"
+    assert "alpha-project" in output
+    assert "architect" in output
+    assert "devtest" in output
+    assert "reviewer" in output
+    assert "supervisor" in output
+    assert "bau" in output
+
+    # Statuses
+    assert "ENABLED" in output
+    assert "DISABLED" in output
+
+    # Harnesses & Concurrency Modes
+    assert "claude (sonnet-5)" in output
+    assert "antigravity" in output
+    assert "Worktree (Concurrent)" in output
+    assert "Serial (Gatekeeper)" in output
+    assert "Serial (Watchdog)" in output
+    assert "Serial (Maintenance)" in output
+
+
+def test_cli_run_renders_startup_node_status_table(tmp_path: Path):
+    """Verifies that orchestrator run displays the Autonomous Node Status Registry table at startup."""
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "table-proj"
+    repo: "org/table-proj"
+    local_path: "{posix_path}"
+    worktrees_enabled: false
+    nodes:
+      architect:
+        enabled: true
+        harness: "claude"
+      devtest:
+        enabled: false
+        harness: "antigravity"
+      reviewer:
+        enabled: false
+      supervisor:
+        enabled: true
+      bau:
+        enabled: false
+        """,
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["run", "-p", "table-proj", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert "Autonomous Node Status Registry" in result.stdout
+    assert "table-proj" in result.stdout
+    assert "ENABLED" in result.stdout
+    assert "DISABLED" in result.stdout
+    assert "Serial (Primary)" in result.stdout
+
+
+
 
 

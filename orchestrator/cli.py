@@ -106,6 +106,60 @@ def run_command(
     asyncio.run(_run_single_pass(project_name, node_name, config_path))
 
 
+def render_node_status_table(config: GlobalConfig, console_out: Optional[Console] = None) -> Table:
+    """
+    Renders a formatted Rich table listing each node (architect, devtest, reviewer, supervisor, bau)
+    with ENABLED/DISABLED status, harness, and worktree/concurrency mode.
+    """
+    table = Table(title="Autonomous Node Status Registry", header_style="bold cyan")
+    table.add_column("Project", style="magenta", no_wrap=True)
+    table.add_column("Node", style="bold white", no_wrap=True)
+    table.add_column("Status", style="bold", no_wrap=True)
+    table.add_column("Harness", style="blue", no_wrap=True)
+    table.add_column("Concurrency Mode", style="yellow", no_wrap=True)
+
+    default_harnesses = {
+        "architect": "claude",
+        "devtest": "claude",
+        "reviewer": "claude",
+        "supervisor": "antigravity",
+        "bau": "antigravity",
+    }
+    nodes_order = ["architect", "devtest", "reviewer", "supervisor", "bau"]
+
+    for project in config.projects:
+        worktrees_on = getattr(project, "worktrees_enabled", True)
+        for node_name in nodes_order:
+            node_cfg = project.nodes.get(node_name)
+            is_enabled = project.is_node_enabled(node_name)
+            status_str = "[bold green]ENABLED[/bold green]" if is_enabled else "[dim red]DISABLED[/dim red]"
+
+            harness_str = (node_cfg.harness if node_cfg and node_cfg.harness else default_harnesses.get(node_name, "claude"))
+            if node_cfg and node_cfg.model:
+                harness_str = f"{harness_str} ({node_cfg.model})"
+
+            if node_name in ("architect", "devtest"):
+                concurrency_str = "Worktree (Concurrent)" if worktrees_on else "Serial (Primary)"
+            elif node_name == "supervisor":
+                concurrency_str = "Serial (Watchdog)"
+            elif node_name == "reviewer":
+                concurrency_str = "Serial (Gatekeeper)"
+            elif node_name == "bau":
+                concurrency_str = "Serial (Maintenance)"
+            else:
+                concurrency_str = "Serial"
+
+            table.add_row(project.name, node_name, status_str, harness_str, concurrency_str)
+
+    if console_out is not None:
+        try:
+            console_out.print(table)
+        except Exception:
+            console_out.print(str(table))
+
+    return table
+
+
 async def run_project_cycle(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -129,6 +183,9 @@ async def run_project_cycle(
             console.print(f"  [{project.name}] [bold yellow]⏸️ Project is paused by user. Skipping.[/bold yellow]")
         return False
 
+    if not project.enabled:
+        return False
+
     pipeline_work_done = False
     prefix = f"[{project.name}]"
 
@@ -139,7 +196,7 @@ async def run_project_cycle(
         _logger.warning("[%s] Background SDLC items polling failed: %s", project.name, e)
 
     # 1. Supervisor Node (Periodic Watchdog Audit - does not trigger 1s tight loop)
-    if node_name is None or node_name == "supervisor":
+    if (node_name is None or node_name == "supervisor") and project.is_node_enabled("supervisor"):
         if await state_manager.is_stop_requested():
             return pipeline_work_done
         force_sup = node_name == "supervisor"
@@ -155,37 +212,42 @@ async def run_project_cycle(
 
     # 2 & 3. Architect and DevTest Node Execution
     if node_name == "architect":
-        if await state_manager.is_stop_requested():
-            return pipeline_work_done
-        try:
-            ran, msg = await run_architect_node(project, config, state_manager)
-            if ran:
-                pipeline_work_done = True
-                console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
-            elif not silent_idle:
-                console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
-        except Exception as e:
-            _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, e, exc_info=True)
-            console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {e}")
+        if project.is_node_enabled("architect"):
+            if await state_manager.is_stop_requested():
+                return pipeline_work_done
+            try:
+                ran, msg = await run_architect_node(project, config, state_manager)
+                if ran:
+                    pipeline_work_done = True
+                    console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
+                elif not silent_idle:
+                    console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
+            except Exception as e:
+                _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, e, exc_info=True)
+                console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {e}")
     elif node_name == "devtest":
-        if await state_manager.is_stop_requested():
-            return pipeline_work_done
-        try:
-            ran, msg = await run_devtest_node(project, config, state_manager)
-            if ran:
-                pipeline_work_done = True
-                console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
-            elif not silent_idle:
-                console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
-        except Exception as e:
-            _logger.error("[%s:devtest] Unhandled exception in devtest cycle: %s", project.name, e, exc_info=True)
-            console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {e}")
+        if project.is_node_enabled("devtest"):
+            if await state_manager.is_stop_requested():
+                return pipeline_work_done
+            try:
+                ran, msg = await run_devtest_node(project, config, state_manager)
+                if ran:
+                    pipeline_work_done = True
+                    console.print(f"  {prefix} [bold green]DevTest:[/bold green] {msg}")
+                elif not silent_idle:
+                    console.print(f"  {prefix} [dim]DevTest: {msg}[/dim]")
+            except Exception as e:
+                _logger.error("[%s:devtest] Unhandled exception in devtest cycle: %s", project.name, e, exc_info=True)
+                console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {e}")
     elif node_name is None:
         if await state_manager.is_stop_requested():
             return pipeline_work_done
 
+        arch_enabled = project.is_node_enabled("architect")
+        dev_enabled = project.is_node_enabled("devtest")
         worktrees_enabled = getattr(project, "worktrees_enabled", True)
-        if worktrees_enabled:
+
+        if arch_enabled and dev_enabled and worktrees_enabled:
             # Level 2 Intra-Project Concurrency: run Architect and DevTest concurrently via asyncio.gather
             async def _run_architect_cycle() -> tuple[bool, str]:
                 try:
@@ -229,19 +291,20 @@ async def run_project_cycle(
                 elif not silent_idle and not dev_msg.startswith("Error:"):
                     console.print(f"  {prefix} [dim]DevTest: {dev_msg}[/dim]")
         else:
-            # Safe serial fallback on primary local_path with locking when worktrees are disabled
-            try:
-                ran, msg = await run_architect_node(project, config, state_manager)
-                if ran:
-                    pipeline_work_done = True
-                    console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
-                elif not silent_idle:
-                    console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
-            except Exception as ex:
-                _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, ex, exc_info=True)
-                console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {ex}")
+            # Safe serial fallback or single enabled node on primary local_path
+            if arch_enabled:
+                try:
+                    ran, msg = await run_architect_node(project, config, state_manager)
+                    if ran:
+                        pipeline_work_done = True
+                        console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
+                    elif not silent_idle:
+                        console.print(f"  {prefix} [dim]Architect: {msg}[/dim]")
+                except Exception as ex:
+                    _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, ex, exc_info=True)
+                    console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {ex}")
 
-            if not await state_manager.is_stop_requested():
+            if dev_enabled and not await state_manager.is_stop_requested():
                 try:
                     ran, msg = await run_devtest_node(project, config, state_manager)
                     if ran:
@@ -254,7 +317,7 @@ async def run_project_cycle(
                     console.print(f"  {prefix} [bold red]DevTest Error:[/bold red] {ex}")
 
     # 4. Reviewer / Gatekeeper Node (Active development work)
-    if node_name is None or node_name in ("reviewer", "review"):
+    if (node_name is None or node_name in ("reviewer", "review")) and project.is_node_enabled("reviewer"):
         if await state_manager.is_stop_requested():
             return pipeline_work_done
         try:
@@ -269,7 +332,7 @@ async def run_project_cycle(
             console.print(f"  {prefix} [bold red]Reviewer Error:[/bold red] {e}")
 
     # 5. BAU Maintenance Node (Daily tech-debt & enhancement consolidation)
-    if node_name is None or node_name in ("bau", "maintenance"):
+    if (node_name is None or node_name in ("bau", "maintenance")) and project.is_node_enabled("bau"):
         if await state_manager.is_stop_requested():
             return pipeline_work_done
         force_bau = node_name in ("bau", "maintenance")
@@ -319,6 +382,8 @@ async def _run_single_pass(
     if not targets:
         console.print("[dim]No enabled projects configured. Run 'orchestrator list' to view registered projects.[/dim]")
         return
+
+    render_node_status_table(config, console_out=console)
 
     # Execute target projects in parallel
     tasks = [
@@ -473,6 +538,8 @@ async def _watch_daemon_headless(
         border_style="green",
     ))
 
+    render_node_status_table(config, console_out=console)
+
     # Startup label synchronization
     console.print("[dim]Synchronizing repository workflow labels...[/dim]")
     await sync_all_projects_labels(config.projects, config.managed_labels)
@@ -530,6 +597,8 @@ async def _watch_daemon_tui(
     watcher = SourceWatcher(config_path=config_path, watch_source=True)
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
+
+    render_node_status_table(config, console_out=console)
 
     # Startup label synchronization
     await sync_all_projects_labels(config.projects, config.managed_labels)

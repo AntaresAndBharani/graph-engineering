@@ -80,7 +80,7 @@ orchestrator watch [OPTIONS]
 ---
 
 ### `orchestrator run`
-Executes an immediate single evaluation pass across registered projects.
+Executes an immediate single evaluation pass across registered projects. At startup, renders the formatted **Autonomous Node Status Registry** table displaying each node (`architect`, `devtest`, `reviewer`, `supervisor`, `bau`), its `ENABLED`/`DISABLED` status, assigned harness (and model), and concurrency mode across configured projects before executing the dispatch pass.
 
 ```bash
 orchestrator run [-p PROJECT] [-n NODE] [-c CONFIG]
