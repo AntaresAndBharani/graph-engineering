@@ -123,6 +123,18 @@ class ProjectConfig(OrchestratorBaseModel):
             return None
         return resolve_path(v)
 
+    def is_node_enabled(self, node_name: str) -> bool:
+        """
+        Returns True if the project is enabled and the specified node is enabled.
+        If node is not explicitly specified in project.nodes, defaults to True if project is enabled.
+        """
+        if not self.enabled:
+            return False
+        node = self.nodes.get(node_name)
+        if node is None:
+            return True
+        return bool(node.enabled)
+
 
 class SettingsConfig(OrchestratorBaseModel):
     poll_interval_seconds: int = 300

@@ -564,4 +564,181 @@ async def test_poll_project_sdlc_items_skips_reconciliation_when_sweep_hits_limi
     assert item_map[20]["state"] == "OPEN"  # Preserved as OPEN!
 
 
+@pytest.mark.asyncio
+async def test_scenario_disabled_nodes_bypass_github_poller_queries(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Disabled Nodes Bypass GitHub Poller Queries
+    Given project configuration sets "reviewer.enabled = false" and "supervisor.enabled = false"
+    When the background poller executes fetch_project_workload
+    Then it must query ONLY labels for enabled nodes (architect and devtest)
+    And it must strictly avoid making GitHub API calls for reviewer or supervisor labels.
+    """
+    from orchestrator.config import NodeConfig
+
+    project = ProjectConfig(
+        name="dormant-nodes-proj",
+        repo="AntaresAndBharani/dormant-nodes-proj",
+        local_path=tmp_path / "dormant-proj",
+        enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=True, label_trigger="needs-triage"),
+            "devtest": NodeConfig(enabled=True, label_trigger="ready-for-dev"),
+            "reviewer": NodeConfig(enabled=False, label_trigger="architect-approved"),
+            "supervisor": NodeConfig(enabled=False),
+            "bau": NodeConfig(enabled=False),
+        },
+    )
+
+    queried_labels: list[str] = []
+    queried_prs_labels: list[str] = []
+
+    async def mock_fetch_issues(repo: str, label: str, limit: int = 5):
+        queried_labels.append(label)
+        return [{"number": 1, "title": f"Issue for {label}", "state": "OPEN", "labels": [label]}]
+
+    async def mock_fetch_prs(repo: str, label: Optional[str] = None, limit: int = 20):
+        if label:
+            queried_prs_labels.append(label)
+        return []
+
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+
+    workload = await poller.fetch_project_workload(project, state_manager=None)
+
+    # Must query architect and devtest triggers
+    assert "needs-triage" in queried_labels
+    assert "ready-for-dev" in queried_labels
+    assert "needs-architect-review" in queried_prs_labels
+
+    # Must strictly avoid querying reviewer or supervisor triggers
+    assert "architect-approved" not in queried_labels
+    assert "needs-po-review" not in queried_labels
+    assert "tech-debt" not in queried_labels
+    assert "enhancement" not in queried_labels
+
+    assert len(workload["architect"]) == 1
+    assert len(workload["devtest"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_scenario_disabled_architect_skips_architect_queries(tmp_path: Path, monkeypatch):
+    """
+    Asserts fetch_project_workload bypasses architect queries when architect.enabled = False.
+    """
+    from orchestrator.config import NodeConfig
+
+    project = ProjectConfig(
+        name="no-architect-proj",
+        repo="org/no-arch",
+        local_path=tmp_path / "no-arch",
+        enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=False, label_trigger="needs-triage"),
+            "devtest": NodeConfig(enabled=True, label_trigger="ready-for-dev"),
+        },
+    )
+
+    queried_labels: list[str] = []
+
+    async def mock_fetch_issues(repo: str, label: str, limit: int = 5):
+        queried_labels.append(label)
+        return [{"number": 10, "title": f"Issue {label}"}]
+
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=[]))
+
+    workload = await poller.fetch_project_workload(project, state_manager=None)
+
+    assert "needs-triage" not in queried_labels
+    assert "ready-for-dev" in queried_labels
+    assert workload["architect"] == []
+    assert len(workload["devtest"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_scenario_disabled_devtest_skips_devtest_and_pr_queries(tmp_path: Path, monkeypatch):
+    """
+    Asserts fetch_project_workload bypasses devtest and PR queries when devtest.enabled = False.
+    """
+    from orchestrator.config import NodeConfig
+
+    project = ProjectConfig(
+        name="no-devtest-proj",
+        repo="org/no-devtest",
+        local_path=tmp_path / "no-devtest",
+        enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=True, label_trigger="needs-triage"),
+            "devtest": NodeConfig(enabled=False, label_trigger="ready-for-dev"),
+        },
+    )
+
+    queried_labels: list[str] = []
+    queried_prs: list[str] = []
+
+    async def mock_fetch_issues(repo: str, label: str, limit: int = 5):
+        queried_labels.append(label)
+        return [{"number": 20, "title": f"Issue {label}"}]
+
+    async def mock_fetch_prs(repo: str, label: Optional[str] = None, limit: int = 20):
+        if label:
+            queried_prs.append(label)
+        return []
+
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+
+    workload = await poller.fetch_project_workload(project, state_manager=None)
+
+    assert "needs-triage" in queried_labels
+    assert "ready-for-dev" not in queried_labels
+    assert "needs-architect-review" not in queried_prs
+    assert len(workload["architect"]) == 1
+    assert workload["devtest"] == []
+    assert workload["prs"] == []
+
+
+@pytest.mark.asyncio
+async def test_scenario_disabled_project_skips_all_workload_queries(tmp_path: Path, monkeypatch):
+    """
+    Asserts fetch_project_workload makes 0 GitHub queries when project.enabled = False.
+    """
+    from orchestrator.config import NodeConfig
+
+    project = ProjectConfig(
+        name="disabled-project",
+        repo="org/disabled",
+        local_path=tmp_path / "disabled",
+        enabled=False,
+        nodes={
+            "architect": NodeConfig(enabled=True),
+            "devtest": NodeConfig(enabled=True),
+        },
+    )
+
+    queried_labels: list[str] = []
+    queried_prs: list[str] = []
+
+    async def mock_fetch_issues(repo: str, label: str, limit: int = 5):
+        queried_labels.append(label)
+        return []
+
+    async def mock_fetch_prs(repo: str, label: Optional[str] = None, limit: int = 20):
+        if label:
+            queried_prs.append(label)
+        return []
+
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+
+    workload = await poller.fetch_project_workload(project, state_manager=None)
+
+    assert queried_labels == []
+    assert queried_prs == []
+    assert workload["architect"] == []
+    assert workload["devtest"] == []
+    assert workload["prs"] == []
+
+
 

@@ -911,7 +911,7 @@ async def run_devtest_node(
     Zero-token gating: if no issues labeled 'ready-for-dev' and no PRs labeled 'needs-refactor' / 'dev-implemented', exits with 0 tokens consumed.
     """
     node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
-    if not node_cfg.enabled:
+    if not project.is_node_enabled("devtest"):
         return False, "DevTest node disabled for project."
 
     trigger = node_cfg.label_trigger or "ready-for-dev"

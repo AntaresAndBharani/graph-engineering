@@ -731,7 +731,7 @@ async def run_architect_node(
     3. Story Triage & INVEST Decomposition (Decompose stories via Claude Sonnet).
     """
     node_cfg = project.nodes.get("architect", NodeConfig(harness="claude"))
-    if not node_cfg.enabled:
+    if not project.is_node_enabled("architect"):
         return False, "Architect node disabled for project."
 
     # 1. Living Architecture Plane Sync & Weekly Modernization

@@ -230,7 +230,7 @@ async def run_reviewer_node(
     Zero-token gating: if no PRs labeled 'needs-architect-review', exits with 0 tokens consumed.
     """
     node_cfg = project.nodes.get("reviewer", NodeConfig(harness="claude"))
-    if not node_cfg.enabled:
+    if not project.is_node_enabled("reviewer"):
         return False, "Reviewer node disabled for project."
 
     trigger = node_cfg.label_trigger or "architect-approved"
@@ -241,8 +241,7 @@ async def run_reviewer_node(
     if not prs:
         # Fallback check for backwards compatibility with needs-architect-review if architect review disabled
         if trigger == "architect-approved":
-            arch_node = project.nodes.get("architect")
-            if not arch_node or not arch_node.enabled:
+            if not project.is_node_enabled("architect"):
                 prs = await fetch_open_prs(project.repo, label="needs-architect-review", limit=50)
         if not prs:
             return False, f"No PRs labeled '{trigger}'. Idle (0 tokens)."

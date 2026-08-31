@@ -394,18 +394,18 @@ async def fetch_project_workload(
         "prs": [],
     }
 
-    architect_cfg = project.nodes.get("architect")
-    architect_trigger = (
-        architect_cfg.label_trigger if (architect_cfg and architect_cfg.label_trigger) else "needs-triage"
-    )
-    if architect_cfg is None or architect_cfg.enabled:
+    if project.is_node_enabled("architect"):
+        architect_cfg = project.nodes.get("architect")
+        architect_trigger = (
+            architect_cfg.label_trigger if (architect_cfg and architect_cfg.label_trigger) else "needs-triage"
+        )
         workload["architect"] = await fetch_issues_with_label(project.repo, architect_trigger)
 
-    devtest_cfg = project.nodes.get("devtest")
-    devtest_trigger = (
-        devtest_cfg.label_trigger if (devtest_cfg and devtest_cfg.label_trigger) else "ready-for-dev"
-    )
-    if devtest_cfg is None or devtest_cfg.enabled:
+    if project.is_node_enabled("devtest"):
+        devtest_cfg = project.nodes.get("devtest")
+        devtest_trigger = (
+            devtest_cfg.label_trigger if (devtest_cfg and devtest_cfg.label_trigger) else "ready-for-dev"
+        )
         workload["devtest"] = await fetch_issues_with_label(project.repo, devtest_trigger)
         workload["prs"] = await fetch_open_prs(project.repo, label="needs-architect-review")
 

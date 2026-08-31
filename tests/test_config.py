@@ -421,5 +421,75 @@ settings:
     assert loaded.settings.resolved_worktree_dir == (Path.home() / "global" / "worktrees").resolve()
 
 
+def test_project_config_is_node_enabled_helper(tmp_path: Path):
+    """
+    Asserts ProjectConfig.is_node_enabled accurately respects project and node level flags.
+    """
+    from orchestrator.config import NodeConfig
+
+    proj = ProjectConfig(
+        name="test-project",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=True),
+            "devtest": NodeConfig(enabled=True),
+            "reviewer": NodeConfig(enabled=False),
+            "supervisor": NodeConfig(enabled=False),
+        },
+    )
+
+    # Configured nodes
+    assert proj.is_node_enabled("architect") is True
+    assert proj.is_node_enabled("devtest") is True
+    assert proj.is_node_enabled("reviewer") is False
+    assert proj.is_node_enabled("supervisor") is False
+
+    # Unconfigured node defaults to enabled if project is enabled
+    assert proj.is_node_enabled("bau") is True
+    assert proj.is_node_enabled("custom_node") is True
+
+    # Disabled project overrides all nodes to False
+    proj_disabled = ProjectConfig(
+        name="disabled-proj",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        enabled=False,
+        nodes={
+            "architect": NodeConfig(enabled=True),
+            "devtest": NodeConfig(enabled=True),
+        },
+    )
+    assert proj_disabled.is_node_enabled("architect") is False
+    assert proj_disabled.is_node_enabled("devtest") is False
+    assert proj_disabled.is_node_enabled("unconfigured") is False
+
+
+def test_example_config_template_disables_dormant_nodes():
+    """
+    Asserts templates/config.example.yaml disables dormant nodes by default (reviewer, supervisor, bau)
+    while keeping active nodes enabled (architect, devtest).
+    """
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "config.example.yaml"
+    assert template_path.exists(), f"Template not found at {template_path}"
+
+    config = load_config(template_path)
+    assert len(config.projects) >= 1
+    proj = config.projects[0]
+
+    assert proj.is_node_enabled("architect") is True
+    assert proj.is_node_enabled("devtest") is True
+    assert proj.is_node_enabled("reviewer") is False
+    assert proj.is_node_enabled("supervisor") is False
+    assert proj.is_node_enabled("bau") is False
+
+    assert proj.nodes["architect"].enabled is True
+    assert proj.nodes["devtest"].enabled is True
+    assert proj.nodes["reviewer"].enabled is False
+    assert proj.nodes["supervisor"].enabled is False
+    assert proj.nodes["bau"].enabled is False
+
+
 
 
