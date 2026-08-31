@@ -1,5 +1,9 @@
 # BAU Maintenance Node (`node-bau`)
 
+> [!NOTE]
+> **Status: Optional / Disabled by Default** (`enabled: false`).  
+> In the streamlined 2-node parallel topology, the daily 24-hour BAU maintenance sweep is dormant by default. It can be enabled in `config.yaml` (`nodes.bau.enabled: true`) or invoked on demand via `orchestrator run --node bau --force`.
+
 **Module**: [`orchestrator/nodes/bau.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/bau.py)
 
 The **BAU (Business-As-Usual) Node** acts as Node 4 in the pipeline—a continuous maintenance and technical debt consolidation engine running on a periodic daily schedule (every 24 hours).
@@ -57,7 +61,7 @@ projects:
     repo: "AntaresAndBharani/crosstrainingapp"
     nodes:
       bau:
-        enabled: true
+        enabled: false               # Optional / Disabled by default
         harness: "antigravity"
         model: "gemini-3.7-flash-low"
 ```

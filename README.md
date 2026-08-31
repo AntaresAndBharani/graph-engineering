@@ -7,9 +7,10 @@ A decoupled, local-first Python CLI daemon for autonomous multi-agent engineerin
 ## ✨ Features
 
 - **Zero-Token Polling**: Deterministic GitHub CLI checks run first. If no issues or pull requests match trigger labels, **0 LLM tokens are consumed**.
+- **Streamlined 2-Node Parallel Engine**: Default parallel execution of **Architect** (Node 1: Producer) and **3-Amigos DevTest** (Node 2: Consumer) within isolated Git worktrees (`.graph/worktrees/`), providing high-throughput, non-blocking delivery.
 - **Agnostic AI Harnesses**: Swap between Claude Code CLI (`claude`), Antigravity CLI (`agy`), Devin CLI (`devin`), or custom tools via simple string configuration changes without code modifications.
 - **Repository Isolation**: Managed repositories contain only application code and standard GitHub issues/PRs. Orchestrator logic lives strictly in the control plane.
-- **Consistency Supervisor (Node 0)**: Evaluates repository health, auto-heals stalled/interrupted states, audits label taxonomies, monitors 12-hour issue SLAs, and escalates unresolvable conflicts to humans.
+- **Modular Governance Extensions**: Dedicated **Supervisor** (Node 0: Watchdog & PO-Proxy), **Reviewer Gatekeeper** (Node 3: Auto-Merge Gate), and **BAU Maintenance** (Node 4: Daily Tech Debt Sweep) nodes available as optional extensions (disabled by default).
 - **Concurrency & Parallel Workers**: An `aiosqlite` state database prevents duplicate execution across nodes, while independent async workers process multiple repositories concurrently in parallel.
 - **Reactive Back-to-Back Chaining**: When a node completes active work, downstream nodes trigger immediately without waiting for the cooldown interval.
 
@@ -73,7 +74,7 @@ cp templates/config.example.yaml ~/.config/orchestrator/config.yaml
 
 ### Configuration Example
 ```yaml
-version: "1.0"
+version: 2
 
 settings:
   poll_interval_seconds: 300          # 5 minutes idle cooldown
@@ -97,31 +98,32 @@ projects:
     repo: "AntaresAndBharani/crosstrainingapp"
     local_path: "c:/Users/rogal/workspaces/ws-setups/crosstrainingapp"
     nodes:
-      supervisor:
-        enabled: true
-        harness: "antigravity"
-        model: "gemini-3.7-flash-low"
       architect:
-        enabled: true
+        enabled: true                 # Default enabled (Producer)
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"
         label_trigger: "needs-triage"
         label_output: "ready-for-dev"
       devtest:
-        enabled: true
+        enabled: true                 # Default enabled (Consumer)
         harness: "antigravity"
         model: "gemini-3.7-flash-medium"
         label_trigger: "ready-for-dev"
         label_output: "needs-architect-review"
+        auto_merge_approved: true
+      supervisor:
+        enabled: false                # Optional / Disabled by default
+        harness: "antigravity"
+        model: "gemini-3.7-flash-low"
       reviewer:
-        enabled: true
+        enabled: false                # Optional / Disabled by default
         harness: "claude"
         model: "claude-sonnet-5"
         label_trigger: "needs-architect-review"
         auto_merge_approved: true
       bau:
-        enabled: true
+        enabled: false                # Optional / Disabled by default
         harness: "antigravity"
         model: "gemini-3.7-flash-low"
 ```
@@ -138,7 +140,7 @@ Built with `typer` and `rich` for live diagnostics and formatted tables:
 | `orchestrator list` | Displays a formatted table of all registered repositories, paths, and active harness assignments. |
 | `orchestrator init` | Initializes the SQLite state database and provisions managed labels across repositories. |
 | `orchestrator labels` | Idempotently synchronizes workflow taxonomy labels on GitHub. |
-| `orchestrator run [--project <NAME>] [--node <NAME>] [--force]` | Executes an on-demand evaluation pass across all active projects or a targeted repository. |
+| `orchestrator run [--project <NAME>] [--node <NAME>] [--force]` | Executes an on-demand evaluation pass across all active projects or a targeted repository, rendering the startup Node Status Registry. |
 | `orchestrator watch [--interval <SEC>]` | Starts continuous background polling with parallel workers and automatic source/config hot-reload. |
 | `orchestrator reload` | Hot-reloads in-memory configuration and Python runtime modules without restarting the daemon. |
 | `orchestrator stop [--force]` | Gracefully halts running background daemons, prevents new nodes from starting, and cleans up active AI agents. |
@@ -151,33 +153,31 @@ Built with `typer` and `rich` for live diagnostics and formatted tables:
 
 ```mermaid
 flowchart TD
-    subgraph Watchdog & Supervision
-        SUP["Node 0: Supervisor\n(docs/node-supervisor.md)"]
-    end
-
-    subgraph Core Autonomous Development Graph
-        A["Node 1: Architect\n(docs/node-architect.md)"]
-        B["Node 2: 3-Amigos DevTest\n(docs/node-devtest.md)"]
-        C["Node 3: Reviewer\n(docs/node-reviewer.md)"]
+    subgraph Core 2-Node Parallel Engine ["Default Active Pipeline (Parallel Worktrees)"]
+        A["Node 1: Architect\n(docs/node-architect.md)\n[Default Active: Producer]"]
+        B["Node 2: 3-Amigos DevTest\n(docs/node-devtest.md)\n[Default Active: Consumer]"]
         
         A -->|ready-for-dev| B
-        B -->|needs-architect-review| C
-        C -->|Merged| Main["main Branch"]
+        B -->|Merged| Main["main Branch"]
     end
 
-    subgraph Continuous Maintenance
-        BAU["Node 4: BAU Maintenance\n(docs/node-bau.md)"]
-        BAU -->|needs-triage| A
+    subgraph Optional Governance Extensions ["Optional Governance Extensions (Disabled by Default)"]
+        SUP["Node 0: Supervisor\n(docs/node-supervisor.md)\n[Optional / Disabled]"]
+        C["Node 3: Reviewer\n(docs/node-reviewer.md)\n[Optional / Disabled]"]
+        BAU["Node 4: BAU Maintenance\n(docs/node-bau.md)\n[Optional / Disabled]"]
+        
+        SUP -.->|needs-triage / needs-po-review| A
+        B -.->|needs-architect-review| C
+        C -.->|Merged| Main
+        BAU -.->|needs-triage| A
     end
-
-    SUP -.->|needs-triage / needs-po-review| A
 ```
 
-- **[Supervisor (Node 0)](docs/node-supervisor.md)**: Audits repository methodology compliance, detects git merge conflicts, heals orphaned locks, and monitors 12-hour issue SLAs.
-- **[Architect (Node 1)](docs/node-architect.md)**: Ingests raw User Stories (`needs-triage`), performs multi-category classification, and decomposes complex features into atomic subtasks (`ready-for-dev`).
-- **[3-Amigos DevTest (Node 2)](docs/node-devtest.md)**: Validates git working trees, implements code and tests, verifies builds, and creates Pull Requests (`needs-architect-review`).
-- **[Reviewer Gatekeeper (Node 3)](docs/node-reviewer.md)**: Deterministically gates PRs against remote CI (100% green requirement) and performs squash auto-merges into `main`.
-- **[BAU Maintenance (Node 4)](docs/node-bau.md)**: Daily 24-hour sweep under `gemini-3.7-flash-low` to consolidate `tech-debt` and `enhancement` issues into cohesive User Stories.
+- **[Architect (Node 1)](docs/node-architect.md)** *(Default Active)*: Ingests raw User Stories (`needs-triage`), performs multi-category classification, and decomposes complex features into atomic subtasks (`ready-for-dev`).
+- **[3-Amigos DevTest (Node 2)](docs/node-devtest.md)** *(Default Active)*: Validates git working trees, implements code and tests, verifies builds, and creates / auto-merges Pull Requests into `main`.
+- **[Supervisor (Node 0)](docs/node-supervisor.md)** *(Optional / Disabled by Default)*: Audits repository methodology compliance, detects git merge conflicts, heals orphaned locks, and evaluates PO-proxy requirements.
+- **[Reviewer Gatekeeper (Node 3)](docs/node-reviewer.md)** *(Optional / Disabled by Default)*: Dedicated gatekeeper evaluating PRs against remote CI (100% green requirement) and executing squash auto-merges into `main`.
+- **[BAU Maintenance (Node 4)](docs/node-bau.md)** *(Optional / Disabled by Default)*: Periodic sweep under `gemini-3.7-flash-low` consolidating `tech-debt` and `enhancement` issues into cohesive User Stories.
 
 ---
 

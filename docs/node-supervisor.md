@@ -1,5 +1,9 @@
 # Consistency Supervisor Node (`node-supervisor`)
 
+> [!NOTE]
+> **Status: Optional / Disabled by Default** (`enabled: false`).  
+> In the streamlined 2-node parallel topology, the Supervisor watchdog and PO-proxy evaluation is dormant by default during standard daemon loops. It can be enabled in `config.yaml` (`nodes.supervisor.enabled: true`) or invoked on demand via CLI commands (`orchestrator supervisor evaluate`, `orchestrator supervisor status`, `orchestrator run --node supervisor`).
+
 **Module**: [`orchestrator/nodes/supervisor.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/supervisor.py)
 
 The **Consistency Supervisor** acts as Node 0 in the pipeline—an autonomous watchdog and proactive AI Product Owner (PO) Proxy responsible for repository health verification, taxonomy validation, 12-hour SLA enforcement, and automated requirement readiness evaluation.
@@ -53,7 +57,7 @@ flowchart TD
 - Queries GitHub metadata for open PRs and issues via `gh` CLI JSON format with 0 LLM tokens.
 
 ### 3. Issue Status & Taxonomy Validation
-- Validates that every open issue carries a valid managed label (`needs-triage`, `ready-for-dev`, `dev-implemented`, `architect-processed`, `needs-po-review`, `orchestration-failed`, `tech-debt`, `enhancement`).
+- Validates that every open issue carries a valid managed label (`needs-triage`, `ready-for-dev`, `dev-implemented`, `architect-processed`, `needs-po-review`, `orchestration-failed`, `tech-debt`, `enhancement`, `queued`, `planned`).
 - Unclassified issues are automatically assigned **`needs-triage`** so the **Architect Node** can triage and classify them.
 
 ### 4. 12-Hour Stale Issue SLA Monitoring
@@ -117,7 +121,7 @@ projects:
     repo: "AntaresAndBharani/crosstrainingapp"
     nodes:
       supervisor:
-        enabled: true
+        enabled: false               # Optional / Disabled by default
         harness: "antigravity"
         model: "gemini-3.7-flash-low"
 ```
