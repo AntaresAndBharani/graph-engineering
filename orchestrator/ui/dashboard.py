@@ -12,7 +12,6 @@ from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 from textual.widgets.data_table import RowDoesNotExist
 
-from rich.markup import escape
 from rich.text import Text
 
 from orchestrator.config import GlobalConfig
