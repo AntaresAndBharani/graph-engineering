@@ -1,53 +1,40 @@
-# 📋 Implementation Plan & Refinement Lifecycle: DevTest GitHub Label Governance
+# 📋 Implementation Plan & Refinement Lifecycle: Deterministic User-Triggered Config Reload
 
 ---
 
 ## 📝 Initial Draft Proposal
-*This architectural review addresses the transition to a strictly configuration-driven, dynamically triggered `devtest` node:*
-1. **Dynamic Ingestion:** `orchestrator/poller.py` parses configured GitHub label strings (`label_trigger`, `queued_label`, `label_output`) and queries GitHub for the configured labels.
-2. **Stateless Execution:** `orchestrator/nodes/devtest.py` dynamically evaluates issue payloads and performs state transitions using `node_cfg` properties rather than hardcoded string literals.
-3. **Constraint Enforcement:** Ensure all GitHub workflow label transitions are driven strictly by the project's `config.yaml` while keeping node operational properties (`harness`, `model`, `effort`, `branch_prefix`, etc.) standard and intact.
+*This architectural review addresses the transition from automated file-watching hot-reload to a deterministic, user-triggered configuration reload workflow:*
+1. **Remove Automatic File Watching:** Remove `SourceWatcher` automatic filesystem mtime polling from the background worker loop to eliminate race conditions during partial file edits.
+2. **Deterministic IPC Reload:** The operator executes `graph-orchestrator config reload` (or `orchestrator reload`), setting an IPC reload flag in the SQLite state database (`daemon_control`).
+3. **Safe In-Memory Swap:** The daemon's worker loop checks the reload flag, parses and validates the updated `config.yaml`, atomically swaps the active `GlobalConfig` reference, and clears the flag.
+4. **Resilient Error Containment:** If the updated configuration contains syntax errors or invalid schemas, the daemon logs a descriptive error and continues executing with the previous valid configuration without crashing.
 
 ---
 
-## 🔍 Review Iteration 1: Initial Architectural Review
+## 🔍 Review Iteration 1: Agent Architectural Assessment & IPC Harmonization
 - **Date / Author:** 2026-09-01 | Agent / Architect
-- **Verdict Matrix:**
+- **Point-by-Point Verdict Matrix:**
 
 | Proposed Item | Verdict | Critical Architectural Analysis & Nuance |
 |---|:---:|---|
-| **1. Dynamic `devtest` GitHub label configuration from `config.yaml`** | ✅ **APPROVE** | Aligns `devtest` with the dynamic label architecture established for `architect` (`label_trigger`, `queued_label`, `label_output`). |
-| **2. Restricting `NodeConfig` schema via `extra="forbid"`** | ❌ **REJECT** | Unnecessary constraint that risks interfering with core node operational properties (`harness`, `model`, `effort`, `branch_prefix`, `auto_merge_approved`, `enabled`). |
-| **3. Parameterizing all hardcoded string literals in `devtest.py`** | ✅ **APPROVE** | Replaces static `"ready-for-dev"`, `"queued"`, and `"dev-implemented"` literals throughout `devtest.py` with `node_cfg` properties. |
-| **4. Parameterizing Poller workload queries in `poller.py`** | ✅ **APPROVE** | Ensures `orchestrator/poller.py` dynamically queries the configured `label_trigger` when fetching workloads for `devtest`. |
+| **1. Eradicate automatic filesystem mtime polling (`SourceWatcher`)** | ✅ **APPROVE** | Background file-watching on every loop cycle causes non-deterministic behavior and crashes during in-flight file edits. Removing `SourceWatcher` ensures daemon state changes only on explicit operator command. |
+| **2. Use SQLite as the cross-process IPC reload broker** | ✅ **APPROVE (Leverage Existing `daemon_control`)** | The codebase already has `daemon_control` table with `request_reload()`, `is_reload_requested()`, and `clear_reload_request()` in `orchestrator/db.py`. No redundant `daemon_state` table needed. |
+| **3. CLI command interface: `orchestrator config reload`** | ✅ **APPROVE** | Introduce a `config` sub-command group with `reload` (`orchestrator config reload`), while maintaining top-level `orchestrator reload` for backward compatibility. |
+| **4. Resilient error containment on invalid YAML / schema** | ✅ **APPROVE** | If `load_config()` fails with `ValidationError` or YAML syntax error during hot-reload, catch the exception, log `[ERROR] [daemon] Config reload failed... Retaining previous state.`, and keep running with the active `GlobalConfig`. |
+| **5. Atomic config swap in worker loops** | ✅ **APPROVE** | Reassign `config` reference and update matching `project` instances atomically before the next cycle pass. |
 
 ---
 
-## 💬 Review Iteration 2: Operator Clarification on GitHub Labels vs Node Properties
-- **Date / Author:** 2026-09-01 | Operator
-- **Operator Directives & Architectural Clarification:**
-  - When configuring labels, we are strictly configuring **GitHub workflow labels** (`label_trigger`, `label_output`, `queued_label`).
-  - Node operational properties (`harness`, `model`, `effort`, `branch_prefix`, `auto_merge_approved`, `enabled`) are essential engine properties that remain permanent on `NodeConfig`.
-  - We do not apply artificial `extra='forbid'` constraints on node configuration models. Instead, we simply declare and respect the allowed GitHub workflow labels in `config.yaml` and consume them dynamically across the node lifecycle.
+## 🛡️ Edge Cases & Resilience Strategy
 
----
-
-## 🔍 Review Iteration 3: Agent Convergence & Clean GitHub Label Mapping
-- **Date / Author:** 2026-09-01 | Agent / Architect
-- **Technical Blueprint & Synthesis:**
-  1. **Clean Label Properties in `NodeConfig`:**
-     - `label_trigger: Optional[str] = "ready-for-dev"` (Active trigger)
-     - `label_output: Optional[str] = "dev-implemented"` (Completion label)
-     - `queued_label: Optional[str] = "queued"` (Queued subtask label)
-  2. **End-to-End DevTest Parameterization (`orchestrator/nodes/devtest.py`):**
-     - Phase 1: Remediate PRs with `needs-refactor`.
-     - Phase 2: Autonomous E2E merge for Green PRs with `node_cfg.label_output`.
-     - Phase 3: Issue pickup and activation from `node_cfg.queued_label` ──▶ `node_cfg.label_trigger`.
-     - Sequential Advance: Unlock next queued subtask (`node_cfg.queued_label` ──▶ `node_cfg.label_trigger`) upon PR squash-merge.
-  3. **Dynamic Workload Polling (`orchestrator/poller.py`):**
-     - `fetch_project_workload` dynamically uses `devtest_cfg.label_trigger` for issue queries.
-  4. **Multi-Environment Config Synchronization:**
-     - Synchronize `templates/config.example.yaml`, `%USERPROFILE%/.orchestrator/config.yaml`, and `%USERPROFILE%/.config/orchestrator/config.yaml`.
+1. **Crash-Proof Daemon Resilience:**
+   * Wrap reload evaluation in a guarded `try/except Exception` block. If invalid YAML or unparseable fields are encountered, log the exact error and retain the previously validated `GlobalConfig` without crashing the daemon or worker coroutines.
+2. **Offline CLI Invocations:**
+   * If the operator runs `orchestrator config reload` while the daemon is offline, the CLI records the flag in SQLite and reports success. When the daemon subsequently starts, it parses the configuration freshly and clears any stale flags during startup initialization.
+3. **Multi-Project Concurrency Safety:**
+   * When multiple project worker loops are running, each worker checks the flag; once reloaded, the flag is cleared idempotently, and all workers safely update their respective `ProjectConfig` instances.
+4. **Zero Residual File-Watch Overhead:**
+   * Eradicate `SourceWatcher` class and obsolete tests, removing file system polling overhead and disk I/O on every tick.
 
 ---
 
@@ -55,68 +42,68 @@
 
 ### 🧑‍💻 User Story
 **As a** Graph Engineering Platform Operator,  
-**I want** the `devtest` node and poller to dynamically ingest and evaluate its active trigger (`label_trigger`), queued trigger (`queued_label`), and completion label (`label_output`) directly from `config.yaml`,  
-**So that** repository GitHub workflow labels can be configured per project without hardcoded string literals or engine drift.
+**I want** the orchestrator daemon to reload configuration strictly upon executing `orchestrator config reload` (or `orchestrator reload`) instead of automatic filesystem watching,  
+**So that** configuration updates are deterministic, safe from partial file writes, and resilient against syntax errors without daemon restarts.
 
-### ⚙️ System Architecture & Data Flow
+### ⚙️ System Architecture & IPC Flow
 ```
-[config.yaml: devtest.label_trigger / queued_label / label_output]
+[Operator: config.yaml edited]
          │
-         ├──▶ [orchestrator/poller.py] ──▶ Dynamic GitHub API queries for DevTest workload
+         ▼
+[CLI: orchestrator config reload]
          │
-         └──▶ [orchestrator/nodes/devtest.py]
-                ├─ Phase 1: Remediate 'needs-refactor' PRs
-                ├─ Phase 2: Autonomous E2E merge for Green PRs with `node_cfg.label_output`
-                ├─ Phase 3: Dispatch & activate subtasks using `node_cfg.label_trigger` / `queued_label`
-                └─ Sequential Advance: Unlock next subtask (`queued_label` ──▶ `label_trigger`)
+         ├──▶ [SQLite: daemon_control SET reload_requested = '1']
+         │
+         ▼
+[Daemon Worker Loop (Next Tick)]
+         │
+         ├──▶ Check: is_reload_requested() == True
+         ├──▶ Try: load_config(config_path)
+         │       ├─ Success ──▶ Atomically swap config & project instances
+         │       └─ Failure ──▶ Log error & retain previous valid configuration
+         │
+         └──▶ StateManager.clear_reload_request() (SET reload_requested = '0')
 ```
 
 ### ✅ Formal BDD Acceptance Criteria
 
-#### Scenario 1: Config-Driven DevTest Workload Polling
+#### Scenario 1: Deterministic Reload on Explicit Operator Command
 ```gherkin
-Given a project configured with devtest "label_trigger: ready-for-dev" and "queued_label: queued"
-When orchestrator/poller.py executes fetch_project_workload
-Then it must query GitHub issues matching the configured label_trigger
-And synchronize them into SQLite SDLC memory.
+Given a running orchestrator daemon with active configuration
+When the operator modifies config.yaml and saves without running a CLI command
+Then the daemon must NOT reload and must continue executing with original settings
+When the operator executes "orchestrator config reload"
+Then the daemon must detect the reload signal on its next cycle tick
+And atomically swap to the updated configuration.
 ```
 
-#### Scenario 2: Dynamic Subtask Unlocking on Sequential Progression
+#### Scenario 2: Resilient Error Recovery on Invalid Config Syntax
 ```gherkin
-Given a project configured with custom labels "label_trigger: in-development" and "queued_label: backlog-queued"
-And parent story #70 has completed child subtask #71
-When DevTest advances the parent story and unlocks the next queued subtask #72
-Then it must remove "backlog-queued" and add "in-development" to subtask #72 via GitHub CLI
-And update the SQLite SDLC state to match the configured labels.
+Given a running orchestrator daemon with valid active configuration
+When the operator saves invalid YAML or schema errors in config.yaml
+And executes "orchestrator config reload"
+Then the daemon must log a descriptive validation error
+And continue running with the previous valid configuration without terminating.
 ```
 
-#### Scenario 3: Dual-Label Conflict Resolution
+#### Scenario 3: Backward-Compatible CLI Command Aliases
 ```gherkin
-Given an issue is labeled with both "ready-for-dev" and "queued"
-When DevTest evaluates the issue in Phase 3
-Then it must treat the issue as active (ready-for-dev)
-And remove the stale "queued" label via GitHub CLI.
-```
-
-#### Scenario 4: Backward-Compatible Default Taxonomy
-```gherkin
-Given a minimal config.yaml that does not explicitly declare devtest label keys
-When the orchestrator loads the configuration
-Then devtest must default to "label_trigger: ready-for-dev", "queued_label: queued", and "label_output: dev-implemented"
-And execute without raising validation errors.
+Given the orchestrator CLI interface
+When the operator executes either "orchestrator config reload" or "orchestrator reload"
+Then both commands must register the reload request in SQLite
+And output confirmation to the terminal.
 ```
 
 ### 🛠️ Component-by-Component Impact Table
 
 | Component | Target File | Modifications |
 |---|---|---|
-| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Ensure `NodeConfig` defaults (`label_trigger`, `queued_label`, `label_output`) are documented and unified. |
-| **Poller Engine** | `orchestrator/poller.py` | Parameterize `fetch_project_workload` to use project-specific `devtest` label configurations. |
-| **DevTest Node** | `orchestrator/nodes/devtest.py` | Replace all static literal label strings in Phase 1, Phase 2, Phase 3, and subtask unlocking with `node_cfg` properties. |
-| **Live Configs** | `~/.orchestrator/config.yaml`, `~/.config/orchestrator/config.yaml` | Synchronize live configuration files with documented label schemas. |
-| **Test Suite** | `tests/test_nodes.py`, `tests/test_sequential_pipeline.py` | Add BDD test coverage for custom DevTest label triggers and dynamic subtask progression. |
+| **CLI & Commands** | `orchestrator/cli.py` | Add `config_app` Typer sub-command with `reload` command; retain top-level `reload` alias; remove `SourceWatcher` from `_project_worker_loop` and daemon startup logs. |
+| **Reloader Engine** | `orchestrator/reloader.py` | Remove `SourceWatcher` class; preserve `hot_reload_runtime(config_path)` function for safe module and config reloading. |
+| **State Database** | `orchestrator/db.py` | Leverage existing `request_reload()`, `is_reload_requested()`, and `clear_reload_request()` on `daemon_control`. |
+| **Test Suite** | `tests/test_reloader.py`, `tests/test_cli.py` | Update tests to verify deterministic CLI reload and resilient validation error containment. |
 
 ### 🧱 INVEST Subtask Decomposition
-- **Subtask 1 (`feat(devtest, config)`)**: Parameterize all DevTest node label references (`label_trigger`, `queued_label`, `label_output`) to dynamically consume `NodeConfig`.
-- **Subtask 2 (`feat(poller)`)**: Parameterize DevTest poller workload queries to dynamically ingest configured labels.
-- **Subtask 3 (`test(devtest_labels)`)**: BDD test suite verifying custom DevTest label triggers, subtask activation, and dual-label conflict resolution.
+- **Subtask 1 (`feat(cli, reloader)`)**: Remove `SourceWatcher` file-watching from `_project_worker_loop` and `orchestrator/reloader.py`; add `config reload` CLI sub-command.
+- **Subtask 2 (`feat(resilience)`)**: Implement guarded config swap in `_project_worker_loop` retaining previous `GlobalConfig` on validation error.
+- **Subtask 3 (`test(reload)`)**: Update unit and BDD tests verifying manual reload, invalid config error recovery, and CLI command execution.
