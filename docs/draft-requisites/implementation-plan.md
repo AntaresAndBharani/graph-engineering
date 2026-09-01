@@ -1,43 +1,53 @@
-# 📋 Implementation Plan & Refinement Lifecycle: DevTest Dynamic Label Taxonomy Governance
+# 📋 Implementation Plan & Refinement Lifecycle: DevTest GitHub Label Governance
 
 ---
 
 ## 📝 Initial Draft Proposal
 *This architectural review addresses the transition to a strictly configuration-driven, dynamically triggered `devtest` node:*
-1. **Startup Check:** `orchestrator/config.py` validates that the `devtest` node config defines dynamic label triggers (`label_trigger: ready-for-dev`, `queued_label: queued`, `label_output: dev-implemented`).
-2. **Dynamic Polling:** `orchestrator/poller.py` parses these configured strings and queries GitHub targeting the configured labels.
-3. **Stateless Execution:** `orchestrator/nodes/devtest.py` dynamically evaluates issue payloads and performs state transitions using `node_cfg` properties rather than hardcoded string literals.
-4. **Constraint Enforcement:** Support full configurability from `config.yaml` while preserving model consistency across all SDLC nodes.
+1. **Dynamic Ingestion:** `orchestrator/poller.py` parses configured GitHub label strings (`label_trigger`, `queued_label`, `label_output`) and queries GitHub for the configured labels.
+2. **Stateless Execution:** `orchestrator/nodes/devtest.py` dynamically evaluates issue payloads and performs state transitions using `node_cfg` properties rather than hardcoded string literals.
+3. **Constraint Enforcement:** Ensure all GitHub workflow label transitions are driven strictly by the project's `config.yaml` while keeping node operational properties (`harness`, `model`, `effort`, `branch_prefix`, etc.) standard and intact.
 
 ---
 
-## 🔍 Review Iteration 1: Agent Architectural Critical Review & Schema Harmonization
+## 🔍 Review Iteration 1: Initial Architectural Review
 - **Date / Author:** 2026-09-01 | Agent / Architect
-- **Point-by-Point Verdict Matrix:**
+- **Verdict Matrix:**
 
 | Proposed Item | Verdict | Critical Architectural Analysis & Nuance |
 |---|:---:|---|
-| **1. Dynamic `devtest` label configuration from `config.yaml`** | ✅ **APPROVE** | Aligns `devtest` with the dynamic label architecture already established for `architect` (`label_trigger`, `queued_label`, `label_output`). |
-| **2. Creating an isolated `DevTestLabelConfig` with `extra="forbid"`** | ❌ **REJECT (Anti-Pattern & Breaking Change)** | Forbidding extra fields on a dedicated sub-model breaks `NodeConfig` properties like `harness`, `model`, `effort`, `branch_prefix`, `auto_merge_approved`, and `enabled`. Instead, keep `NodeConfig` unified across all nodes with clean defaults. |
-| **3. Parameterizing all hardcoded string literals in `devtest.py`** | ✅ **APPROVE** | Replaces static `"ready-for-dev"`, `"queued"`, and `"dev-implemented"` literals throughout `orchestrator/nodes/devtest.py` with `node_cfg.label_trigger`, `node_cfg.queued_label`, and `node_cfg.label_output` (with dual-format prefix resilience). |
-| **4. Parameterizing Poller workload queries in `poller.py`** | ✅ **APPROVE** | Ensures `orchestrator/poller.py` dynamically queries the configured `label_trigger` and `queued_label` when fetching workloads for `devtest`. |
-| **5. Dual-label conflict priority (Active trumps Queued)** | ✅ **APPROVE** | If an issue contains both `label_trigger` and `queued_label`, DevTest treats it as active, purges the stale queued label, and executes. |
+| **1. Dynamic `devtest` GitHub label configuration from `config.yaml`** | ✅ **APPROVE** | Aligns `devtest` with the dynamic label architecture established for `architect` (`label_trigger`, `queued_label`, `label_output`). |
+| **2. Restricting `NodeConfig` schema via `extra="forbid"`** | ❌ **REJECT** | Unnecessary constraint that risks interfering with core node operational properties (`harness`, `model`, `effort`, `branch_prefix`, `auto_merge_approved`, `enabled`). |
+| **3. Parameterizing all hardcoded string literals in `devtest.py`** | ✅ **APPROVE** | Replaces static `"ready-for-dev"`, `"queued"`, and `"dev-implemented"` literals throughout `devtest.py` with `node_cfg` properties. |
+| **4. Parameterizing Poller workload queries in `poller.py`** | ✅ **APPROVE** | Ensures `orchestrator/poller.py` dynamically queries the configured `label_trigger` when fetching workloads for `devtest`. |
 
 ---
 
-## 🛡️ Edge Cases & Resilience Strategy
+## 💬 Review Iteration 2: Operator Clarification on GitHub Labels vs Node Properties
+- **Date / Author:** 2026-09-01 | Operator
+- **Operator Directives & Architectural Clarification:**
+  - When configuring labels, we are strictly configuring **GitHub workflow labels** (`label_trigger`, `label_output`, `queued_label`).
+  - Node operational properties (`harness`, `model`, `effort`, `branch_prefix`, `auto_merge_approved`, `enabled`) are essential engine properties that remain permanent on `NodeConfig`.
+  - We do not apply artificial `extra='forbid'` constraints on node configuration models. Instead, we simply declare and respect the allowed GitHub workflow labels in `config.yaml` and consume them dynamically across the node lifecycle.
 
-1. **Unified Schema Consistency:**
-   * Standardize `NodeConfig` across both `architect` and `devtest`:
-     * `label_trigger`: Active trigger (`"ready-for-dev"` for DevTest, `"needs-triage"` for Architect).
-     * `queued_label`: Inactive/queued state (`"queued"`).
-     * `label_output`: Completed/transition state (`"dev-implemented"` for DevTest, `"ready-for-dev"` for Architect).
-2. **Dual-Format Workflow Taxonomy:**
-   * Support both shorthand (`"ready-for-dev"`, `"queued"`, `"dev-implemented"`) and prefixed format (`"status:ready-for-dev"`, `"status:queued"`, `"status:dev-implemented"`) via existing case-insensitive normalization.
-3. **Graceful Fallbacks & Default Resilience:**
-   * If a user config omits `label_trigger` or `queued_label`, Pydantic defaults automatically supply `"ready-for-dev"`, `"queued"`, and `"dev-implemented"`, preventing startup crashes while allowing full YAML customization.
-4. **Multi-Environment Config Synchronization:**
-   * Ensure `templates/config.example.yaml`, `%USERPROFILE%/.orchestrator/config.yaml`, and `%USERPROFILE%/.config/orchestrator/config.yaml` are 100% synchronized.
+---
+
+## 🔍 Review Iteration 3: Agent Convergence & Clean GitHub Label Mapping
+- **Date / Author:** 2026-09-01 | Agent / Architect
+- **Technical Blueprint & Synthesis:**
+  1. **Clean Label Properties in `NodeConfig`:**
+     - `label_trigger: Optional[str] = "ready-for-dev"` (Active trigger)
+     - `label_output: Optional[str] = "dev-implemented"` (Completion label)
+     - `queued_label: Optional[str] = "queued"` (Queued subtask label)
+  2. **End-to-End DevTest Parameterization (`orchestrator/nodes/devtest.py`):**
+     - Phase 1: Remediate PRs with `needs-refactor`.
+     - Phase 2: Autonomous E2E merge for Green PRs with `node_cfg.label_output`.
+     - Phase 3: Issue pickup and activation from `node_cfg.queued_label` ──▶ `node_cfg.label_trigger`.
+     - Sequential Advance: Unlock next queued subtask (`node_cfg.queued_label` ──▶ `node_cfg.label_trigger`) upon PR squash-merge.
+  3. **Dynamic Workload Polling (`orchestrator/poller.py`):**
+     - `fetch_project_workload` dynamically uses `devtest_cfg.label_trigger` for issue queries.
+  4. **Multi-Environment Config Synchronization:**
+     - Synchronize `templates/config.example.yaml`, `%USERPROFILE%/.orchestrator/config.yaml`, and `%USERPROFILE%/.config/orchestrator/config.yaml`.
 
 ---
 
@@ -46,7 +56,7 @@
 ### 🧑‍💻 User Story
 **As a** Graph Engineering Platform Operator,  
 **I want** the `devtest` node and poller to dynamically ingest and evaluate its active trigger (`label_trigger`), queued trigger (`queued_label`), and completion label (`label_output`) directly from `config.yaml`,  
-**So that** repository workflow labels can be customized per project without hardcoded string dependencies or pipeline regressions.
+**So that** repository GitHub workflow labels can be configured per project without hardcoded string literals or engine drift.
 
 ### ⚙️ System Architecture & Data Flow
 ```
@@ -67,7 +77,7 @@
 ```gherkin
 Given a project configured with devtest "label_trigger: ready-for-dev" and "queued_label: queued"
 When orchestrator/poller.py executes fetch_project_workload
-Then it must query GitHub issues matching the configured label_trigger and queued_label
+Then it must query GitHub issues matching the configured label_trigger
 And synchronize them into SQLite SDLC memory.
 ```
 
@@ -100,7 +110,7 @@ And execute without raising validation errors.
 
 | Component | Target File | Modifications |
 |---|---|---|
-| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Ensure `NodeConfig` default values and documentation for `label_trigger`, `queued_label`, and `label_output` are unified. |
+| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Ensure `NodeConfig` defaults (`label_trigger`, `queued_label`, `label_output`) are documented and unified. |
 | **Poller Engine** | `orchestrator/poller.py` | Parameterize `fetch_project_workload` to use project-specific `devtest` label configurations. |
 | **DevTest Node** | `orchestrator/nodes/devtest.py` | Replace all static literal label strings in Phase 1, Phase 2, Phase 3, and subtask unlocking with `node_cfg` properties. |
 | **Live Configs** | `~/.orchestrator/config.yaml`, `~/.config/orchestrator/config.yaml` | Synchronize live configuration files with documented label schemas. |
