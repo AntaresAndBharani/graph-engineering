@@ -3,8 +3,8 @@
 ---
 
 ## 📝 Initial Draft Proposal
-*The Architect node's workflow is now strictly bounded by a rigid label taxonomy:*
-1. **Trigger:** `orchestrator/poller.py` identifies a parent user story in GitHub containing the exact label `stream out`.
+*The Architect node's workflow is strictly bounded by a rigid label taxonomy:*
+1. **Trigger:** `orchestrator/poller.py` identifies a parent user story in GitHub containing the configured trigger label (e.g. `stream out` or `needs-triage`).
 2. **Execution:** `orchestrator/nodes/architect.py` processes the story and generates subtasks.
 3. **Output:** The Architect assigns the label `queued` to all newly created subtasks and transitions the parent story's label to `architect-processed`.
 4. **Constraint Enforcement:** No other labels are permitted to be read or written by the Architect node.
@@ -13,27 +13,39 @@
 
 ## 🔍 Review Iteration 1: Agent Architectural Critical Review & Deadlock Analysis
 - **Date / Author:** 2026-09-01 | Agent / Architect
-- **Point-by-Point Verdict Matrix:**
+- **Verdict Matrix:**
 
 | Proposed Item | Verdict | Critical Architectural Analysis & Nuance |
 |---|:---:|---|
-| **1. Trigger label `stream out` for Architect triage** | ⚠️ **MODIFY (Make Configurable with Default Fallback)** | Hardcoding `stream out` and forbidding other trigger labels breaks backward compatibility for existing repos using `needs-triage` or `status:ready-for-architecture`. Instead, allow `label_trigger: "stream out"` via `NodeConfig` while keeping flexible schema defaults. |
-| **2. Output label `queued` for ALL newly created subtasks** | ⚠️ **MODIFY (Autonomous Subtask 1 Activation or Cold-Start Unlocking)** | **CRITICAL DEADLOCK HAZARD:** If the Architect labels ALL subtasks as `queued` on an idle project without setting Subtask 1 to `ready-for-dev`, DevTest will find 0 active tasks and the pipeline will freeze in perpetual idle. To safely support all-queued creation, `StateManager.get_next_devtest_task` or DevTest must automatically activate Subtask 1 of the oldest active story. |
-| **3. Parent story transition to `architect-processed`** | ✅ **APPROVE** | Standardizes parent story completion state to `architect-processed` upon successful decomposition. |
-| **4. Strict prohibition of all other labels on the Architect node** | ❌ **REJECT (Scoping Violation)** | The Architect node executes 3 distinct governance pillars: (1) Living Architecture Plane sync, (2) Architectural PR Code Review (`needs-architect-review` -> `architect-approved`/`needs-refactor`), and (3) Story Triage. Forbidding all other labels disables Pillar 2 PR reviews. The taxonomy constraints must apply specifically to the **Triage & Decomposition Pillar**. |
-| **5. Rejecting `config.yaml` on unauthorized label definitions** | ⚠️ **MODIFY** | `NodeConfig` contains various operational fields (`review_trigger`, `queued_label`, `branch_prefix`, etc.). Strict validation should enforce known taxonomy schema fields without breaking extensible YAML structures. |
+| **1. Trigger label `stream out` for Architect triage** | ⚠️ **MODIFY** | Sourced directly from `config.yaml` (`label_trigger`) with default fallback to `needs-triage`. |
+| **2. Output label `queued` for ALL newly created subtasks** | ⚠️ **MODIFY** | To prevent pipeline deadlocks when all subtasks are initialized to `queued`, DevTest autonomously promotes Subtask 1 of the active story from `queued` to `ready-for-dev` upon pickup. |
+| **3. Parent story transition to `architect-processed`** | ✅ **APPROVE** | Standardizes parent story completion state to `architect-processed` (or configured `processed_label`) upon decomposition. |
+| **4. Strict prohibition of all other labels on Architect node** | ⚠️ **MODIFY** | Scoped strictly to the 1-pass triage & decomposition lifecycle. |
+| **5. Strict configuration binding from `config.yaml`** | ✅ **APPROVE** | All labels (`label_trigger`, `processed_label`, `queued_label`) must be read dynamically from `config.yaml` with clean Pydantic defaults. |
 
 ---
 
-## 🛡️ Edge Cases & Deadlock Prevention Strategy
+## 💬 Review Iteration 2: Operator Clarification on Streamlined Architect Lifecycle
+- **Date / Author:** 2026-09-01 | Operator
+- **Operator Directives & Architectural Clarification:**
+  - In the streamlined 2-node parallel topology, the Architect's sole purpose is **1-pass Triage & Decomposition** (`needs-triage` / `stream out` $	o$ `architect-processed` / `architect done`).
+  - There is no circular PR review loop for the Architect node; DevTest handles implementation, CI verification, and auto-merge directly.
+  - All label definitions must be driven dynamically by the project's `config.yaml` (`label_trigger`, `processed_label`, `queued_label`).
+  - Once triaged and labeled `queued` (with parent labeled `architect-processed`), the Architect's job on that issue is 100% complete with no additional label mutations.
 
-1. **Cold-Start Pipeline Activation:**
-   * When all subtasks are created as `queued` under an `architect-processed` story:
-   * DevTest's deterministic CTE query (`StateManager.get_next_devtest_task`) must resolve Subtask 1 from the oldest `architect-processed` story and automatically promote it from `queued` to `ready-for-dev` upon pickup, ensuring execution never deadlocks.
-2. **Multi-Word Label Formatting (`stream out`):**
-   * GitHub CLI commands with spaces must always be wrapped in quotes (`--label "stream out"`, `--remove-label "stream out"`) to prevent shell argument fragmentation.
-3. **Idempotency on Partial Failure:**
-   * If decomposition fails halfway through creating subtasks, the parent story retains `stream out`, but existing subtasks are linked via `sync_parent_subtask_links` on the retry to avoid subtask duplication.
+---
+
+## 🔍 Review Iteration 3: Agent Convergence & Direct 1-Pass Architecture Blueprint
+- **Date / Author:** 2026-09-01 | Agent / Architect
+- **Technical Validation & Synthesis:**
+  1. **Config-Driven Taxonomy:**
+     - `NodeConfig.label_trigger`: Sourced from `config.yaml` (e.g., `"needs-triage"` or `"stream out"`).
+     - `NodeConfig.processed_label`: Sourced from `config.yaml` (e.g., `"architect-processed"`).
+     - `NodeConfig.queued_label`: Sourced from `config.yaml` (e.g., `"queued"`).
+  2. **1-Pass Decomposition Guarantee:**
+     - Architect prompt generates all subtasks with `queued_label`, embeds the markdown checklist into the parent body, removes `label_trigger`, adds `processed_label`, and immediately exits.
+  3. **DevTest Autonomous First-Subtask Unlocking:**
+     - DevTest's deterministic CTE query (`get_next_devtest_task`) identifies the lowest open subtask in the oldest `architect-processed` story and activates it (`queued` $	o$ `ready-for-dev`) on execution, ensuring continuous, deadlock-free flow.
 
 ---
 
@@ -41,75 +53,76 @@
 
 ### 🧑‍💻 User Story
 **As a** Graph Engineering Platform Operator,  
-**I want** the Architect node's triage pillar to ingest stories labeled `stream out` (or configured trigger), generate all subtasks with the `queued` initial state, and mark the parent story `architect-processed`, with automatic first-subtask activation in DevTest,  
-**So that** story decomposition follows a clean, standardized label lifecycle without manual intervention or pipeline deadlocks.
+**I want** the Architect node to execute a strict, 1-pass triage lifecycle that reads its trigger label from `config.yaml`, creates all subtasks with the `queued` label, and transitions the parent story to `architect-processed`, with automatic subtask activation in DevTest,  
+**So that** story decomposition is clean, deterministic, and fully configurable without redundant review loops or pipeline stalls.
 
 ### ⚙️ System Architecture & Data Flow
 ```
-[GitHub Issue: labeled 'stream out']
+[GitHub Issue: labeled with configured `label_trigger` (e.g. 'stream out' / 'needs-triage')]
          │
   ▼ (Poller Ingestion)
-[Architect Node: Pillar 3 Triage]
-  ├─ 1. Ingest Story with label: "stream out"
-  ├─ 2. Generate Subtasks 1..N: all labeled "queued"
-  ├─ 3. Update Parent Body Checklist: "- [ ] #<subtask_id>"
-  └─ 4. Update Parent Story: remove "stream out", add "architect-processed"
+[Architect Node: 1-Pass Triage & Decomposition]
+  ├─ 1. Ingest Story with label: `label_trigger`
+  ├─ 2. Generate Subtasks 1..N: all labeled `queued_label` (default 'queued')
+  ├─ 3. Embed Parent Checklist: "- [ ] #<subtask_id>"
+  └─ 4. Update Parent Story: remove `label_trigger`, add `processed_label` (default 'architect-processed')
          │
-  ▼ (DevTest Autonomous Activation & Execution)
+  ▼ (DevTest Autonomous Activation & E2E Merge)
 [DevTest Node: Consumer]
-  ├─ 1. Query StateManager for active/oldest story lock
-  ├─ 2. Auto-promote Subtask 1: "queued" ──▶ "ready-for-dev"
-  ├─ 3. Implement in isolated worktree, verify CI, squash-merge
-  ├─ 4. Promote next queued subtask ("queued" ──▶ "ready-for-dev")
+  ├─ 1. Resolve Active/Oldest Story Lock via StateManager
+  ├─ 2. Auto-promote Subtask 1: `queued` ──▶ `ready-for-dev`
+  ├─ 3. Implement in isolated worktree, verify CI 100% Green, squash-merge
+  ├─ 4. Unlock next sequential subtask (`queued` ──▶ `ready-for-dev`)
   └─ 5. On 100% subtask completion: mark parent "dev-implemented" and close
 ```
 
 ### ✅ Formal BDD Acceptance Criteria
 
-#### Scenario 1: Architect Decomposes Story into All-Queued Subtasks
+#### Scenario 1: Config-Driven 1-Pass Story Decomposition
 ```gherkin
-Given a GitHub issue #50 is labeled "stream out"
+Given a project configured with "label_trigger: stream out", "processed_label: architect-processed", and "queued_label: queued"
+And a GitHub parent issue #60 is labeled "stream out"
 When the Architect node executes its triage cycle
 Then it must create all child subtasks labeled strictly as "queued"
-And it must update parent issue #50 by removing "stream out" and adding "architect-processed"
-And it must embed the subtasks checklist ("- [ ] #<id>") into the parent body.
+And it must remove "stream out" and add "architect-processed" to issue #60
+And it must embed the subtasks checklist into the body of issue #60.
 ```
 
-#### Scenario 2: DevTest Autonomous Activation of Queued Subtasks
+#### Scenario 2: Autonomous DevTest Activation of Queued Subtasks
 ```gherkin
-Given parent issue #50 is labeled "architect-processed" with open subtasks #51 and #52 labeled "queued"
-When DevTest queries the StateManager for the next actionable task
-Then it must identify Subtask #51 as the lowest sequential task
-And automatically promote Subtask #51 from "queued" to "ready-for-dev"
-And begin implementation without stalling the pipeline.
+Given parent issue #60 is labeled "architect-processed" with open subtasks #61 and #62 labeled "queued"
+When DevTest resolves the project workload
+Then it must select Subtask #61 as the lowest sequential task
+And automatically promote Subtask #61 from "queued" to "ready-for-dev"
+And proceed with implementation without waiting for external triggers.
 ```
 
-#### Scenario 3: Architectural PR Review Pillar Integrity Preserved
+#### Scenario 3: Strict Config Loading from `config.yaml`
 ```gherkin
-Given a Pull Request is submitted with label "needs-architect-review"
-When the Architect node executes its PR review cycle (Pillar 2)
-Then it must evaluate the PR diff against ".graph/architecture.md"
-And apply "architect-approved" or "needs-refactor" without interference from triage label constraints.
+Given a user defines custom label mappings in "~/.config/orchestrator/config.yaml"
+When the orchestrator loads the configuration
+Then the Architect node must dynamically bind "label_trigger", "processed_label", and "queued_label" from the configuration
+And execute triage operations exclusively using the configured labels.
 ```
 
-#### Scenario 4: Backward-Compatible Config Taxonomy Validation
+#### Scenario 4: Zero Token Idle When No Issues Match Trigger Label
 ```gherkin
-Given a configuration specifying "label_trigger: stream out", "processed_label: architect-processed", and "queued_label: queued"
-When the orchestrator validates the configuration on startup
-Then it must accept the taxonomy and bind the labels to the Architect node.
+Given no issues in the repository have the configured "label_trigger"
+When the Architect node executes its triage cycle
+Then it must record the idle sweep timestamp in SQLite
+And exit immediately with 0 LLM tokens consumed.
 ```
 
 ### 🛠️ Component-by-Component Impact Table
 
 | Component | Target File | Modifications |
 |---|---|---|
-| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Support `stream out` as configurable trigger label; maintain robust taxonomy mapping. |
-| **Architect Node** | `orchestrator/nodes/architect.py` | Ensure triage decomposition creates all subtasks with `queued` label and updates parent to `architect-processed` while preserving Pillar 2 PR review labels. |
-| **DevTest Node** | `orchestrator/nodes/devtest.py` | Ensure autonomous promotion of first queued subtask in `architect-processed` stories. |
-| **Database & CTE** | `orchestrator/db.py` | Ensure `StateManager.get_next_devtest_task` recognizes `stream out` and `architect-processed` story states. |
-| **Test Suite** | `tests/test_architect_governance.py`, `tests/test_sequential_pipeline.py` | BDD test coverage for all-queued decomposition, autonomous activation, and taxonomy validation. |
+| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Ensure `label_trigger`, `processed_label`, and `queued_label` in `NodeConfig` load dynamically with clean defaults. |
+| **Architect Node** | `orchestrator/nodes/architect.py` | Update `build_triage_prompt` and `_triage_story` to create all subtasks with `queued_label` and parent with `processed_label` from config. |
+| **DevTest Node** | `orchestrator/nodes/devtest.py` | Ensure autonomous pickup and activation of Subtask 1 from `queued` to `ready-for-dev` on `architect-processed` stories. |
+| **Test Suite** | `tests/test_architect_governance.py`, `tests/test_sequential_pipeline.py` | Comprehensive BDD integration test coverage verifying config-driven 1-pass triage and DevTest activation. |
 
 ### 🧱 INVEST Subtask Decomposition
-- **Subtask 1 (`feat(architect, config)`)**: Standardize Architect decomposition to generate `queued` subtasks and transition parent to `architect-processed`.
-- **Subtask 2 (`feat(devtest)`)**: Autonomous promotion of Subtask 1 from `queued` to `ready-for-dev` on `architect-processed` story pickup.
-- **Subtask 3 (`test(architect_governance)`)**: BDD test suite verifying `stream out` ingestion, all-queued creation, and PR review preservation.
+- **Subtask 1 (`feat(architect, config)`)**: Config-driven 1-pass triage decomposition producing all-`queued` subtasks and `architect-processed` parent.
+- **Subtask 2 (`feat(devtest)`)**: Autonomous promotion of Subtask 1 from `queued` to `ready-for-dev` upon DevTest story pickup.
+- **Subtask 3 (`test(architect_governance)`)**: BDD test suite verifying config loading, all-queued creation, and zero-token idle sweeps.
