@@ -31,7 +31,7 @@ from orchestrator.nodes.supervisor import (
     run_supervisor_node,
 )
 from orchestrator import poller
-from orchestrator.reloader import SourceWatcher, hot_reload_runtime
+from orchestrator.reloader import hot_reload_runtime
 
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
@@ -57,6 +57,13 @@ supervisor_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(supervisor_app, name="supervisor")
+
+config_app = typer.Typer(
+    name="config",
+    help="Orchestrator configuration management and runtime controls.",
+    no_args_is_help=True,
+)
+app.add_typer(config_app, name="config")
 console = Console(legacy_windows=False)
 
 
@@ -399,13 +406,12 @@ async def _project_worker_loop(
     state_manager: StateManager,
     interval: int,
     config_path: Optional[Path] = None,
-    watcher: Optional[SourceWatcher] = None,
 ) -> None:
     """
     Independent worker loop for a single project.
     Runs sequentially within this project.
     If work is performed in a pass, immediately starts the next pass (with a 1s debounce).
-    Automatically checks for file changes or manual reload signals before each pass.
+    Checks for manual reload signals via SQLite IPC before each pass.
     Only sleeps for `interval` when all nodes in this project are idle.
     """
     while True:
@@ -414,19 +420,9 @@ async def _project_worker_loop(
                 console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
                 break
 
-            # In-Memory Hot-Reload Check (Manual Signal or Auto-File Watcher)
-            reload_requested = await state_manager.is_reload_requested()
-            has_changed = False
-            modified_files: List[str] = []
-            if watcher:
-                has_changed, modified_files = watcher.check_for_changes()
-
-            if reload_requested or has_changed:
-                if reload_requested:
-                    console.print(f"\n  [bold cyan]🔄 [Manual Reload Requested][/bold cyan] 'orchestrator reload' signal detected.")
-                if has_changed:
-                    console.print(f"\n  [bold yellow]📝 [File Modification Detected][/bold yellow] {', '.join(modified_files)}")
-
+            # In-Memory Hot-Reload Check (Deterministic IPC Signal)
+            if await state_manager.is_reload_requested():
+                console.print(f"\n  [bold cyan]🔄 [Manual Reload Requested][/bold cyan] 'orchestrator config reload' signal detected.")
                 console.print("  [dim]⚙️ Reloading in-memory configuration and runtime Python modules...[/dim]")
                 try:
                     config = hot_reload_runtime(config_path)
@@ -439,7 +435,9 @@ async def _project_worker_loop(
                         f"[dim](Project: {project.name} | Poll: {config.settings.poll_interval_seconds}s)[/dim]"
                     )
                 except Exception as re_err:
-                    console.print(f"  [bold red]Hot-Reload Error:[/bold red] {re_err}")
+                    _logger.error("Hot-Reload Error: %s. Retaining previous valid configuration.", re_err)
+                    console.print(f"  [bold red]Hot-Reload Error:[/bold red] {re_err}. Retaining previous configuration.")
+                    await state_manager.clear_reload_request()
 
             await state_manager.cleanup_expired_locks()
             work_done = await run_project_cycle(project, config, state_manager, silent_idle=False)
@@ -521,8 +519,6 @@ async def _watch_daemon_headless(
     await state_manager.register_daemon(daemon_pid)
     await state_manager.clear_reload_request()
 
-    watcher = SourceWatcher(config_path=config_path, watch_source=True)
-
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
 
@@ -533,7 +529,7 @@ async def _watch_daemon_headless(
         f"• Daemon PID: [cyan]{daemon_pid}[/cyan]\n"
         f"• State DB: [cyan]{config.settings.resolved_db_path}[/cyan]\n"
         f"• Logs: [cyan]{config.settings.resolved_log_dir}[/cyan]\n"
-        f"• Auto Hot-Reload: [green]Active[/green] (Watching config.yaml & source files)",
+        f"• Dynamic Hot-Reload: [green]Active[/green] (Trigger with 'orchestrator config reload')",
         title="Daemon Active",
         border_style="green",
     ))
@@ -551,7 +547,7 @@ async def _watch_daemon_headless(
 
     # Spawn concurrent worker tasks for each project
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path, watcher=watcher))
+        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path))
         for p in enabled_projects
     ]
 
@@ -594,7 +590,6 @@ async def _watch_daemon_tui(
     await state_manager.register_daemon(daemon_pid)
     await state_manager.clear_reload_request()
 
-    watcher = SourceWatcher(config_path=config_path, watch_source=True)
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
 
@@ -620,7 +615,7 @@ async def _watch_daemon_tui(
         return
 
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path, watcher=watcher))
+        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path))
         for p in enabled_projects
     ]
     tui_task = asyncio.create_task(app_instance.run_async())
@@ -1182,6 +1177,7 @@ async def _stop_daemon(force: bool, config_path: Optional[Path]) -> None:
             console.print(f"[bold yellow]Terminated {active_killed} active AI harness process(es).[/bold yellow]")
 
 
+@config_app.command("reload")
 @app.command("reload")
 def reload_command(
     config_path: Optional[Path] = typer.Option(

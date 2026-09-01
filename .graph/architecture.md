@@ -116,7 +116,7 @@ graph TD
         QuotaEngine["Quota & Runway Gating Engine (`orchestrator/quota.py`)"]
         GitHubPoller["Zero-Token GitHub Poller (`orchestrator/poller.py`)"]
         Housekeeping["Label Provisioner (`orchestrator/housekeeping.py`)"]
-        ReloaderWatcher["Source Watcher (`orchestrator/reloader.py`)"]
+        ReloaderWatcher["Deterministic Reloader (`orchestrator/reloader.py`)"]
         WorktreeMgr["Worktree Manager (`orchestrator/worktree.py`)"]
     end
 
