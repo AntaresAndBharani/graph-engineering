@@ -10,9 +10,11 @@ When the user prefixes their instruction with `/quick-fix` or explicitly request
 
 ## User Story Refining Protocol (`/refine-story`, `/user-story-refining`)
 When the user prefixes their instruction with `/refine-story`, `/user-story-refining`, or asks to refine/review a draft specification:
-1. **Inspect Ground Truth Codebase:** View live schemas, models, and classes in `orchestrator/` before evaluating.
-2. **Point-by-Point Critical Verdict Matrix:** Scrutinize every proposal point for data duplication, class redundancy, backward compatibility, and anti-patterns.
-3. **Analyze Edge Cases & Resilience:** Evaluate zero-division on idle, cold-start states, UTC normalization, and non-blocking UI execution.
-4. **Produce Pristine User Story:** Generate full Gherkin BDD Acceptance Criteria (`Given/When/Then`), architecture diagrams, and INVEST subtask breakdown.
-5. **Strict Approval Gate:** Withhold approval and do not proceed to implementation or issue creation until the plan is 100% sound, verified, and explicitly approved by the user.
+1. **Maintain Living Audit Trail in `docs/draft-requisites/implementation-plan.md`:** Never overwrite previous iterations. Preserve the initial plan, append each new review iteration (`## 🔍 Review Iteration N`), incorporate operator feedback iterations (`## 💬 Review Iteration N`), and maintain the consolidated `## 🎯 Final Decision Plan & User Story Specification` at the bottom.
+2. **Inspect Ground Truth Codebase:** View live schemas, models, and classes in `orchestrator/` before evaluating.
+3. **Point-by-Point Critical Verdict Matrix:** Scrutinize every proposal point for data duplication, class redundancy, backward compatibility, and anti-patterns.
+4. **Analyze Edge Cases & Resilience:** Evaluate zero-division on idle, cold-start states, UTC normalization, and non-blocking UI execution.
+5. **Produce Pristine User Story in Final Decision Plan:** Generate full Gherkin BDD Acceptance Criteria (`Given/When/Then`), architecture diagrams, component impact table, and INVEST subtask breakdown.
+6. **Strict Approval Gate:** Withhold approval and do not proceed to implementation or issue creation until the plan is 100% sound, verified, and explicitly approved by the user. Once approved, the Final Decision Plan serves as the source of truth for creating the GitHub Epic story.
+
 
