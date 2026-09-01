@@ -405,19 +405,13 @@ def build_triage_prompt(
     if project.context_files:
         context_note = f"Read the project context files in your workspace: {', '.join(project.context_files)}."
 
-    po_ac_context = ""
     target_parent_label = "planned" if has_active_story else processed_label
 
-    if has_active_story:
-        decomposition_instruction = (
-            f"     - An active story is currently running in this project. Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
-        )
-    else:
-        decomposition_instruction = (
-            f"     - Create Subtask 1 (Active): `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
-            f"     - Create Subtasks 2..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
-        )
+    decomposition_instruction = (
+        f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
+    )
 
+    po_ac_context = ""
     if po_record and po_record.get("status") == "PO_APPROVED" and po_record.get("gherkin_ac"):
         gherkin_ac = str(po_record["gherkin_ac"]).strip()
         po_ac_context = (
@@ -426,15 +420,9 @@ def build_triage_prompt(
             f"```gherkin\n{gherkin_ac}\n```\n"
             f"CRITICAL: Do NOT re-derive acceptance criteria from scratch. Incorporate and decompose directly from these pre-approved Gherkin criteria into subtasks.\n"
         )
-        if has_active_story:
-            decomposition_instruction = (
-                f"     - An active story is currently running in this project. Create all Subtasks 1..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
-            )
-        else:
-            decomposition_instruction = (
-                f"     - Create Subtask 1 (Active) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask 1 title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{output_label}'`.\n"
-                f"     - Create Subtasks 2..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
-            )
+        decomposition_instruction = (
+            f"     - Create all Subtasks 1..N (Queued) using the pre-approved Gherkin acceptance criteria above: `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`.\n"
+        )
 
     prompt = (
         f"You are the Principal Architect operating autonomously in non-interactive batch mode.\n"

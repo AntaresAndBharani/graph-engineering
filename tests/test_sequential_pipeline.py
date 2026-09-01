@@ -84,11 +84,9 @@ def test_architect_build_triage_prompt_queued_instructions():
         processed_label="architect-processed",
     )
 
-    assert "Create Subtask 1 (Active)" in prompt
-    assert "ready-for-dev" in prompt
-    assert "Create Subtasks 2..N (Queued)" in prompt
-    assert "queued" in prompt
-    assert "architect-processed" in prompt
+    assert "Create all Subtasks 1..N (Queued)" in prompt
+    assert "--label 'queued'" in prompt
+    assert "--add-label 'architect-processed'" in prompt
 
 
 @pytest.mark.asyncio

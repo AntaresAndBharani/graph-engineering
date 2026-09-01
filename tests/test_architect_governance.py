@@ -554,9 +554,7 @@ async def test_scenario_decomposition_respects_active_story_state(tmp_path: Path
     ran, msg = await run_architect_node(project, config, state_manager)
     assert ran is True
     prompt_text = captured_prompt["text"]
-    assert "Create Subtask 1 (Active)" in prompt_text
-    assert "--label 'ready-for-dev'" in prompt_text
-    assert "Create Subtasks 2..N (Queued)" in prompt_text
+    assert "Create all Subtasks 1..N (Queued)" in prompt_text
     assert "--label 'queued'" in prompt_text
     assert "--add-label 'architect-processed'" in prompt_text
 
@@ -640,10 +638,78 @@ async def test_scenario_decomposition_queues_behind_an_active_story(tmp_path: Pa
     ran, msg = await run_architect_node(project, config, state_manager)
     assert ran is True
     prompt_text = captured_prompt["text"]
-    assert "An active story is currently running in this project" in prompt_text
     assert "Create all Subtasks 1..N (Queued)" in prompt_text
     assert "--label 'queued'" in prompt_text
     assert "--add-label 'planned'" in prompt_text
-    assert "Create Subtask 1 (Active)" not in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_scenario_config_driven_1_pass_story_decomposition_stream_out(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Config-driven 1-pass story decomposition with 'stream out'
+      Given a project configured with label_trigger="stream out", processed_label="architect-processed", queued_label="queued"
+      And a GitHub parent issue #60 is labeled "stream out"
+      When the Architect node executes its triage cycle
+      Then it must create all child subtasks labeled strictly as "queued"
+      And it must remove "stream out" and add "architect-processed" to issue #60.
+    """
+    from orchestrator.nodes import architect
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    # Living architecture plane initialized
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Architecture Standards\n", encoding="utf-8")
+    await state_manager.record_node_run("architect_research", "AntaresAndBharani/graph-engineering")
+
+    monkeypatch.setattr(architect, "fetch_open_prs", AsyncMock(return_value=[]))
+
+    async def mock_fetch_issues(repo, label, limit=1):
+        if label == "stream out":
+            return [{"number": 60, "title": "Epic: Custom Stream Out Story"}]
+        return []
+
+    monkeypatch.setattr(architect, "fetch_issues_with_label", mock_fetch_issues)
+
+    captured_prompt = {}
+
+    async def mock_execute(self, prompt, **kwargs):
+        captured_prompt["text"] = prompt
+        return 0
+
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_execute)
+
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+
+    config = GlobalConfig()
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(
+                enabled=True,
+                harness="claude",
+                model="claude-sonnet-5",
+                label_trigger="stream out",
+                processed_label="architect-processed",
+                queued_label="queued",
+            )
+        },
+    )
+
+    ran, msg = await run_architect_node(project, config, state_manager)
+    assert ran is True
+    assert "evaluation on issue #60" in msg
+    prompt_text = captured_prompt["text"]
+    assert "Create all Subtasks 1..N (Queued)" in prompt_text
+    assert "--label 'queued'" in prompt_text
+    assert "--remove-label 'stream out'" in prompt_text
+    assert "--add-label 'architect-processed'" in prompt_text
 
 
