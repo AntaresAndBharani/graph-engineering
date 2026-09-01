@@ -22,7 +22,7 @@ from orchestrator.logging import (
 from orchestrator import poller
 from orchestrator.nodes.reviewer import check_pr_ci_status
 from orchestrator.poller import check_dispatch_quota, fetch_issue_by_number, fetch_open_prs
-from orchestrator.worktree import WorktreeManager
+from orchestrator.worktree import WorktreeManager, clean_worktree
 
 _logger = logging.getLogger(__name__)
 console = Console()
@@ -443,6 +443,20 @@ async def _advance_parent_and_unlock_next_subtask(
         if mark.strip() == ""
     ]
 
+    # Check if any open subtasks are in blocked/failed quarantine state
+    has_blocked_child = False
+    for c in children:
+        c_state = str(c.get("state", "")).upper()
+        if c_state != "CLOSED":
+            c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
+            if any(lbl.lower() in ("blocked", "status:blocked", "needs-po-review", "orchestration-failed") for lbl in c_labels):
+                has_blocked_child = True
+                break
+
+    if has_blocked_child:
+        _logger.warning("[%s:devtest] Story #%s has a blocked subtask. Halting sequential advance.", project.name, parent_id)
+        return
+
     # Check if any open subtasks with 'queued' or pending review exist
     queued_children = []
     for c in children:
@@ -763,6 +777,14 @@ async def _verify_and_auto_merge_pr(
                     }],
                 )
                 await state_manager.delete_pr_artifact(project.repo, pr_number)
+
+                # 3.5 Sanitize worktree with stash protection
+                try:
+                    dev_wt = WorktreeManager.get_worktree_path(project, "devtest")
+                    if dev_wt.exists():
+                        await clean_worktree(dev_wt)
+                except Exception as ex_wt:
+                    _logger.debug("[%s:devtest] Worktree post-merge cleanup notice: %s", project.name, ex_wt)
 
                 # 4. Advance parent story sequence / unlock next queued subtask
                 try:

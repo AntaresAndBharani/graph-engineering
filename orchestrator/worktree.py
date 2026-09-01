@@ -332,6 +332,55 @@ async def remove_worktree(
         return False
 
 
+async def clean_worktree(
+    worktree_path: Path | str,
+    default_branch: str = "main",
+) -> bool:
+    """
+    Safely sanitizes a worktree after task completion or PR merge.
+    Checks `git status --porcelain`: if untracked or uncommitted changes exist,
+    executes `git stash push -u -m "Orchestrator pre-clean recovery"` before resetting
+    to prevent accidental deletion of uncommitted code artifacts.
+    """
+    if not shutil.which("git"):
+        return False
+
+    wp = str(resolve_path(worktree_path))
+    try:
+        # 1. Check for untracked/uncommitted changes
+        proc_status = await asyncio.create_subprocess_exec(
+            "git", "status", "--porcelain",
+            cwd=wp,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_s, _ = await proc_status.communicate()
+        status_out = stdout_s.decode("utf-8", errors="replace").strip() if stdout_s else ""
+
+        if status_out:
+            _logger.debug("Untracked/uncommitted changes in worktree '%s'. Stashing prior to reset...", wp)
+            proc_stash = await asyncio.create_subprocess_exec(
+                "git", "stash", "push", "-u", "-m", "Orchestrator pre-clean recovery",
+                cwd=wp,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc_stash.communicate()
+
+        # 2. Reset worktree to origin/<default_branch> or clean HEAD
+        proc_reset = await asyncio.create_subprocess_exec(
+            "git", "checkout", f"origin/{default_branch}",
+            cwd=wp,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc_reset.communicate()
+        return True
+    except Exception as e:
+        _logger.debug("Non-fatal exception during clean_worktree for '%s': %s", wp, e)
+        return False
+
+
 class WorktreeManager:
     """
     Manager for ephemeral git worktree lifecycles per node and project.
@@ -375,6 +424,14 @@ class WorktreeManager:
         return await prune_worktrees(target)
 
     @classmethod
+    async def clean_worktree(
+        cls,
+        worktree_path: Path | str,
+        default_branch: str = "main",
+    ) -> bool:
+        return await clean_worktree(worktree_path, default_branch=default_branch)
+
+    @classmethod
     async def remove_worktree(
         cls,
         project: ProjectConfig,
@@ -387,6 +444,12 @@ class WorktreeManager:
         if not self.project:
             raise ValueError("WorktreeManager instance was not initialized with a ProjectConfig.")
         return await self.ensure_worktree(self.project, node_name, default_branch=default_branch)
+
+    async def clean(self, node_name: str, default_branch: str = "main") -> bool:
+        if not self.project:
+            raise ValueError("WorktreeManager instance was not initialized with a ProjectConfig.")
+        target_path = self.get_worktree_path(self.project, node_name)
+        return await self.clean_worktree(target_path, default_branch=default_branch)
 
     async def prune_self(self) -> bool:
         return await self.prune(self.project)

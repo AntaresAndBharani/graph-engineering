@@ -16,6 +16,7 @@ settings:
   log_dir: "~/.config/orchestrator/logs"
   log_level: "INFO"
   max_planned_stories: 2              # Maximum planned stories in lookahead window
+  lookahead_backoff_seconds: 1200     # 20 minutes backoff cadence for Architect on empty backlog
   worktrees_enabled: true             # Enable isolated Git worktrees for concurrent devtest tasks
   worktree_dir: null                  # Custom base directory for worktrees (null uses default project path)
 

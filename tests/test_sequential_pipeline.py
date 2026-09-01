@@ -634,3 +634,205 @@ async def test_scenario_story_lock_acquisition_observable_in_terminal_logs(tmp_p
     assert any(expected_log_line in line for line in proj_logs)
 
 
+@pytest.mark.asyncio
+async def test_state_manager_idle_sweep_helpers_and_story_lock_alias(tmp_path: Path):
+    """Verifies SQLite persistence of idle sweep timestamps and active story lock alias."""
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    project_name = "test-proj"
+
+    # Initially None
+    assert await state_manager.get_last_idle_sweep_timestamp(project_name) is None
+
+    # Update timestamp
+    t0 = 1725150000.0
+    await state_manager.update_idle_sweep_timestamp(project_name, t0)
+    assert await state_manager.get_last_idle_sweep_timestamp(project_name) == t0
+
+    # New StateManager instance simulates daemon restart reading same SQLite DB
+    restarted_sm = StateManager(tmp_path / "state.db")
+    assert await restarted_sm.get_last_idle_sweep_timestamp(project_name) == t0
+
+    # Test get_active_story_lock alias
+    items = [
+        {
+            "issue_number": 100,
+            "title": "Active Story",
+            "state": "IN_PROGRESS",
+            "item_type": "STORY",
+            "sequence_order": 0,
+        },
+        {
+            "issue_number": 101,
+            "parent_issue_id": 100,
+            "title": "Subtask 1",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+        },
+    ]
+    await restarted_sm.sync_project_sdlc_items(project_name, items)
+    assert await restarted_sm.get_active_story_lock(project_name) == 100
+
+
+@pytest.mark.asyncio
+async def test_persistent_idle_backoff_survives_daemon_restart(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Persistent idle backoff survives daemon restarts
+      Given the Architect completes an idle sweep and records timestamp in SQLite
+      When the daemon restarts 5 minutes later
+      Then Architect reads SQLite timestamp on initialization and skips polling for remainder of window.
+    """
+    from orchestrator.nodes.architect import run_architect_node
+    import time
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    # Living architecture plane initialized
+    graph_dir = tmp_path / ".graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "architecture.md").write_text("# Arch\n", encoding="utf-8")
+    await state_manager.record_node_run("architect_research", "AntaresAndBharani/graph-engineering")
+
+    # Set idle sweep timestamp to 300 seconds ago (5 minutes ago)
+    now = time.time()
+    await state_manager.update_idle_sweep_timestamp("graph-engineering", now - 300.0)
+
+    # Config with 1200s (20min) lookahead_backoff_seconds
+    config = GlobalConfig()
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(
+                enabled=True,
+                lookahead_backoff_seconds=1200,
+            )
+        },
+    )
+
+    # Daemon restart simulation: new StateManager on same DB file
+    restarted_sm = StateManager(db_file)
+    monkeypatch.setattr("orchestrator.nodes.architect.fetch_open_prs", AsyncMock(return_value=[]))
+
+    ran, msg = await run_architect_node(project, config, restarted_sm)
+    assert ran is False
+    assert "Idle backoff active" in msg
+
+
+@pytest.mark.asyncio
+async def test_blocked_subtask_quarantine_halts_sequential_advance(monkeypatch):
+    """
+    Scenario: Blocked subtask halts sequential advance and quarantines story
+      Given an active parent story has Subtask 1 (blocked/failed) and Subtask 2 (queued)
+      When _advance_parent_and_unlock_next_subtask is evaluated
+      Then Subtask 2 must NOT be promoted to ready-for-dev.
+    """
+    import json
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=Path.cwd(),
+    )
+    state_manager = AsyncMock()
+
+    parent_payload = {
+        "number": 90,
+        "title": "Parent Story #90",
+        "body": "## Subtasks\n- [ ] #91\n- [ ] #92",
+        "comments": [],
+    }
+    subtask_91_payload = {
+        "number": 91,
+        "title": "Subtask 1",
+        "state": "OPEN",
+        "labels": [{"name": "blocked"}],
+    }
+    subtask_92_payload = {
+        "number": 92,
+        "title": "Subtask 2",
+        "state": "OPEN",
+        "labels": [{"name": "queued"}],
+    }
+
+    class MockProc:
+        returncode = 0
+        def __init__(self, out_data):
+            self.out_data = out_data
+        async def communicate(self):
+            return self.out_data, b""
+        async def wait(self):
+            return 0
+
+    promoted_issues = []
+
+    async def mock_subproc(*cmd, **kw):
+        if "issue" in cmd and "view" in cmd:
+            if "90" in cmd:
+                return MockProc(json.dumps(parent_payload).encode())
+            elif "91" in cmd:
+                return MockProc(json.dumps(subtask_91_payload).encode())
+            elif "92" in cmd:
+                return MockProc(json.dumps(subtask_92_payload).encode())
+        elif "issue" in cmd and "edit" in cmd:
+            promoted_issues.append(cmd)
+            return MockProc(b"")
+        return MockProc(b"")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subproc)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+
+    await _advance_parent_and_unlock_next_subtask(project, state_manager, 91)
+
+    # Subtask 92 must NOT have been promoted due to blocked subtask quarantine
+    assert len(promoted_issues) == 0
+
+
+@pytest.mark.asyncio
+async def test_clean_worktree_stashes_untracked_files(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Non-destructive worktree hygiene with stash protection
+      Given a worktree has untracked changes
+      When clean_worktree is called
+      Then it must execute git stash push -u before checkout/reset.
+    """
+    from orchestrator.worktree import clean_worktree
+
+    stash_called = []
+    checkout_called = []
+
+    class MockProc:
+        returncode = 0
+        def __init__(self, out=b"", err=b""):
+            self.out = out
+            self.err = err
+        async def communicate(self):
+            return self.out, self.err
+
+    async def mock_subproc(*cmd, **kw):
+        if "status" in cmd and "--porcelain" in cmd:
+            return MockProc(out=b"?? untracked_file.py\n")
+        elif "stash" in cmd:
+            stash_called.append(cmd)
+            return MockProc()
+        elif "checkout" in cmd:
+            checkout_called.append(cmd)
+            return MockProc()
+        return MockProc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subproc)
+    monkeypatch.setattr("shutil.which", lambda cmd: "git")
+
+    res = await clean_worktree(tmp_path)
+    assert res is True
+    assert len(stash_called) == 1
+    assert "push" in stash_called[0]
+    assert "-u" in stash_called[0]
+    assert len(checkout_called) == 1
+
+

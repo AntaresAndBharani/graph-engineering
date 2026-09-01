@@ -59,6 +59,7 @@ class NodeConfig(OrchestratorBaseModel):
     conflict_harness: Optional[str] = "antigravity"
     conflict_model: Optional[str] = "gemini-3.7-flash-low"
     conflict_effort: Optional[str] = None
+    lookahead_backoff_seconds: int = Field(default=1200, ge=0)
 
 
 def resolve_path(v: str | Path) -> Path:
@@ -145,6 +146,7 @@ class SettingsConfig(OrchestratorBaseModel):
     log_dir: str = "~/.config/orchestrator/logs"
     log_level: str = "INFO"
     max_planned_stories: int = 2
+    lookahead_backoff_seconds: int = Field(default=1200, ge=0)
     worktrees_enabled: bool = True
     worktree_dir: Optional[str] = None
 

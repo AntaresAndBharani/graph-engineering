@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ from orchestrator.logging import get_project_log_path
 from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label, fetch_open_prs
 from orchestrator.worktree import WorktreeManager
 
+_logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -485,12 +487,33 @@ async def _triage_story(
     planned_count = await state_manager.count_planned_stories(project.name)
     if planned_count >= max_planned:
         notice = f"[{project.name}|architect] Lookahead limit reached ({planned_count}/{max_planned}). Pausing decomposition."
-        console.print(f"  [yellow]{notice}[/yellow]")
+        _logger.debug(notice)
         return False, notice
+
+    # Persistent idle backoff gate check: evaluate restart-resilient timestamp
+    backoff_seconds = getattr(node_cfg, "lookahead_backoff_seconds", None)
+    if backoff_seconds is None:
+        backoff_seconds = getattr(config.settings, "lookahead_backoff_seconds", 1200)
+
+    last_idle_sweep = await state_manager.get_last_idle_sweep_timestamp(project.name)
+    if last_idle_sweep is not None and backoff_seconds > 0:
+        elapsed = time.time() - last_idle_sweep
+        if elapsed < backoff_seconds:
+            remaining_secs = int(backoff_seconds - elapsed)
+            minutes, seconds = divmod(remaining_secs, 60)
+            _logger.debug(
+                "[%s:architect] Idle backoff active. Next sweep in %dm %02ds.",
+                project.name, minutes, seconds
+            )
+            return False, f"Idle backoff active (next sweep in {minutes}m {seconds:02d}s)."
 
     issues = await fetch_issues_with_label(project.repo, trigger, limit=1)
     if not issues:
+        await state_manager.update_idle_sweep_timestamp(project.name, time.time())
         return False, f"No issues labeled '{trigger}'. Idle (0 tokens)."
+
+    # Backlog has work: reset idle backoff timestamp
+    await state_manager.update_idle_sweep_timestamp(project.name, 0.0)
 
     target_issue = issues[0]
     issue_id = target_issue["number"]
@@ -755,7 +778,7 @@ async def run_architect_node(
     if triage_ran:
         return True, triage_msg
 
-    if "Lookahead limit reached" in triage_msg:
+    if "Lookahead limit reached" in triage_msg or "Idle backoff active" in triage_msg:
         return False, triage_msg
 
     return False, "No architecture sync due, no PRs awaiting architectural review, no issues to triage. Idle (0 tokens)."

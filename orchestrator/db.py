@@ -63,6 +63,7 @@ class StateManager:
                 CREATE TABLE IF NOT EXISTS project_states (
                     project_name TEXT PRIMARY KEY,
                     is_paused INTEGER DEFAULT 0,
+                    last_idle_sweep_at REAL DEFAULT NULL,
                     updated_at REAL NOT NULL
                 );
                 """
@@ -129,6 +130,11 @@ class StateManager:
                     await db.execute("ALTER TABLE sdlc_items ADD COLUMN pr_status TEXT DEFAULT NULL;")
                 if "pr_ci_details" not in cols:
                     await db.execute("ALTER TABLE sdlc_items ADD COLUMN pr_ci_details TEXT DEFAULT NULL;")
+            cursor = await db.execute("PRAGMA table_info(project_states);")
+            ps_cols = [row[1] for row in await cursor.fetchall()]
+            if ps_cols and "last_idle_sweep_at" not in ps_cols:
+                await db.execute("ALTER TABLE project_states ADD COLUMN last_idle_sweep_at REAL DEFAULT NULL;")
+
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sdlc_parent ON sdlc_items(project_name, parent_issue_id);"
             )
@@ -593,6 +599,46 @@ class StateManager:
             )
             rows = await cursor.fetchall()
             return {row[0] for row in rows}
+
+    async def update_idle_sweep_timestamp(self, project_name: str, timestamp: Optional[float] = None) -> None:
+        """
+        Updates the persistent last_idle_sweep_at timestamp in project_states for the given project.
+        """
+        now = time.time() if timestamp is None else float(timestamp)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO project_states (project_name, is_paused, last_idle_sweep_at, updated_at)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(project_name) DO UPDATE SET
+                    last_idle_sweep_at = excluded.last_idle_sweep_at,
+                    updated_at = excluded.updated_at
+                """,
+                (project_name, now, now),
+            )
+            await db.commit()
+
+    async def get_last_idle_sweep_timestamp(self, project_name: str) -> Optional[float]:
+        """
+        Retrieves the persistent last_idle_sweep_at timestamp from project_states.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "SELECT last_idle_sweep_at FROM project_states WHERE project_name = ?",
+                (project_name,),
+            )
+            row = await cursor.fetchone()
+            return float(row[0]) if (row and row[0] is not None) else None
+
+    async def get_active_story_lock(self, project_name: str) -> Optional[int]:
+        """
+        Alias for get_active_locked_story_id(project_name).
+        """
+        return await self.get_active_locked_story_id(project_name)
 
     # =========================================================================
     # Blackboard Pattern: PR Artifacts & Cross-Node Context Storage
