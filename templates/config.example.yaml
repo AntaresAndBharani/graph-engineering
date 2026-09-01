@@ -162,7 +162,9 @@ projects:
         harness: "claude"
         model: "claude-sonnet-5"
         effort: "medium"              # High reasoning effort for architectural decomposition & PR review
-        label_trigger: "needs-triage"
+        label_trigger: "needs-triage" # Ingest trigger label (e.g. 'needs-triage' or 'stream out')
+        processed_label: "architect-processed" # Transition label applied to parent story upon decomposition
+        queued_label: "queued"        # Initial state label assigned to all generated subtasks
         label_output: "ready-for-dev"
         review_trigger: "needs-architect-review"
         research_harness: "antigravity"
