@@ -1320,6 +1320,175 @@ async def test_devtest_phase3_aborts_and_cleans_labels_on_closed_target_issue(tm
     assert any("--remove-label" in " ".join(cmd) for cmd in edited_cmds)
 
 
+@pytest.mark.asyncio
+async def test_devtest_config_driven_labels_custom_trigger_and_output(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Config-Driven DevTest labels with custom trigger and output
+      Given a project configured with label_trigger="in-development", queued_label="backlog-queued", label_output="merged-done"
+      When DevTest processes an issue labeled "backlog-queued"
+      Then it must promote it to "in-development" and remove "backlog-queued".
+    """
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={
+            "devtest": NodeConfig(
+                enabled=True,
+                harness="antigravity",
+                label_trigger="in-development",
+                queued_label="backlog-queued",
+                label_output="merged-done",
+            )
+        },
+    )
+    config = GlobalConfig()
+
+    items = [
+        {
+            "issue_number": 70,
+            "title": "Parent Story",
+            "state": "IN_PROGRESS",
+            "item_type": "STORY",
+            "sequence_order": 0,
+        },
+        {
+            "issue_number": 71,
+            "parent_issue_id": 70,
+            "title": "Subtask 1",
+            "state": "OPEN",
+            "labels": ["backlog-queued"],
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "orchestrator.nodes.devtest.fetch_issue_by_number",
+        AsyncMock(return_value={"number": 71, "title": "Subtask 1", "state": "OPEN", "labels": [{"name": "backlog-queued"}]}),
+    )
+
+    gh_cmds = []
+
+    class MockProc:
+        returncode = 0
+        async def communicate(self):
+            return b"", b""
+        async def wait(self):
+            return 0
+
+    async def mock_subproc(*cmd, **kw):
+        gh_cmds.append(list(cmd))
+        return MockProc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subproc)
+    monkeypatch.setattr("shutil.which", lambda c: "gh")
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", AsyncMock(return_value=0))
+
+    # DevTest will attempt git operations and harness execution
+    ran, msg = await run_devtest_node(project, config, state_manager)
+
+    # Assert gh issue edit was called to promote backlog-queued to in-development
+    edit_cmds = [c for c in gh_cmds if "issue" in c and "edit" in c]
+    assert len(edit_cmds) > 0
+    full_cmd_str = " ".join(edit_cmds[0])
+    assert "--add-label in-development" in full_cmd_str
+    assert "--remove-label backlog-queued" in full_cmd_str
+
+
+@pytest.mark.asyncio
+async def test_devtest_dual_label_conflict_prefers_active_trigger(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Dual-label conflict resolution
+      Given an issue is labeled with both 'ready-for-dev' and 'queued'
+      When DevTest processes the issue in Phase 3
+      Then it treats the issue as active (ready-for-dev) and strips 'queued'.
+    """
+    from orchestrator.nodes.devtest import run_devtest_node
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+        nodes={
+            "devtest": NodeConfig(
+                enabled=True,
+                harness="antigravity",
+                label_trigger="ready-for-dev",
+                queued_label="queued",
+                label_output="dev-implemented",
+            )
+        },
+    )
+    config = GlobalConfig()
+
+    items = [
+        {
+            "issue_number": 80,
+            "title": "Parent Story",
+            "state": "IN_PROGRESS",
+            "item_type": "STORY",
+            "sequence_order": 0,
+        },
+        {
+            "issue_number": 81,
+            "parent_issue_id": 80,
+            "title": "Subtask with conflict",
+            "state": "OPEN",
+            "labels": ["ready-for-dev", "queued"],
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("graph-engineering", items)
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "orchestrator.nodes.devtest.fetch_issue_by_number",
+        AsyncMock(return_value={"number": 81, "title": "Subtask with conflict", "state": "OPEN", "labels": [{"name": "ready-for-dev"}, {"name": "queued"}]}),
+    )
+
+    gh_cmds = []
+
+    class MockProc:
+        returncode = 0
+        async def communicate(self):
+            return b"", b""
+        async def wait(self):
+            return 0
+
+    async def mock_subproc(*cmd, **kw):
+        gh_cmds.append(list(cmd))
+        return MockProc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subproc)
+    monkeypatch.setattr("shutil.which", lambda c: "gh")
+    monkeypatch.setattr(AsyncHarnessAdapter, "execute", AsyncMock(return_value=0))
+
+    ran, msg = await run_devtest_node(project, config, state_manager)
+
+    # Verify that 'queued' was stripped and 'ready-for-dev' added/kept
+    edit_cmds = [c for c in gh_cmds if "issue" in c and "edit" in c]
+    assert len(edit_cmds) > 0
+    full_cmd_str = " ".join(edit_cmds[0])
+    assert "--remove-label queued" in full_cmd_str
+    assert "--add-label ready-for-dev" in full_cmd_str
+
+
 
 
 

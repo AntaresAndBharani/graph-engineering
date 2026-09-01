@@ -457,21 +457,33 @@ async def _advance_parent_and_unlock_next_subtask(
         _logger.warning("[%s:devtest] Story #%s has a blocked subtask. Halting sequential advance.", project.name, parent_id)
         return
 
+    node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
+    trigger = node_cfg.label_trigger or "ready-for-dev"
+    output_label = node_cfg.label_output or "dev-implemented"
+    queued_label = node_cfg.queued_label or "queued"
+
     # Check if any open subtasks with 'queued' or pending review exist
     queued_children = []
     for c in children:
         c_state = str(c.get("state", "")).upper()
         if c_state != "CLOSED":
             c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
-            if any(lbl in c_labels for lbl in ("queued", "status:queued", "status:pending-review")) or c.get("number") in unchecked_ids:
+            if any(lbl in c_labels for lbl in (queued_label, f"status:{queued_label}", "queued", "status:queued", "status:pending-review")) or c.get("number") in unchecked_ids:
                 queued_children.append(c)
 
     if queued_children:
         next_child = queued_children[0]
         next_id = next_child["number"]
         curr_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in next_child.get("labels", [])]
-        queued_lbl = "status:queued" if "status:queued" in curr_labels else ("status:pending-review" if "status:pending-review" in curr_labels else "queued")
-        ready_lbl = "status:ready-for-dev" if queued_lbl in ("status:queued", "status:pending-review") else "ready-for-dev"
+        is_prefixed = any(l.startswith("status:") for l in curr_labels)
+        queued_lbl = f"status:{queued_label}" if f"status:{queued_label}" in curr_labels else (
+            "status:queued" if "status:queued" in curr_labels else (
+                "status:pending-review" if "status:pending-review" in curr_labels else (
+                    queued_label if queued_label in curr_labels else "queued"
+                )
+            )
+        )
+        ready_lbl = f"status:{trigger}" if is_prefixed else trigger
 
         p_promote = await asyncio.create_subprocess_exec(
             "gh", "issue", "edit", str(next_id),
@@ -501,7 +513,7 @@ async def _advance_parent_and_unlock_next_subtask(
                 "--remove-label", "architect-processed",
                 "--remove-label", "status:in-progress",
                 "--remove-label", "planned",
-                "--add-label", "dev-implemented",
+                "--add-label", output_label,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -545,6 +557,10 @@ async def _promote_next_planned_story(
     oldest_planned = await state_manager.get_oldest_planned_story(project.name)
     if not oldest_planned:
         return None
+
+    node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
+    trigger = node_cfg.label_trigger or "ready-for-dev"
+    queued_label = node_cfg.queued_label or "queued"
 
     next_story_id = int(oldest_planned["issue_number"])
 
@@ -597,15 +613,20 @@ async def _promote_next_planned_story(
                 c_state = str(c.get("state", "")).upper()
                 if c_state != "CLOSED":
                     c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
-                    if "queued" in c_labels or "status:queued" in c_labels:
+                    if any(lbl in c_labels for lbl in (queued_label, f"status:{queued_label}", "queued", "status:queued")):
                         queued_children.append(c)
 
             if queued_children:
                 first_child = queued_children[0]
                 first_id = first_child["number"]
                 child_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in first_child.get("labels", [])]
-                queued_lbl = "status:queued" if "status:queued" in child_labels else "queued"
-                ready_lbl = "status:ready-for-dev" if queued_lbl == "status:queued" else "ready-for-dev"
+                is_prefixed = any(l.startswith("status:") for l in child_labels)
+                queued_lbl = f"status:{queued_label}" if f"status:{queued_label}" in child_labels else (
+                    "status:queued" if "status:queued" in child_labels else (
+                        queued_label if queued_label in child_labels else "queued"
+                    )
+                )
+                ready_lbl = f"status:{trigger}" if is_prefixed else trigger
 
                 p_unlock = await asyncio.create_subprocess_exec(
                     "gh", "issue", "edit", str(first_id),

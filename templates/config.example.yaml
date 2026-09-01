@@ -174,8 +174,9 @@ projects:
         enabled: true
         harness: "antigravity"
         model: "gemini-3.7-flash-medium"  # Antigravity specifies reasoning effort in model name
-        label_trigger: "ready-for-dev"
-        label_output: "needs-architect-review"
+        label_trigger: "ready-for-dev"    # Active trigger label for subtask execution
+        queued_label: "queued"            # Inactive subtask state awaiting sequential activation
+        label_output: "dev-implemented"   # Completion label applied upon PR implementation
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
       reviewer:
