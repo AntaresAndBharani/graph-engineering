@@ -1,51 +1,43 @@
-# 📋 Implementation Plan & Refinement Lifecycle: Architect Label Taxonomy Governance
+# 📋 Implementation Plan & Refinement Lifecycle: DevTest Dynamic Label Taxonomy Governance
 
 ---
 
 ## 📝 Initial Draft Proposal
-*The Architect node's workflow is strictly bounded by a rigid label taxonomy:*
-1. **Trigger:** `orchestrator/poller.py` identifies a parent user story in GitHub containing the configured trigger label (e.g. `stream out` or `needs-triage`).
-2. **Execution:** `orchestrator/nodes/architect.py` processes the story and generates subtasks.
-3. **Output:** The Architect assigns the label `queued` to all newly created subtasks and transitions the parent story's label to `architect-processed`.
-4. **Constraint Enforcement:** No other labels are permitted to be read or written by the Architect node.
+*This architectural review addresses the transition to a strictly configuration-driven, dynamically triggered `devtest` node:*
+1. **Startup Check:** `orchestrator/config.py` validates that the `devtest` node config defines dynamic label triggers (`label_trigger: ready-for-dev`, `queued_label: queued`, `label_output: dev-implemented`).
+2. **Dynamic Polling:** `orchestrator/poller.py` parses these configured strings and queries GitHub targeting the configured labels.
+3. **Stateless Execution:** `orchestrator/nodes/devtest.py` dynamically evaluates issue payloads and performs state transitions using `node_cfg` properties rather than hardcoded string literals.
+4. **Constraint Enforcement:** Support full configurability from `config.yaml` while preserving model consistency across all SDLC nodes.
 
 ---
 
-## 🔍 Review Iteration 1: Agent Architectural Critical Review & Deadlock Analysis
+## 🔍 Review Iteration 1: Agent Architectural Critical Review & Schema Harmonization
 - **Date / Author:** 2026-09-01 | Agent / Architect
-- **Verdict Matrix:**
+- **Point-by-Point Verdict Matrix:**
 
 | Proposed Item | Verdict | Critical Architectural Analysis & Nuance |
 |---|:---:|---|
-| **1. Trigger label `stream out` for Architect triage** | ⚠️ **MODIFY** | Sourced directly from `config.yaml` (`label_trigger`) with default fallback to `needs-triage`. |
-| **2. Output label `queued` for ALL newly created subtasks** | ⚠️ **MODIFY** | To prevent pipeline deadlocks when all subtasks are initialized to `queued`, DevTest autonomously promotes Subtask 1 of the active story from `queued` to `ready-for-dev` upon pickup. |
-| **3. Parent story transition to `architect-processed`** | ✅ **APPROVE** | Standardizes parent story completion state to `architect-processed` (or configured `processed_label`) upon decomposition. |
-| **4. Strict prohibition of all other labels on Architect node** | ⚠️ **MODIFY** | Scoped strictly to the 1-pass triage & decomposition lifecycle. |
-| **5. Strict configuration binding from `config.yaml`** | ✅ **APPROVE** | All labels (`label_trigger`, `processed_label`, `queued_label`) must be read dynamically from `config.yaml` with clean Pydantic defaults. |
+| **1. Dynamic `devtest` label configuration from `config.yaml`** | ✅ **APPROVE** | Aligns `devtest` with the dynamic label architecture already established for `architect` (`label_trigger`, `queued_label`, `label_output`). |
+| **2. Creating an isolated `DevTestLabelConfig` with `extra="forbid"`** | ❌ **REJECT (Anti-Pattern & Breaking Change)** | Forbidding extra fields on a dedicated sub-model breaks `NodeConfig` properties like `harness`, `model`, `effort`, `branch_prefix`, `auto_merge_approved`, and `enabled`. Instead, keep `NodeConfig` unified across all nodes with clean defaults. |
+| **3. Parameterizing all hardcoded string literals in `devtest.py`** | ✅ **APPROVE** | Replaces static `"ready-for-dev"`, `"queued"`, and `"dev-implemented"` literals throughout `orchestrator/nodes/devtest.py` with `node_cfg.label_trigger`, `node_cfg.queued_label`, and `node_cfg.label_output` (with dual-format prefix resilience). |
+| **4. Parameterizing Poller workload queries in `poller.py`** | ✅ **APPROVE** | Ensures `orchestrator/poller.py` dynamically queries the configured `label_trigger` and `queued_label` when fetching workloads for `devtest`. |
+| **5. Dual-label conflict priority (Active trumps Queued)** | ✅ **APPROVE** | If an issue contains both `label_trigger` and `queued_label`, DevTest treats it as active, purges the stale queued label, and executes. |
 
 ---
 
-## 💬 Review Iteration 2: Operator Clarification on Streamlined Architect Lifecycle
-- **Date / Author:** 2026-09-01 | Operator
-- **Operator Directives & Architectural Clarification:**
-  - In the streamlined 2-node parallel topology, the Architect's sole purpose is **1-pass Triage & Decomposition** (`needs-triage` / `stream out` $	o$ `architect-processed` / `architect done`).
-  - There is no circular PR review loop for the Architect node; DevTest handles implementation, CI verification, and auto-merge directly.
-  - All label definitions must be driven dynamically by the project's `config.yaml` (`label_trigger`, `processed_label`, `queued_label`).
-  - Once triaged and labeled `queued` (with parent labeled `architect-processed`), the Architect's job on that issue is 100% complete with no additional label mutations.
+## 🛡️ Edge Cases & Resilience Strategy
 
----
-
-## 🔍 Review Iteration 3: Agent Convergence & Direct 1-Pass Architecture Blueprint
-- **Date / Author:** 2026-09-01 | Agent / Architect
-- **Technical Validation & Synthesis:**
-  1. **Config-Driven Taxonomy:**
-     - `NodeConfig.label_trigger`: Sourced from `config.yaml` (e.g., `"needs-triage"` or `"stream out"`).
-     - `NodeConfig.processed_label`: Sourced from `config.yaml` (e.g., `"architect-processed"`).
-     - `NodeConfig.queued_label`: Sourced from `config.yaml` (e.g., `"queued"`).
-  2. **1-Pass Decomposition Guarantee:**
-     - Architect prompt generates all subtasks with `queued_label`, embeds the markdown checklist into the parent body, removes `label_trigger`, adds `processed_label`, and immediately exits.
-  3. **DevTest Autonomous First-Subtask Unlocking:**
-     - DevTest's deterministic CTE query (`get_next_devtest_task`) identifies the lowest open subtask in the oldest `architect-processed` story and activates it (`queued` $	o$ `ready-for-dev`) on execution, ensuring continuous, deadlock-free flow.
+1. **Unified Schema Consistency:**
+   * Standardize `NodeConfig` across both `architect` and `devtest`:
+     * `label_trigger`: Active trigger (`"ready-for-dev"` for DevTest, `"needs-triage"` for Architect).
+     * `queued_label`: Inactive/queued state (`"queued"`).
+     * `label_output`: Completed/transition state (`"dev-implemented"` for DevTest, `"ready-for-dev"` for Architect).
+2. **Dual-Format Workflow Taxonomy:**
+   * Support both shorthand (`"ready-for-dev"`, `"queued"`, `"dev-implemented"`) and prefixed format (`"status:ready-for-dev"`, `"status:queued"`, `"status:dev-implemented"`) via existing case-insensitive normalization.
+3. **Graceful Fallbacks & Default Resilience:**
+   * If a user config omits `label_trigger` or `queued_label`, Pydantic defaults automatically supply `"ready-for-dev"`, `"queued"`, and `"dev-implemented"`, preventing startup crashes while allowing full YAML customization.
+4. **Multi-Environment Config Synchronization:**
+   * Ensure `templates/config.example.yaml`, `%USERPROFILE%/.orchestrator/config.yaml`, and `%USERPROFILE%/.config/orchestrator/config.yaml` are 100% synchronized.
 
 ---
 
@@ -53,76 +45,68 @@
 
 ### 🧑‍💻 User Story
 **As a** Graph Engineering Platform Operator,  
-**I want** the Architect node to execute a strict, 1-pass triage lifecycle that reads its trigger label from `config.yaml`, creates all subtasks with the `queued` label, and transitions the parent story to `architect-processed`, with automatic subtask activation in DevTest,  
-**So that** story decomposition is clean, deterministic, and fully configurable without redundant review loops or pipeline stalls.
+**I want** the `devtest` node and poller to dynamically ingest and evaluate its active trigger (`label_trigger`), queued trigger (`queued_label`), and completion label (`label_output`) directly from `config.yaml`,  
+**So that** repository workflow labels can be customized per project without hardcoded string dependencies or pipeline regressions.
 
 ### ⚙️ System Architecture & Data Flow
 ```
-[GitHub Issue: labeled with configured `label_trigger` (e.g. 'stream out' / 'needs-triage')]
+[config.yaml: devtest.label_trigger / queued_label / label_output]
          │
-  ▼ (Poller Ingestion)
-[Architect Node: 1-Pass Triage & Decomposition]
-  ├─ 1. Ingest Story with label: `label_trigger`
-  ├─ 2. Generate Subtasks 1..N: all labeled `queued_label` (default 'queued')
-  ├─ 3. Embed Parent Checklist: "- [ ] #<subtask_id>"
-  └─ 4. Update Parent Story: remove `label_trigger`, add `processed_label` (default 'architect-processed')
+         ├──▶ [orchestrator/poller.py] ──▶ Dynamic GitHub API queries for DevTest workload
          │
-  ▼ (DevTest Autonomous Activation & E2E Merge)
-[DevTest Node: Consumer]
-  ├─ 1. Resolve Active/Oldest Story Lock via StateManager
-  ├─ 2. Auto-promote Subtask 1: `queued` ──▶ `ready-for-dev`
-  ├─ 3. Implement in isolated worktree, verify CI 100% Green, squash-merge
-  ├─ 4. Unlock next sequential subtask (`queued` ──▶ `ready-for-dev`)
-  └─ 5. On 100% subtask completion: mark parent "dev-implemented" and close
+         └──▶ [orchestrator/nodes/devtest.py]
+                ├─ Phase 1: Remediate 'needs-refactor' PRs
+                ├─ Phase 2: Autonomous E2E merge for Green PRs with `node_cfg.label_output`
+                ├─ Phase 3: Dispatch & activate subtasks using `node_cfg.label_trigger` / `queued_label`
+                └─ Sequential Advance: Unlock next subtask (`queued_label` ──▶ `label_trigger`)
 ```
 
 ### ✅ Formal BDD Acceptance Criteria
 
-#### Scenario 1: Config-Driven 1-Pass Story Decomposition
+#### Scenario 1: Config-Driven DevTest Workload Polling
 ```gherkin
-Given a project configured with "label_trigger: stream out", "processed_label: architect-processed", and "queued_label: queued"
-And a GitHub parent issue #60 is labeled "stream out"
-When the Architect node executes its triage cycle
-Then it must create all child subtasks labeled strictly as "queued"
-And it must remove "stream out" and add "architect-processed" to issue #60
-And it must embed the subtasks checklist into the body of issue #60.
+Given a project configured with devtest "label_trigger: ready-for-dev" and "queued_label: queued"
+When orchestrator/poller.py executes fetch_project_workload
+Then it must query GitHub issues matching the configured label_trigger and queued_label
+And synchronize them into SQLite SDLC memory.
 ```
 
-#### Scenario 2: Autonomous DevTest Activation of Queued Subtasks
+#### Scenario 2: Dynamic Subtask Unlocking on Sequential Progression
 ```gherkin
-Given parent issue #60 is labeled "architect-processed" with open subtasks #61 and #62 labeled "queued"
-When DevTest resolves the project workload
-Then it must select Subtask #61 as the lowest sequential task
-And automatically promote Subtask #61 from "queued" to "ready-for-dev"
-And proceed with implementation without waiting for external triggers.
+Given a project configured with custom labels "label_trigger: in-development" and "queued_label: backlog-queued"
+And parent story #70 has completed child subtask #71
+When DevTest advances the parent story and unlocks the next queued subtask #72
+Then it must remove "backlog-queued" and add "in-development" to subtask #72 via GitHub CLI
+And update the SQLite SDLC state to match the configured labels.
 ```
 
-#### Scenario 3: Strict Config Loading from `config.yaml`
+#### Scenario 3: Dual-Label Conflict Resolution
 ```gherkin
-Given a user defines custom label mappings in "~/.config/orchestrator/config.yaml"
+Given an issue is labeled with both "ready-for-dev" and "queued"
+When DevTest evaluates the issue in Phase 3
+Then it must treat the issue as active (ready-for-dev)
+And remove the stale "queued" label via GitHub CLI.
+```
+
+#### Scenario 4: Backward-Compatible Default Taxonomy
+```gherkin
+Given a minimal config.yaml that does not explicitly declare devtest label keys
 When the orchestrator loads the configuration
-Then the Architect node must dynamically bind "label_trigger", "processed_label", and "queued_label" from the configuration
-And execute triage operations exclusively using the configured labels.
-```
-
-#### Scenario 4: Zero Token Idle When No Issues Match Trigger Label
-```gherkin
-Given no issues in the repository have the configured "label_trigger"
-When the Architect node executes its triage cycle
-Then it must record the idle sweep timestamp in SQLite
-And exit immediately with 0 LLM tokens consumed.
+Then devtest must default to "label_trigger: ready-for-dev", "queued_label: queued", and "label_output: dev-implemented"
+And execute without raising validation errors.
 ```
 
 ### 🛠️ Component-by-Component Impact Table
 
 | Component | Target File | Modifications |
 |---|---|---|
-| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Ensure `label_trigger`, `processed_label`, and `queued_label` in `NodeConfig` load dynamically with clean defaults. |
-| **Architect Node** | `orchestrator/nodes/architect.py` | Update `build_triage_prompt` and `_triage_story` to create all subtasks with `queued_label` and parent with `processed_label` from config. |
-| **DevTest Node** | `orchestrator/nodes/devtest.py` | Ensure autonomous pickup and activation of Subtask 1 from `queued` to `ready-for-dev` on `architect-processed` stories. |
-| **Test Suite** | `tests/test_architect_governance.py`, `tests/test_sequential_pipeline.py` | Comprehensive BDD integration test coverage verifying config-driven 1-pass triage and DevTest activation. |
+| **Configuration** | `orchestrator/config.py`, `templates/config.example.yaml` | Ensure `NodeConfig` default values and documentation for `label_trigger`, `queued_label`, and `label_output` are unified. |
+| **Poller Engine** | `orchestrator/poller.py` | Parameterize `fetch_project_workload` to use project-specific `devtest` label configurations. |
+| **DevTest Node** | `orchestrator/nodes/devtest.py` | Replace all static literal label strings in Phase 1, Phase 2, Phase 3, and subtask unlocking with `node_cfg` properties. |
+| **Live Configs** | `~/.orchestrator/config.yaml`, `~/.config/orchestrator/config.yaml` | Synchronize live configuration files with documented label schemas. |
+| **Test Suite** | `tests/test_nodes.py`, `tests/test_sequential_pipeline.py` | Add BDD test coverage for custom DevTest label triggers and dynamic subtask progression. |
 
 ### 🧱 INVEST Subtask Decomposition
-- **Subtask 1 (`feat(architect, config)`)**: Config-driven 1-pass triage decomposition producing all-`queued` subtasks and `architect-processed` parent.
-- **Subtask 2 (`feat(devtest)`)**: Autonomous promotion of Subtask 1 from `queued` to `ready-for-dev` upon DevTest story pickup.
-- **Subtask 3 (`test(architect_governance)`)**: BDD test suite verifying config loading, all-queued creation, and zero-token idle sweeps.
+- **Subtask 1 (`feat(devtest, config)`)**: Parameterize all DevTest node label references (`label_trigger`, `queued_label`, `label_output`) to dynamically consume `NodeConfig`.
+- **Subtask 2 (`feat(poller)`)**: Parameterize DevTest poller workload queries to dynamically ingest configured labels.
+- **Subtask 3 (`test(devtest_labels)`)**: BDD test suite verifying custom DevTest label triggers, subtask activation, and dual-label conflict resolution.
