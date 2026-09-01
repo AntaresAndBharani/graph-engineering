@@ -12,6 +12,22 @@ from rich.logging import RichHandler
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
+def matches_node_scope(selected_node: Optional[str], target_node: Optional[str]) -> bool:
+    """
+    Evaluates whether target_node matches selected_node scope.
+    Matches exact, prefix (e.g. 'architect' matches 'architect_research'), or shared base family.
+    """
+    if not selected_node or not target_node:
+        return True
+    s = str(selected_node).lower().strip()
+    t = str(target_node).lower().strip()
+    if s == t or t.startswith(s) or s.startswith(t):
+        return True
+    s_base = s.split("_")[0].split("-")[0]
+    t_base = t.split("_")[0].split("-")[0]
+    return bool(s_base and s_base == t_base)
+
+
 class ProjectLogBufferManager:
     """
     In-memory and disk-backed project-scoped log buffer manager.
@@ -67,14 +83,13 @@ class ProjectLogBufferManager:
             cls.reset()
 
     @classmethod
-    def extract_project_name(cls, target: Union[logging.LogRecord, str, Any]) -> Optional[str]:
+    def extract_project_name(cls, target: Union[logging.LogRecord, str]) -> Optional[str]:
         """
         Extracts project name from LogRecord attributes or bracketed prefix in strings/messages.
         Examples:
           - LogRecord(project='crosstrainingapp') -> 'crosstrainingapp'
-          - '[crosstrainingapp:supervisor] Error...' -> 'crosstrainingapp'
-          - '[crosstrainingapp] Polling...' -> 'crosstrainingapp'
-          - '  [dim cyan][crosstrainingapp:devtest][/dim cyan] ...' -> 'crosstrainingapp'
+          - '[crosstrainingapp] Started...' -> 'crosstrainingapp'
+          - '[crosstrainingapp:architect] Triaging...' -> 'crosstrainingapp'
         """
         if isinstance(target, logging.LogRecord):
             proj = getattr(target, "project_name", None) or getattr(target, "project", None)
@@ -95,14 +110,12 @@ class ProjectLogBufferManager:
         return None
 
     @classmethod
-    def extract_node_name(cls, target: Union[logging.LogRecord, str, Any]) -> Optional[str]:
+    def extract_node_name(cls, target: Union[logging.LogRecord, str]) -> Optional[str]:
         """
         Extracts node name from LogRecord attributes or bracketed prefix in strings/messages.
         Examples:
           - LogRecord(node_name='devtest') -> 'devtest'
           - LogRecord(node='devtest') -> 'devtest'
-          - '[crosstrainingapp:supervisor] Error...' -> 'supervisor'
-          - '  [dim cyan][crosstrainingapp:devtest][/dim cyan] ...' -> 'devtest'
         """
         if isinstance(target, logging.LogRecord):
             node = getattr(target, "node_name", None) or getattr(target, "node", None)
@@ -174,7 +187,7 @@ class ProjectLogBufferManager:
         """
         Pure Python recursive disk-tailing fallback (pathlib.Path.rglob) reading the last max_lines (default 100)
         from the latest execution log file under <log_dir>/<project_name>/<node_name>/*.log (if node_name provided)
-        or <log_dir>/<project_name>/**/*.log.
+        or <log_dir>/<project_name>/**/*.log using bounded deque streaming.
         """
         if not project_name:
             return []
@@ -185,11 +198,7 @@ class ProjectLogBufferManager:
         else:
             resolved_log_dir = Path("~/.config/orchestrator/logs").expanduser()
 
-        if node_name:
-            target_dir = resolved_log_dir / project_name / node_name
-        else:
-            target_dir = resolved_log_dir / project_name
-
+        target_dir = resolved_log_dir / project_name
         if not target_dir.exists() or not target_dir.is_dir():
             return []
 
@@ -197,10 +206,19 @@ class ProjectLogBufferManager:
             log_files = [p for p in target_dir.rglob("*.log") if p.is_file()]
             if not log_files:
                 return []
+
+            if node_name:
+                filtered_files = [
+                    p for p in log_files
+                    if matches_node_scope(node_name, p.parent.name) or matches_node_scope(node_name, p.stem)
+                ]
+                if filtered_files:
+                    log_files = filtered_files
+
             latest_file = max(log_files, key=lambda p: (p.stat().st_mtime, p.name))
             with open(latest_file, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-            return [strip_ansi(line).rstrip("\r\n") for line in lines[-max_lines:]]
+                dq: Deque[str] = deque(f, maxlen=max_lines)
+            return [strip_ansi(line).rstrip("\r\n") for line in dq]
         except Exception:
             return []
 
@@ -214,7 +232,7 @@ class ProjectLogBufferManager:
     ) -> List[str]:
         """
         Retrieves scoped historical log lines for the given project (and optional node).
-        If in-memory deque has entries matching the scope, returns them.
+        If in-memory deque has entries matching the scope via matches_node_scope, returns them.
         If in-memory deque is empty for the requested scope and project_name is provided,
         falls back to tailing disk logs.
         If no disk logs exist or project_name is None, returns global buffer (when node_name is None) or [].
@@ -228,7 +246,7 @@ class ProjectLogBufferManager:
                 matching = [
                     item[1] if isinstance(item, tuple) else item
                     for item in buf
-                    if isinstance(item, tuple) and item[0] == node_name
+                    if isinstance(item, tuple) and matches_node_scope(node_name, item[0])
                 ]
                 if matching:
                     return matching

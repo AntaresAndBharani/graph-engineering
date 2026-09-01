@@ -2363,6 +2363,114 @@ async def test_sdlc_widget_event_stop_isolation(tmp_path: Path):
     assert event_highlighted.is_stopped is True
 
 
+@pytest.mark.asyncio
+async def test_tab_activated_event_hydrates_panes(tmp_path: Path):
+    """
+    Scenario: Tab switching immediately triggers view hydration
+      Given the operator switches between the 'Logs', 'Quota Limits', and 'Alerts (24h)' tabs
+      When the 'TabActivated' event fires
+      Then the dashboard must refresh and redraw the active pane immediately without waiting for the 2.0s timer.
+    """
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(name="biq-playbook", repo="BasketIQ/biq-playbook", local_path=str(tmp_path))
+    config = GlobalConfig(
+        projects=[project],
+        quota=QuotaSettings(
+            harnesses={
+                "antigravity": HarnessQuotaConfig(window_hours=1.0, window_token_limit=2_000_000, avg_tokens_per_hour=400_000),
+            }
+        ),
+    )
+    quota_manager = QuotaManager(config, state_manager)
+    buffer_manager = ProjectLogBufferManager()
+    buffer_manager.reset()
+    buffer_manager.add_line("Initial biq-playbook log", project_name="biq-playbook", node_name="architect")
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        quota_manager=quota_manager,
+        buffer_manager=buffer_manager,
+        selected_project="biq-playbook",
+    )
+
+    class DummyPane:
+        def __init__(self, pane_id: str):
+            self.id = pane_id
+
+    class DummyTabActivated:
+        def __init__(self, pane_id: str):
+            self.pane = DummyPane(pane_id)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # 1. Activate tab_quotas
+        await app.on_tab_activated(DummyTabActivated("tab_quotas"))
+        quota_widget = app.query_one(HarnessQuotaWidget)
+        assert quota_widget.row_count > 0
+
+        # 2. Activate tab_logs
+        await app.on_tab_activated(DummyTabActivated("tab_logs"))
+        log_view = app.query_one(RichLog)
+        assert any("Initial biq-playbook log" in line.text for line in log_view.lines)
+
+        # 3. Activate tab_alerts
+        await app.on_tab_activated(DummyTabActivated("tab_alerts"))
+        alerts_widget = app.query_one(AnomalyAlertsWidget)
+        assert alerts_widget is not None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_compound_node_log_streaming_and_prefix_matching(tmp_path: Path):
+    """
+    Scenario: Logs tab streams compound and sub-phase node logs without dropping
+      Given project 'biq-playbook' is selected with active node 'architect'
+      When the harness emits subprocess logs tagged with node 'architect_research'
+      Then the log filter must recognize the node family prefix 'architect'
+      And the RichLog widget must display the line in real time.
+    """
+    buffer_manager = ProjectLogBufferManager()
+    buffer_manager.reset()
+
+    project = ProjectConfig(name="biq-playbook", repo="BasketIQ/biq-playbook", local_path=str(tmp_path))
+    config = GlobalConfig(projects=[project])
+
+    app = DashboardApp(
+        config=config,
+        buffer_manager=buffer_manager,
+        selected_project="biq-playbook",
+        selected_node="architect",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Set focused project and node
+        app.selected_project = "biq-playbook"
+        app.selected_node = "architect"
+        await app.hydrate_project_logs("biq-playbook", node_name="architect")
+
+        log_view = app.query_one("#log_view", RichLog)
+
+        # Stream log with compound node name 'architect_research'
+        app._handle_harness_stream_line(
+            project_name="biq-playbook",
+            node_name="architect_research",
+            line="Architect research step 1: reading SPEC.md",
+        )
+        await pilot.pause()
+
+        lines = [line.text for line in log_view.lines]
+        assert any("Architect research step 1: reading SPEC.md" in t for t in lines)
+
+        # Border title should show wildcard
+        assert "architect*" in str(log_view.border_title)
+
+
 
 
 

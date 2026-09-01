@@ -761,6 +761,55 @@ def test_format_story_lock_dispatch_log():
     assert msg_with_proj == "[graph-engineering:devtest] Story Lock Active: Parent #90. Dispatched Subtask #93"
 
 
+def test_matches_node_scope():
+    """Verifies prefix and family scope matching across compound node identifiers."""
+    from orchestrator.logging import matches_node_scope
+
+    # None or empty matches all
+    assert matches_node_scope(None, "architect") is True
+    assert matches_node_scope("architect", None) is True
+    assert matches_node_scope(None, None) is True
+
+    # Exact match
+    assert matches_node_scope("architect", "architect") is True
+    assert matches_node_scope("devtest", "devtest") is True
+
+    # Prefix match
+    assert matches_node_scope("architect", "architect_research") is True
+    assert matches_node_scope("architect_research", "architect") is True
+    assert matches_node_scope("devtest", "devtest_retry") is True
+
+    # Base family prefix match
+    assert matches_node_scope("architect_review", "architect_research") is True
+    assert matches_node_scope("devtest-phase1", "devtest-phase2") is True
+
+    # Mismatch
+    assert matches_node_scope("architect", "devtest") is False
+    assert matches_node_scope("reviewer", "supervisor") is False
+
+
+def test_scenario_compound_node_log_retrieval(tmp_path: Path):
+    """
+    Scenario: Compound node log retrieval
+      Given buffer contains logs tagged with 'architect_research' and 'architect'
+      When get_project_logs is called with node_name='architect'
+      Then all lines matching the 'architect' family prefix are returned
+    """
+    from orchestrator.logging import ProjectLogBufferManager
+
+    ProjectLogBufferManager.reset()
+
+    ProjectLogBufferManager.add_line("Architect core triage", project_name="biq-playbook", node_name="architect")
+    ProjectLogBufferManager.add_line("Architect research stream", project_name="biq-playbook", node_name="architect_research")
+    ProjectLogBufferManager.add_line("DevTest implementation", project_name="biq-playbook", node_name="devtest")
+
+    arch_logs = ProjectLogBufferManager.get_project_logs(project_name="biq-playbook", node_name="architect", log_dir=tmp_path)
+    assert len(arch_logs) == 2
+    assert "Architect core triage" in arch_logs
+    assert "Architect research stream" in arch_logs
+    assert "DevTest implementation" not in arch_logs
+
+
 
 
 

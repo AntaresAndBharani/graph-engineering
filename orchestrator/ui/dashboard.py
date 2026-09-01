@@ -17,7 +17,7 @@ from rich.text import Text
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
+from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler, matches_node_scope
 from orchestrator.quota import QuotaManager
 from orchestrator.ui.widgets import (
     AnomalyAlertsWidget,
@@ -174,7 +174,7 @@ class DashboardApp(App):
 
         if project_name:
             if node_name:
-                log_view.border_title = Text(f"Live Output [{project_name} | {node_name}]")
+                log_view.border_title = Text(f"Live Output [{project_name} | {node_name}*]")
             else:
                 log_view.border_title = Text(f"Live Output [{project_name}]")
         else:
@@ -198,7 +198,7 @@ class DashboardApp(App):
                 )
                 and (
                     not node_name
-                    or self.buffer_manager.extract_node_name(rec) in (None, node_name)
+                    or matches_node_scope(node_name, self.buffer_manager.extract_node_name(rec))
                 )
             ]
 
@@ -212,7 +212,7 @@ class DashboardApp(App):
         rec_node = self.buffer_manager.extract_node_name(record)
         if self.selected_project and rec_project and rec_project != self.selected_project:
             return
-        if self.selected_node and rec_node and rec_node != self.selected_node:
+        if self.selected_node and rec_node and not matches_node_scope(self.selected_node, rec_node):
             return
 
         try:
@@ -250,7 +250,7 @@ class DashboardApp(App):
 
         if self.selected_project and line_project and line_project != self.selected_project:
             return
-        if self.selected_node and line_node and line_node != self.selected_node:
+        if self.selected_node and line_node and not matches_node_scope(self.selected_node, line_node):
             return
 
         try:
@@ -454,6 +454,31 @@ class DashboardApp(App):
     def on_sdlc_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Traps SDLC row highlighting to prevent bubbling and preserve active log view."""
         event.stop()
+
+    @on(TabbedContent.TabActivated)
+    async def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """
+        Synchronously hydrates the newly activated tab pane immediately on tab click/selection.
+        """
+        pane_id = event.pane.id if event.pane else None
+        if pane_id == "tab_quotas":
+            try:
+                quota_widget = self.query_one(HarnessQuotaWidget)
+                await quota_widget.update_quotas(
+                    config=self.config,
+                    state_manager=self.state_manager,
+                    quota_manager=self.quota_manager,
+                )
+            except Exception:
+                pass
+        elif pane_id == "tab_logs":
+            await self.hydrate_project_logs(self.selected_project, node_name=self.selected_node)
+        elif pane_id == "tab_alerts":
+            try:
+                alerts_widget = self.query_one(AnomalyAlertsWidget)
+                await alerts_widget.update_project(self.selected_project, hours=24.0)
+            except Exception:
+                pass
 
 
     async def _update_bottom_panes(self, project_name: Optional[str], force: bool = False) -> None:
