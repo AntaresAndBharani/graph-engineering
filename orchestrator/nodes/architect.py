@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -167,7 +167,7 @@ async def _sync_architecture_plane(
 ) -> tuple[bool, str]:
     """
     Pillar 1: Bootstraps or refreshes .graph/architecture.md.
-    Uses specialized research harness (Antigravity gemini-3.8-flash-high) for cost-effective web research.
+    Uses configured research harness and model from config.yaml for cost-effective web research.
     Gated by research_interval_seconds (default 7 days / weekly).
     """
     graph_dir = project.local_path / ".graph"
@@ -215,7 +215,7 @@ async def _sync_architecture_plane(
         issue_id="arch_sync",
     )
 
-    model = node_cfg.research_model or "gemini-3.8-flash-high"
+    model = node_cfg.research_model or node_cfg.model
     effort = node_cfg.research_effort
 
     console.print(f"\n  [bold cyan]ðŸ›ï¸ [{project.name}:architect][/bold cyan] [bold white]Living Architecture Plane Synchronization[/bold white]")

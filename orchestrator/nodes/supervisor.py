@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -158,14 +158,14 @@ async def evaluate_supervisor_issue(
             )
 
     # 2. Prepare PO Evaluation Prompt
-    node_cfg = project.nodes.get("supervisor", NodeConfig(harness="antigravity", model="gemini-3.7-flash-low"))
+    node_cfg = project.nodes.get("supervisor") or NodeConfig()
     harness_name = node_cfg.harness or "antigravity"
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
         harness_name = "claude"
         harness_cfg = config.harnesses.get(harness_name)
 
-    model = node_cfg.model or "gemini-3.7-flash-low"
+    model = node_cfg.model
     effort = node_cfg.effort
 
     prompt = (
@@ -465,7 +465,7 @@ async def run_supervisor_node(
     2. Runs deterministic anomaly checks and SLA audits.
     Zero-token gating: if no anomalies and no pending PO reviews, returns (False, 'Idle').
     """
-    node_cfg = project.nodes.get("supervisor", NodeConfig(harness="antigravity", model="gemini-3.7-flash-low"))
+    node_cfg = project.nodes.get("supervisor") or NodeConfig()
     if not project.is_node_enabled("supervisor"):
         return False, "Supervisor node disabled for project."
 

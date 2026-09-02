@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -140,7 +140,7 @@ async def resolve_pr_merge_conflicts(
         await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         return False, "No AI harness configured for conflict resolution."
 
-    model = node_cfg.conflict_model or "gemini-3.7-flash-low"
+    model = node_cfg.conflict_model or node_cfg.model
     effort = node_cfg.conflict_effort
 
     if state_manager is not None:

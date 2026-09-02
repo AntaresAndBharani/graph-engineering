@@ -57,7 +57,7 @@ class NodeConfig(OrchestratorBaseModel):
     research_effort: Optional[str] = None
     research_interval_seconds: int = 604800
     conflict_harness: Optional[str] = "antigravity"
-    conflict_model: Optional[str] = "gemini-3.7-flash-low"
+    conflict_model: Optional[str] = None
     conflict_effort: Optional[str] = None
     lookahead_backoff_seconds: int = Field(default=1200, ge=0)
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -27,13 +27,7 @@ async def run_bau_node(
     synthesizes them into structured User Story issues labeled 'needs-triage',
     and closes the original constituent issues.
     """
-    node_cfg = project.nodes.get(
-        "bau",
-        NodeConfig(
-            harness="antigravity",
-            model="gemini-3.7-flash-low",
-        ),
-    )
+    node_cfg = project.nodes.get("bau") or NodeConfig()
     if not project.is_node_enabled("bau"):
         return False, "BAU node disabled for project."
 
@@ -126,7 +120,7 @@ async def run_bau_node(
         project_name=project.name,
         node_name="bau",
     )
-    model = node_cfg.model or "gemini-3.7-flash-low"
+    model = node_cfg.model
     effort = node_cfg.effort
 
     from rich.console import Console
