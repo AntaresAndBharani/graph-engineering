@@ -481,14 +481,10 @@ async def test_architect_blackboard_producer_wiring(tmp_path: Path, monkeypatch)
     async def mock_fetch_issues(*a, **kw):
         return mock_issues
 
-    async def mock_fetch_prs(*a, **kw):
-        return []
-
     async def mock_exec_fail(*a, **kw):
         return 1
 
     monkeypatch.setattr("orchestrator.nodes.architect.fetch_issues_with_label", mock_fetch_issues)
-    monkeypatch.setattr("orchestrator.nodes.architect.fetch_open_prs", mock_fetch_prs)
     monkeypatch.setattr(AsyncHarnessAdapter, "execute", mock_exec_fail)
     monkeypatch.setattr("shutil.which", lambda cmd: None)
 

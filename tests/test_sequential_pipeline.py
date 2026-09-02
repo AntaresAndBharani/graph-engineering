@@ -716,7 +716,6 @@ async def test_persistent_idle_backoff_survives_daemon_restart(tmp_path: Path, m
 
     # Daemon restart simulation: new StateManager on same DB file
     restarted_sm = StateManager(db_file)
-    monkeypatch.setattr("orchestrator.nodes.architect.fetch_open_prs", AsyncMock(return_value=[]))
 
     ran, msg = await run_architect_node(project, config, restarted_sm)
     assert ran is False
