@@ -8,6 +8,10 @@ description: >-
 
 Use this workflow whenever the user issues `/refine-story`, `/user-story-refining`, `/refine-story --boost`, `/boost`, or asks to critically review and refine a draft user story, requirement, or implementation plan.
 
+## 🤖 Recommended Model
+- **Model:** **Gemini 3.8 Flash (High)** (`gemini-3.8-flash-high`)
+- **Profile:** Deep analytical reasoning for 3-Amigos critical review, Boost swarm evaluation, edge-case vulnerability detection, and pristine BDD Gherkin synthesis.
+
 ## 🎯 Purpose
 Serves as an uncompromising, hyper-critical 3-Amigos and Architectural Review Gate. It maintains a persistent, multi-iteration audit trail inside `docs/draft-requisites/implementation-plan.md`—capturing the initial plan, successive agent reviews, operator reviews, multi-perspective boost analyses, and the consolidated **Final Decision Plan** from which GitHub Epic stories are produced.
 

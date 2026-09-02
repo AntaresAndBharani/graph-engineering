@@ -1,4 +1,4 @@
-﻿---
+---
 name: quick-fix
 description: >-
   Direct rapid code fix shortcut that applies bug fixes, improvements, or minor features directly to main, runs local tests, updates CHANGELOG.md, commits and pushes to origin/main without creating feature branches, PRs, or user story decomposition. Use whenever the user starts a prompt with /quick-fix or asks to apply a quick fix directly.
@@ -7,6 +7,10 @@ description: >-
 # Quick Fix Workflow (/quick-fix)
 
 Use this workflow whenever the user issues the `/quick-fix` command or explicitly requests an immediate direct fix on `main`.
+
+## 🤖 Recommended Model
+- **Model:** **Gemini 3.8 Flash (High)** (`gemini-3.8-flash-high`)
+- **Profile:** Fast, high-reasoning, zero-friction direct fixes, test verification, and git synchronization.
 
 ## Purpose
 Bypasses the full multi-step lifecycle (User Story creation -> Architect Triage -> INVEST decomposition -> feature branch -> PR -> remote CI approval gate) to perform immediate, high-velocity hotfixes and improvements directly in the repository's `main` branch.

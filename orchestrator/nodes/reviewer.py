@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -97,7 +97,7 @@ async def resolve_pr_merge_conflicts(
     """
     from rich.console import Console
     console = Console()
-    console.print(f"  [{project.name}:reviewer] [bold yellow]⚠️ Merge conflicts detected on PR #{pr_number} ({branch_name}). Launching Autonomous Conflict Resolver...[/bold yellow]")
+    console.print(f"  [{project.name}:reviewer] [bold yellow]âš ï¸ Merge conflicts detected on PR #{pr_number} ({branch_name}). Launching Autonomous Conflict Resolver...[/bold yellow]")
 
     # 1. Pre-flight clean and branch checkout
     try:
@@ -149,7 +149,7 @@ async def resolve_pr_merge_conflicts(
             await (await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
             return False, f"Quota throttled for harness '{harness_name}' (Ready in {q_res.formatted_eta})."
 
-    console.print(f"  [{project.name}:conflict-resolver] [bold cyan]⚡ Resolving Merge Conflicts via {harness_name}/{model}[/bold cyan]")
+    console.print(f"  [{project.name}:conflict-resolver] [bold cyan]âš¡ Resolving Merge Conflicts via {harness_name}/{model}[/bold cyan]")
 
     log_file = get_project_log_path(
         config.settings.resolved_log_dir,
@@ -207,7 +207,7 @@ async def resolve_pr_merge_conflicts(
         )
         stdout_t, stderr_t = await proc_test.communicate()
         if proc_test.returncode != 0:
-            console.print(f"  [{project.name}:conflict-resolver] [bold red]✗ Tests failed after conflict resolution.[/bold red]")
+            console.print(f"  [{project.name}:conflict-resolver] [bold red]âœ— Tests failed after conflict resolution.[/bold red]")
             await (await asyncio.create_subprocess_exec("git", "reset", "--hard", "HEAD~1", cwd=str(project.local_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
             return False, f"Tests failed after conflict resolution: {stderr_t.decode('utf-8', errors='replace')[:200]}"
 
@@ -290,19 +290,19 @@ async def run_reviewer_node(
         # AC 2: True Post-Merge Handling
         if pr_state == "CLOSED":
             if is_merged:
-                console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]PR #{pr_number} Verified Merged into main[/bold white]")
+                console.print(f"\n  [bold green]ðŸ” [{project.name}:reviewer][/bold green] [bold white]PR #{pr_number} Verified Merged into main[/bold white]")
                 await state_manager.delete_pr_artifact(project.repo, pr_number)
                 await state_manager.release_lock(pr_number, project.repo, "reviewer")
                 merged_prs.append(pr_number)
                 continue
             else:
-                console.print(f"\n  [dim]🔍 [{project.name}:reviewer] PR #{pr_number} closed without merge. Releasing lock.[/dim]")
+                console.print(f"\n  [dim]ðŸ” [{project.name}:reviewer] PR #{pr_number} closed without merge. Releasing lock.[/dim]")
                 await state_manager.delete_pr_artifact(project.repo, pr_number)
                 await state_manager.release_lock(pr_number, project.repo, "reviewer")
                 continue
 
-        console.print(f"\n  [bold green]🔍 [{project.name}:reviewer][/bold green] [bold white]Evaluating PR #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
-        console.print(f"  [dim]• Target: {project.repo} | Status: Remote CI Quality Gate & Auto-Merge[/dim]")
+        console.print(f"\n  [bold green]ðŸ” [{project.name}:reviewer][/bold green] [bold white]Evaluating PR #{pr_number}:[/bold white] [cyan]'{pr_title}'[/cyan]")
+        console.print(f"  [dim]â€¢ Target: {project.repo} | Status: Remote CI Quality Gate & Auto-Merge[/dim]")
 
         # 3. Check Remote CI Checks Status (0 Tokens)
         ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
@@ -313,7 +313,7 @@ async def run_reviewer_node(
             continue
 
         if ci_status == "FAIL":
-            console.print(f"  [{project.name}:reviewer] [bold red]✗ PR #{pr_number} CI checks failed: {ci_details}[/bold red]")
+            console.print(f"  [{project.name}:reviewer] [bold red]âœ— PR #{pr_number} CI checks failed: {ci_details}[/bold red]")
             await state_manager.record_anomaly_event(
                 project_name=project.name,
                 node_name="reviewer",
@@ -334,7 +334,7 @@ async def run_reviewer_node(
                 p2 = await asyncio.create_subprocess_exec(
                     "gh", "pr", "comment", str(pr_number),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Reviewer Node**: Remote CI checks failed ({ci_details}). Flagging for DevTest remediation (`needs-refactor`).",
+                    "--body", f"ðŸ¤– **Reviewer Node**: Remote CI checks failed ({ci_details}). Flagging for DevTest remediation (`needs-refactor`).",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -368,7 +368,7 @@ async def run_reviewer_node(
                 )
 
             if resolved:
-                console.print(f"  [{project.name}:reviewer] [bold green]✓ {res_msg}[/bold green]")
+                console.print(f"  [{project.name}:reviewer] [bold green]âœ“ {res_msg}[/bold green]")
                 await state_manager.upsert_pr_artifact(
                     repo=project.repo,
                     pr_number=pr_number,
@@ -402,7 +402,7 @@ async def run_reviewer_node(
                                 "linked_pr": pr_number,
                             }],
                         )
-                        console.print(f"  [{project.name}:reviewer] [bold green]✓ Successfully resolved conflicts and auto-merged PR #{pr_number} into main[/bold green]")
+                        console.print(f"  [{project.name}:reviewer] [bold green]âœ“ Successfully resolved conflicts and auto-merged PR #{pr_number} into main[/bold green]")
                         await state_manager.release_lock(pr_number, project.repo, "reviewer")
                         continue
                     else:
@@ -412,7 +412,7 @@ async def run_reviewer_node(
                 pending_prs.append(pr_number)
                 continue
             else:
-                console.print(f"  [{project.name}:reviewer] [bold red]✗ Conflict resolution failed: {res_msg}[/bold red]")
+                console.print(f"  [{project.name}:reviewer] [bold red]âœ— Conflict resolution failed: {res_msg}[/bold red]")
                 await state_manager.record_anomaly_event(
                     project_name=project.name,
                     node_name="reviewer",
@@ -434,7 +434,7 @@ async def run_reviewer_node(
                     p2 = await asyncio.create_subprocess_exec(
                         "gh", "pr", "comment", str(pr_number),
                         "--repo", project.repo,
-                        "--body", f"🤖 **Reviewer Node**: PR #{pr_number} has merge conflicts that could not be autonomously resolved ({res_msg}). Flagging for DevTest remediation (`needs-refactor`).",
+                        "--body", f"ðŸ¤– **Reviewer Node**: PR #{pr_number} has merge conflicts that could not be autonomously resolved ({res_msg}). Flagging for DevTest remediation (`needs-refactor`).",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -448,7 +448,7 @@ async def run_reviewer_node(
             p_comment = await asyncio.create_subprocess_exec(
                 "gh", "pr", "comment", str(pr_number),
                 "--repo", project.repo,
-                "--body", "🤖 **Reviewer Gatekeeper**: Deterministic Quality Gate passed (CI 100% Green, mergeable). Approving and executing auto-merge into `main`.",
+                "--body", "ðŸ¤– **Reviewer Gatekeeper**: Deterministic Quality Gate passed (CI 100% Green, mergeable). Approving and executing auto-merge into `main`.",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -458,7 +458,7 @@ async def run_reviewer_node(
                 "gh", "pr", "review", str(pr_number),
                 "--repo", project.repo,
                 "--approve",
-                "--body", "🤖 **Architect Review**: Approved (Quality Gate 100% Green).",
+                "--body", "ðŸ¤– **Architect Review**: Approved (Quality Gate 100% Green).",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -487,7 +487,7 @@ async def run_reviewer_node(
                         "linked_pr": pr_number,
                     }],
                 )
-                console.print(f"  [{project.name}:reviewer] [bold green]✓ Successfully auto-merged PR #{pr_number} into main[/bold green]")
+                console.print(f"  [{project.name}:reviewer] [bold green]âœ“ Successfully auto-merged PR #{pr_number} into main[/bold green]")
             else:
                 console.print(f"  [{project.name}:reviewer] [bold yellow]Could not merge PR #{pr_number}[/bold yellow]")
 

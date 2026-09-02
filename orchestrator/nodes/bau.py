@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -131,7 +131,7 @@ async def run_bau_node(
 
     from rich.console import Console
     console = Console()
-    console.print(f"  [{project.name}:bau] [bold cyan]⚡ Synthesizing {len(raw_issues)} maintenance issues via {harness_name}[/bold cyan] ({model})")
+    console.print(f"  [{project.name}:bau] [bold cyan]âš¡ Synthesizing {len(raw_issues)} maintenance issues via {harness_name}[/bold cyan] ({model})")
 
     exit_code = await adapter.execute(
         prompt=prompt,
@@ -210,7 +210,7 @@ async def run_bau_node(
                 p_close = await asyncio.create_subprocess_exec(
                     "gh", "issue", "close", str(old_id),
                     "--repo", project.repo,
-                    "--comment", f"🤖 **BAU Maintenance Node**: Consolidated into {ref_text} and labeled `needs-triage` for Architect review.",
+                    "--comment", f"ðŸ¤– **BAU Maintenance Node**: Consolidated into {ref_text} and labeled `needs-triage` for Architect review.",
                 )
                 await p_close.wait()
 

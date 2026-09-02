@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -291,7 +291,7 @@ async def evaluate_supervisor_issue(
             p_comment = await asyncio.create_subprocess_exec(
                 "gh", "issue", "comment", str(issue_num),
                 "--repo", project.repo,
-                "--body", f"🤖 **PO-Proxy Approval**: Functional requirements verified and enriched with Gherkin AC. Promoted to `needs-triage` for Architect decomposition.",
+                "--body", f"ðŸ¤– **PO-Proxy Approval**: Functional requirements verified and enriched with Gherkin AC. Promoted to `needs-triage` for Architect decomposition.",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -309,7 +309,7 @@ async def evaluate_supervisor_issue(
     elif verdict == "NEEDS_HUMAN_CLARIFICATION":
         if shutil.which("gh"):
             clarifying_comment = (
-                f"🤖 **PO-Proxy Human Escalation (Clarification Required)**:\n\n"
+                f"ðŸ¤– **PO-Proxy Human Escalation (Clarification Required)**:\n\n"
                 f"Before this issue can proceed to architectural decomposition, please clarify the following:\n"
                 f"{gaps or 'Please provide detailed functional requirements and edge cases.'}"
             )
@@ -509,7 +509,7 @@ async def run_supervisor_node(
                 cmd_comment = [
                     "gh", "pr", "comment", str(pr_num),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Supervisor Notification**: PR #{pr_num} has unresolved merge conflicts. Flagging for PO / Developer review (`needs-po-review`).",
+                    "--body", f"ðŸ¤– **Supervisor Notification**: PR #{pr_num} has unresolved merge conflicts. Flagging for PO / Developer review (`needs-po-review`).",
                 ]
                 try:
                     p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -531,7 +531,7 @@ async def run_supervisor_node(
                 cmd_comment = [
                     "gh", "issue", "comment", str(issue_id),
                     "--repo", project.repo,
-                    "--body", "🤖 **Supervisor Status Audit**: Issue was missing a managed workflow label. Automatically assigned `needs-triage` for Architect review.",
+                    "--body", "ðŸ¤– **Supervisor Status Audit**: Issue was missing a managed workflow label. Automatically assigned `needs-triage` for Architect review.",
                 ]
                 try:
                     p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -560,7 +560,7 @@ async def run_supervisor_node(
                 cmd_comment = [
                     "gh", "issue", "comment", str(issue_id),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Supervisor SLA Alert**: Issue #{issue_id} has been open for {age_hours:.1f} hours (> 12h SLA threshold) without completion. Flagged for PO review (`needs-po-review`).",
+                    "--body", f"ðŸ¤– **Supervisor SLA Alert**: Issue #{issue_id} has been open for {age_hours:.1f} hours (> 12h SLA threshold) without completion. Flagged for PO review (`needs-po-review`).",
                 ]
                 try:
                     p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)

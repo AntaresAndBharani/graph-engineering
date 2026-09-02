@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # Graph Orchestrator Configuration Template (v2)
 # ==============================================================================
 # Save this file to ~/.config/orchestrator/config.yaml (Linux/macOS)
@@ -150,7 +150,7 @@ projects:
         queued_label: "queued"        # Initial state label assigned to all generated subtasks
         label_output: "ready-for-dev"
         research_harness: "antigravity"
-        research_model: "gemini-3.7-flash-high"
+        research_model: "gemini-3.8-flash-high"
         research_interval_seconds: 604800  # 7 days (weekly evolutionary architecture refresh)
       devtest:
         enabled: true

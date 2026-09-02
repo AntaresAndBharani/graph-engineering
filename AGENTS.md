@@ -1,5 +1,10 @@
 # Workspace Guidelines & Agent Protocols
 
+## 🤖 Default Agent Model
+Across all tasks, skills (`/user-story-refining`, `/quick-fix`), and node executions:
+- **Default Model:** **Gemini 3.8 Flash (High)** (`gemini-3.8-flash-high`)
+- Provides highest speed, deep architectural reasoning, and robust tool-calling accuracy.
+
 ## Direct Fix Shortcut (`/quick-fix`)
 When the user prefixes their instruction with `/quick-fix` or explicitly requests a direct fix on `main`:
 1. **Bypass the standard multi-step lifecycle** (no User Story decomposition, no feature branch, no remote PR gate).

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -146,7 +146,7 @@ async def sync_parent_subtask_links(
             p_comment = await asyncio.create_subprocess_exec(
                 "gh", "issue", "comment", str(parent_id),
                 "--repo", repo,
-                "--body", f"🤖 **Architect Decomposition Complete**: Decomposed into {len(children)} subtask(s):\n{links_list}",
+                "--body", f"ðŸ¤– **Architect Decomposition Complete**: Decomposed into {len(children)} subtask(s):\n{links_list}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -167,7 +167,7 @@ async def _sync_architecture_plane(
 ) -> tuple[bool, str]:
     """
     Pillar 1: Bootstraps or refreshes .graph/architecture.md.
-    Uses specialized research harness (Antigravity gemini-3.7-flash-high) for cost-effective web research.
+    Uses specialized research harness (Antigravity gemini-3.8-flash-high) for cost-effective web research.
     Gated by research_interval_seconds (default 7 days / weekly).
     """
     graph_dir = project.local_path / ".graph"
@@ -215,12 +215,12 @@ async def _sync_architecture_plane(
         issue_id="arch_sync",
     )
 
-    model = node_cfg.research_model or "gemini-3.7-flash-high"
+    model = node_cfg.research_model or "gemini-3.8-flash-high"
     effort = node_cfg.research_effort
 
-    console.print(f"\n  [bold cyan]🏛️ [{project.name}:architect][/bold cyan] [bold white]Living Architecture Plane Synchronization[/bold white]")
-    console.print(f"  [dim]• Target: {project.repo} | Scope: Repository Architecture Standards ('.graph/architecture.md')[/dim]")
-    console.print(f"  [dim]• Harness: {harness_name} ({model}) | Frequency: Weekly (7-day SLA)[/dim]")
+    console.print(f"\n  [bold cyan]ðŸ›ï¸ [{project.name}:architect][/bold cyan] [bold white]Living Architecture Plane Synchronization[/bold white]")
+    console.print(f"  [dim]â€¢ Target: {project.repo} | Scope: Repository Architecture Standards ('.graph/architecture.md')[/dim]")
+    console.print(f"  [dim]â€¢ Harness: {harness_name} ({model}) | Frequency: Weekly (7-day SLA)[/dim]")
 
     prompt = (
         f"You are the Principal Systems Architect operating in non-interactive batch mode.\n"
@@ -296,7 +296,7 @@ def build_triage_prompt(
         f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
         f"   - **Case 2: STANDALONE TASK / SMALL BUG** (Small, self-contained, does not require subtask breakdown): Route directly to development by labeling it '{output_label}' and removing '{trigger}':\n"
         f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{output_label}'`\n"
-        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
+        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body 'ðŸ¤– **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
         f"   - **Case 3: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
         f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`\n"
         f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
@@ -411,9 +411,9 @@ async def _triage_story(
         queued_label=queued_label,
     )
 
-    console.print(f"\n  [bold magenta]⚡ [{project.name}:architect][/bold magenta] [bold white]Evaluating User Story #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
-    console.print(f"  [dim]• Target: {project.repo} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
-    console.print(f"  [dim]• Scope: Issue Classification, 3-Amigos Triage & INVEST Subtask Decomposition[/dim]")
+    console.print(f"\n  [bold magenta]âš¡ [{project.name}:architect][/bold magenta] [bold white]Evaluating User Story #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
+    console.print(f"  [dim]â€¢ Target: {project.repo} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
+    console.print(f"  [dim]â€¢ Scope: Issue Classification, 3-Amigos Triage & INVEST Subtask Decomposition[/dim]")
 
     exec_cwd = await WorktreeManager.ensure_worktree(project, "architect")
 
@@ -463,7 +463,7 @@ async def _triage_story(
                 p2 = await asyncio.create_subprocess_exec(
                     "gh", "issue", "comment", str(issue_id),
                     "--repo", project.repo,
-                    "--body", f"🤖 **Architect Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
+                    "--body", f"ðŸ¤– **Architect Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
                     env=env,
                 )
                 await asyncio.wait_for(p2.communicate(), timeout=10.0)
