@@ -47,10 +47,9 @@ async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         remote_url = stdout.decode("utf-8").strip()
 
-        # Normalize repo identifiers (e.g. git@github.com:org/repo.git or https://github.com/org/repo)
         if expected_repo.lower() not in remote_url.lower():
             return False, f"Safety check failed: local git remote '{remote_url}' does not match expected repo '{expected_repo}'."
     except Exception as e:
@@ -69,9 +68,9 @@ async def _remediate_refactor_pr(
     branch_name: str,
 ) -> tuple[bool, str]:
     """
-    Autonomously remediates a PR labeled 'needs-refactor' by ingesting the Architect's
-    code review critique, applying refactorings on the branch, verifying tests, committing,
-    pushing, and relabeling to 'needs-architect-review'.
+    Autonomously remediates a PR labeled 'needs-refactor' by ingesting failure
+    or review critiques, applying refactorings on the branch, verifying tests, committing,
+    pushing, and re-evaluating CI for auto-merge.
     """
     is_safe, safety_msg = await verify_git_safety(project.local_path, project.repo)
     if not is_safe:
@@ -106,14 +105,14 @@ async def _remediate_refactor_pr(
         issue_id=f"pr_{pr_number}_refactor",
     )
 
-    from rich.console import Console
-    console = Console()
     console.print(f"\n  [bold yellow]🔧 [{project.name}:devtest][/bold yellow] [bold white]Remediating PR #{pr_number} ('needs-refactor'):[/bold white] [cyan]'{pr_title}'[/cyan]")
     console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_name} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
-    console.print(f"  [dim]• Scope: Autonomous Architectural Review Remediation & Test Verification[/dim]")
+    console.print(f"  [dim]• Scope: Autonomous Refactoring, Test Verification & PR CI Auto-Merge[/dim]")
 
-    # 1. Fetch Architect review critique from PR comments and reviews
-    architect_critique = ""
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
+
+    # 1. Fetch critique / comments from PR
+    critique = ""
     if shutil.which("gh"):
         try:
             proc_view = await asyncio.create_subprocess_exec(
@@ -122,8 +121,9 @@ async def _remediate_refactor_pr(
                 "--json", "reviews,comments,headRefName",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            stdout_v, _ = await proc_view.communicate()
+            stdout_v, _ = await asyncio.wait_for(proc_view.communicate(), timeout=10.0)
             if proc_view.returncode == 0 and stdout_v:
                 pr_data = json.loads(stdout_v.decode("utf-8", errors="replace"))
                 if not branch_name:
@@ -133,11 +133,11 @@ async def _remediate_refactor_pr(
                 all_critiques = review_bodies + comment_bodies
                 architect_critiques = [c for c in all_critiques if "Architectural Review" in c or "needs-refactor" in c or "Refactoring Required" in c]
                 if architect_critiques:
-                    architect_critique = "\n\n---\n\n".join(architect_critiques)
+                    critique = "\n\n---\n\n".join(architect_critiques)
                 elif all_critiques:
-                    architect_critique = all_critiques[-1]
+                    critique = all_critiques[-1]
         except Exception as e:
-            architect_critique = f"(Unable to parse PR review comments: {e})"
+            critique = f"(Unable to parse PR review comments: {e})"
 
     if not branch_name:
         branch_name = f"feat/issue-{pr_number}"
@@ -145,16 +145,11 @@ async def _remediate_refactor_pr(
     # 2. Resolve Worktree & Pre-flight checkout of the PR branch
     exec_cwd = await WorktreeManager.ensure_worktree(project, "devtest")
     try:
-        p1 = await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await p1.wait()
-        p2 = await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await p2.wait()
-        p3 = await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await p3.wait()
-        p4 = await asyncio.create_subprocess_exec("git", "checkout", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await p4.wait()
-        p5 = await asyncio.create_subprocess_exec("git", "pull", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await p5.wait()
+        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "pull", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
     except Exception as e:
         await state_manager.fail_job(
             issue_id=pr_number,
@@ -168,16 +163,15 @@ async def _remediate_refactor_pr(
     # 3. Build refactoring prompt
     prompt = (
         f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
-        f"Remediate the Architectural Code Review feedback on Pull Request #{pr_number} ('{pr_title}') on branch '{branch_name}'.\n\n"
-        f"🚨 ARCHITECTURAL CODE REVIEW FEEDBACK:\n"
-        f"{architect_critique or 'The Architect requested refactoring to adhere to domain boundaries, dynamic TTL locking, and .graph/architecture.md standards.'}\n\n"
+        f"Remediate issues on Pull Request #{pr_number} ('{pr_title}') on branch '{branch_name}'.\n\n"
+        f"🚨 ARCHITECTURAL CODE REVIEW FEEDBACK & CI ERROR CONTEXT:\n"
+        f"{critique or 'The Pull Request failed CI or required refactoring.'}\n\n"
         f"OPERATIONAL STEPS:\n"
-        f"1. Read .graph/architecture.md and understand the requested architectural changes.\n"
-        f"2. Inspect the current implementation on branch '{branch_name}'.\n"
-        f"3. Refactor the code strictly addressing the Architect's critique while maintaining all existing passing tests.\n"
-        f"4. Run the local unit test suite and confirm that 100% of tests pass.\n"
-        f"5. Commit your changes with a descriptive message: `refactor: address architect code review feedback for PR #{pr_number}`.\n"
-        f"6. Push the updated branch to `origin {branch_name}`.\n"
+        f"1. Inspect the codebase and current implementation on branch '{branch_name}'.\n"
+        f"2. Fix the issues, bugs, or failing tests.\n"
+        f"3. Run the local unit test suite and confirm that 100% of tests pass.\n"
+        f"4. Commit your changes with a descriptive message: `refactor: address feedback for PR #{pr_number}`.\n"
+        f"5. Push the updated branch to `origin {branch_name}`.\n"
     )
 
     adapter = AsyncHarnessAdapter(
@@ -215,12 +209,12 @@ async def _remediate_refactor_pr(
         cwd=str(exec_cwd),
         stdout=asyncio.subprocess.PIPE,
     )
-    diff_out, _ = await diff_proc.communicate()
+    diff_out, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=10.0)
     if diff_out.strip():
         pa = await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(exec_cwd))
         await pa.wait()
         pc = await asyncio.create_subprocess_exec(
-            "git", "commit", "-m", f"refactor: address architect feedback for PR #{pr_number}",
+            "git", "commit", "-m", f"refactor: address feedback for PR #{pr_number}",
             cwd=str(exec_cwd),
         )
         await pc.wait()
@@ -231,15 +225,6 @@ async def _remediate_refactor_pr(
     if getattr(node_cfg, "auto_merge_approved", True):
         ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
         if ci_status == "PASS" and shutil.which("gh"):
-            await (await asyncio.create_subprocess_exec(
-                "gh", "pr", "review", str(pr_number),
-                "--repo", project.repo,
-                "--approve",
-                "--body", "🤖 **DevTest Quality Gate**: Remediated PR passed all tests & CI checks (100% Green). Auto-merging into main.",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )).wait()
-
             p_merge = await asyncio.create_subprocess_exec(
                 "gh", "pr", "merge", str(pr_number),
                 "--repo", project.repo,
@@ -247,8 +232,9 @@ async def _remediate_refactor_pr(
                 "--delete-branch",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_merge.wait()
+            await asyncio.wait_for(p_merge.communicate(), timeout=10.0)
             if p_merge.returncode == 0:
                 await state_manager.sync_project_sdlc_items(
                     project.name,
@@ -256,11 +242,10 @@ async def _remediate_refactor_pr(
                         "issue_number": pr_number,
                         "title": pr_title,
                         "state": "MERGED",
-                        "labels": ["merged"],
+                        "labels": ["dev-implemented"],
                         "linked_pr": pr_number,
                     }],
                 )
-                await state_manager.delete_pr_artifact(project.repo, pr_number)
                 try:
                     await _advance_parent_and_unlock_next_subtask(project, state_manager, pr_number)
                 except Exception:
@@ -272,22 +257,14 @@ async def _remediate_refactor_pr(
             "gh", "pr", "edit", str(pr_number),
             "--repo", project.repo,
             "--remove-label", "needs-refactor",
-            "--add-label", "needs-architect-review",
+            "--add-label", "dev-implemented",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
-        await p_edit.wait()
+        await asyncio.wait_for(p_edit.communicate(), timeout=10.0)
 
-        p_comment = await asyncio.create_subprocess_exec(
-            "gh", "pr", "comment", str(pr_number),
-            "--repo", project.repo,
-            "--body", f"🤖 **DevTest Refactor Complete**: Architectural review feedback addressed on branch `{branch_name}`. Returning to `needs-architect-review`.",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await p_comment.wait()
-
-    return True, f"DevTest node remediated PR #{pr_number} and transitioned to 'needs-architect-review'."
+    return True, f"DevTest node remediated PR #{pr_number} and updated branch '{branch_name}' (awaiting CI completion)."
 
 
 async def _advance_parent_and_unlock_next_subtask(
@@ -299,14 +276,16 @@ async def _advance_parent_and_unlock_next_subtask(
     Evaluates whether the completed subtask belongs to a parent story.
     If so:
     1. Checks off `- [x] #<subtask_id>` in the parent issue body.
-    2. Searches for remaining open child subtasks with label 'queued'.
-    3. If any queued subtask exists, unlocks the first queued subtask in sequence
+    2. Searches for remaining open child subtasks.
+    3. If any queued subtask exists, unlocks the first queued subtask in ascendant sequence/ID order
        (removes 'queued', applies 'ready-for-dev').
     4. If 100% of child subtasks for the parent are closed, transitions the parent
        issue to 'dev-implemented' and closes the parent story.
     """
     if not shutil.which("gh"):
         return
+
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
 
     # 1. Fetch subtask details to find if it has a Parent reference
     proc_sub = await asyncio.create_subprocess_exec(
@@ -315,8 +294,9 @@ async def _advance_parent_and_unlock_next_subtask(
         "--json", "body,title,labels",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
-    stdout_sub, _ = await proc_sub.communicate()
+    stdout_sub, _ = await asyncio.wait_for(proc_sub.communicate(), timeout=10.0)
     if proc_sub.returncode != 0 or not stdout_sub:
         return
 
@@ -337,11 +317,12 @@ async def _advance_parent_and_unlock_next_subtask(
     proc_parent = await asyncio.create_subprocess_exec(
         "gh", "issue", "view", str(parent_id),
         "--repo", project.repo,
-        "--json", "body,title,labels,state",
+        "--json", "body,title,labels,state,comments",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
-    stdout_p, _ = await proc_parent.communicate()
+    stdout_p, _ = await asyncio.wait_for(proc_parent.communicate(), timeout=10.0)
     if proc_parent.returncode != 0 or not stdout_p:
         return
 
@@ -372,13 +353,19 @@ async def _advance_parent_and_unlock_next_subtask(
                 "--body-file", temp_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_update.wait()
+            await asyncio.wait_for(p_update.communicate(), timeout=10.0)
+        except Exception as e:
+            _logger.debug("Failed to update parent body checklist for #%s: %s", parent_id, e)
         finally:
             if os.path.exists(temp_path):
-                os.remove(temp_path)
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
-    # 4. Discover all child subtasks referencing Parent: #<parent_id> or listed in parent body/comments
+    # 4. Discover all child subtasks referencing Parent: #<parent_id>
     proc_children = await asyncio.create_subprocess_exec(
         "gh", "issue", "list",
         "--repo", project.repo,
@@ -387,8 +374,9 @@ async def _advance_parent_and_unlock_next_subtask(
         "--json", "number,title,state,labels",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
-    stdout_c, _ = await proc_children.communicate()
+    stdout_c, _ = await asyncio.wait_for(proc_children.communicate(), timeout=10.0)
     results = []
     if proc_children.returncode == 0 and stdout_c:
         try:
@@ -398,13 +386,11 @@ async def _advance_parent_and_unlock_next_subtask(
 
     found_subtask_ids = {c.get("number") for c in results if c.get("number") != parent_id}
 
-    # Also discover subtask IDs from parent body checklist
     for mark, sid in re.findall(r"-\s*\[([ xX])\]\s*#(\d+)", updated_body):
         cid = int(sid)
         if cid != parent_id:
             found_subtask_ids.add(cid)
 
-    # Also discover subtask IDs from parent comments
     for comment in parent_data.get("comments", []):
         c_body = comment.get("body", "")
         for m in re.finditer(r"#(\d+)", c_body):
@@ -423,8 +409,9 @@ async def _advance_parent_and_unlock_next_subtask(
                 "--json", "number,title,state,labels",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            out_s, _ = await p_sub.communicate()
+            out_s, _ = await asyncio.wait_for(p_sub.communicate(), timeout=10.0)
             if p_sub.returncode == 0 and out_s:
                 s_data = json.loads(out_s.decode("utf-8", errors="replace"))
                 children_dict[sid] = s_data
@@ -437,7 +424,6 @@ async def _advance_parent_and_unlock_next_subtask(
 
     children.sort(key=lambda x: x.get("number", 0))
 
-    # Check for unchecked items in parent checklist
     unchecked_ids = [
         int(sid) for mark, sid in re.findall(r"-\s*\[([ xX])\]\s*#(\d+)", updated_body)
         if mark.strip() == ""
@@ -449,7 +435,7 @@ async def _advance_parent_and_unlock_next_subtask(
         c_state = str(c.get("state", "")).upper()
         if c_state != "CLOSED":
             c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
-            if any(lbl.lower() in ("blocked", "status:blocked", "needs-po-review", "orchestration-failed") for lbl in c_labels):
+            if any(lbl.lower() in ("blocked", "status:blocked", "orchestration-failed") for lbl in c_labels):
                 has_blocked_child = True
                 break
 
@@ -462,7 +448,7 @@ async def _advance_parent_and_unlock_next_subtask(
     output_label = node_cfg.label_output or "dev-implemented"
     queued_label = node_cfg.queued_label or "queued"
 
-    # Check if any open subtasks with 'queued' or pending review exist
+    # Check for remaining open subtasks (queued or ready-for-dev in ascendant order)
     queued_children = []
     for c in children:
         c_state = str(c.get("state", "")).upper()
@@ -478,9 +464,7 @@ async def _advance_parent_and_unlock_next_subtask(
         is_prefixed = any(l.startswith("status:") for l in curr_labels)
         queued_lbl = f"status:{queued_label}" if f"status:{queued_label}" in curr_labels else (
             "status:queued" if "status:queued" in curr_labels else (
-                "status:pending-review" if "status:pending-review" in curr_labels else (
-                    queued_label if queued_label in curr_labels else "queued"
-                )
+                queued_label if queued_label in curr_labels else "queued"
             )
         )
         ready_lbl = f"status:{trigger}" if is_prefixed else trigger
@@ -492,8 +476,9 @@ async def _advance_parent_and_unlock_next_subtask(
             "--add-label", ready_lbl,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
-        await p_promote.wait()
+        await asyncio.wait_for(p_promote.communicate(), timeout=10.0)
 
         p_comment = await asyncio.create_subprocess_exec(
             "gh", "issue", "comment", str(parent_id),
@@ -501,8 +486,9 @@ async def _advance_parent_and_unlock_next_subtask(
             "--body", f"🤖 **DevTest Sequential Advance**: Subtask #{subtask_id} completed and merged. Unlocked next sequential subtask #{next_id} (`{ready_lbl}`).",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
-        await p_comment.wait()
+        await asyncio.wait_for(p_comment.communicate(), timeout=10.0)
     elif not unchecked_ids:
         # Check if 100% of all children are now CLOSED
         all_closed = all(str(c.get("state", "")).upper() == "CLOSED" for c in children)
@@ -511,13 +497,12 @@ async def _advance_parent_and_unlock_next_subtask(
                 "gh", "issue", "edit", str(parent_id),
                 "--repo", project.repo,
                 "--remove-label", "architect-processed",
-                "--remove-label", "status:in-progress",
-                "--remove-label", "planned",
                 "--add-label", output_label,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_edit_parent.wait()
+            await asyncio.wait_for(p_edit_parent.communicate(), timeout=10.0)
 
             child_list_str = ", ".join(f"#{c.get('number')}" for c in children)
             p_close_parent = await asyncio.create_subprocess_exec(
@@ -526,8 +511,9 @@ async def _advance_parent_and_unlock_next_subtask(
                 "--comment", f"🎉 **Parent Story Completed**: 100% of child subtasks ({child_list_str}) have been implemented, verified against CI, and merged into main.",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_close_parent.wait()
+            await asyncio.wait_for(p_close_parent.communicate(), timeout=10.0)
 
             await state_manager.sync_project_sdlc_items(
                 project.name,
@@ -552,7 +538,6 @@ async def _promote_next_planned_story(
     """
     On completion of a story's final subtask, promotes the oldest planned story
     into active status and unlocks its first queued subtask.
-    Logs: "[<project_name>|devtest] Story #<completed_story_id> complete. Activating planned Story #<next_story_id>."
     """
     oldest_planned = await state_manager.get_oldest_planned_story(project.name)
     if not oldest_planned:
@@ -567,29 +552,28 @@ async def _promote_next_planned_story(
     # 1. Atomic promotion in SQLite
     await state_manager.promote_planned_story(project.name, next_story_id, new_status="ACTIVE")
 
-    # 2. Log activation
     log_msg = f"[{project.name}|devtest] Story #{completed_story_id} complete. Activating planned Story #{next_story_id}."
     console.print(f"  [bold green]{log_msg}[/bold green]")
     _logger.info(log_msg)
 
-    # 3. Update story and unlock first queued subtask on GitHub / StateManager
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
+
+    # 2. Update story and unlock first queued subtask on GitHub
     if shutil.which("gh"):
-        # Update parent story labels
         try:
             p_edit_story = await asyncio.create_subprocess_exec(
                 "gh", "issue", "edit", str(next_story_id),
                 "--repo", project.repo,
-                "--remove-label", "planned",
-                "--remove-label", "status:planned",
                 "--add-label", "architect-processed",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_edit_story.wait()
+            await asyncio.wait_for(p_edit_story.communicate(), timeout=10.0)
         except Exception as e:
             _logger.debug("Error editing promoted story #%s on GitHub: %s", next_story_id, e)
 
-        # Search for child subtasks
+        # Discover child subtasks
         try:
             proc_subtasks = await asyncio.create_subprocess_exec(
                 "gh", "issue", "list",
@@ -599,15 +583,15 @@ async def _promote_next_planned_story(
                 "--json", "number,title,state,labels",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            stdout_st, _ = await proc_subtasks.communicate()
+            stdout_st, _ = await asyncio.wait_for(proc_subtasks.communicate(), timeout=10.0)
             children = []
             if proc_subtasks.returncode == 0 and stdout_st:
                 all_res = json.loads(stdout_st.decode("utf-8", errors="replace"))
                 children = [c for c in all_res if c.get("number") != next_story_id]
 
             children.sort(key=lambda x: x.get("number", 0))
-
             queued_children = []
             for c in children:
                 c_state = str(c.get("state", "")).upper()
@@ -635,8 +619,9 @@ async def _promote_next_planned_story(
                     "--add-label", ready_lbl,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_unlock.wait()
+                await asyncio.wait_for(p_unlock.communicate(), timeout=10.0)
 
                 p_comment = await asyncio.create_subprocess_exec(
                     "gh", "issue", "comment", str(next_story_id),
@@ -644,8 +629,9 @@ async def _promote_next_planned_story(
                     "--body", f"🤖 **DevTest Story Activation**: Story #{completed_story_id} completed. Activated Story #{next_story_id} and unlocked first subtask #{first_id} (`{ready_lbl}`).",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_comment.wait()
+                await asyncio.wait_for(p_comment.communicate(), timeout=10.0)
 
                 await state_manager.sync_project_sdlc_items(
                     project.name,
@@ -660,22 +646,6 @@ async def _promote_next_planned_story(
                 )
         except Exception as e:
             _logger.debug("Error unlocking child subtask for story #%s: %s", next_story_id, e)
-    else:
-        # If gh is not available, check StateManager for next queued subtask to update locally
-        queued_sub = await state_manager.get_next_queued_subtask(project.name, next_story_id)
-        if queued_sub:
-            sub_id = queued_sub["issue_number"]
-            await state_manager.sync_project_sdlc_items(
-                project.name,
-                [{
-                    "issue_number": sub_id,
-                    "title": queued_sub.get("title", f"Subtask #{sub_id}"),
-                    "state": "OPEN",
-                    "labels": ["ready-for-dev"],
-                    "parent_issue_id": next_story_id,
-                    "item_type": "SUBTASK",
-                }],
-            )
 
     return next_story_id
 
@@ -689,55 +659,24 @@ async def _verify_and_auto_merge_pr(
     trigger_label: str,
     auto_merge_approved: bool = True,
     is_conflict_resolution: bool = False,
-    default_output_label: str = "needs-architect-review",
+    default_output_label: str = "dev-implemented",
 ) -> tuple[bool, str]:
     """
     Performs E2E verification on a DevTest implementation PR:
     1. Checks remote GitHub Actions CI status (`check_pr_ci_status`).
     2. If CI is PASS and auto_merge_approved is True:
-       - Approves the PR.
        - Squashes and merges the PR into main (`--delete-branch`).
-       - Transitions parent issue to 'dev-implemented' and closes the issue.
+       - Transitions issue to 'dev-implemented' and closes it.
        - Syncs SDLC item in StateManager to MERGED.
        - Evaluates parent story sequential advance / parent closure.
     3. If CI is FAIL:
        - Flags the PR with 'needs-refactor'.
        - Posts a comment detailing failing checks.
-    4. If CI is PENDING or auto_merge_approved is False:
-       - Relabels PR to 'needs-architect-review' (or leaves pending).
+    4. If CI is PENDING:
+       - Labels PR 'dev-implemented' and continues monitoring.
     """
-    from rich.console import Console
-    console = Console()
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
 
-    if not auto_merge_approved:
-        effective_output_label = "architect-approved" if is_conflict_resolution else default_output_label
-        if shutil.which("gh"):
-            p_pr_label = await asyncio.create_subprocess_exec(
-                "gh", "pr", "edit", str(pr_number),
-                "--repo", project.repo,
-                "--add-label", effective_output_label,
-            )
-            await p_pr_label.wait()
-            p_issue_edit = await asyncio.create_subprocess_exec(
-                "gh", "issue", "edit", str(issue_id),
-                "--repo", project.repo,
-                "--remove-label", trigger_label,
-                "--add-label", "dev-implemented",
-            )
-            await p_issue_edit.wait()
-        await state_manager.sync_project_sdlc_items(
-            project.name,
-            [{
-                "issue_number": issue_id,
-                "title": issue_title,
-                "state": "IN_PROGRESS",
-                "labels": ["dev-implemented"],
-                "linked_pr": pr_number,
-            }],
-        )
-        return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_number} ('{effective_output_label}')."
-
-    # E2E CI Verification & Auto-Merge
     ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
     console.print(f"  [{project.name}:devtest] [dim]PR #{pr_number} CI Status: {ci_status} ({ci_details})[/dim]")
 
@@ -751,8 +690,9 @@ async def _verify_and_auto_merge_pr(
                 "--body", "🤖 **DevTest Quality Gate**: 100% passing local tests and green remote CI. Auto-merging into main.",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_approve.wait()
+            await asyncio.wait_for(p_approve.communicate(), timeout=10.0)
 
             # 2. Squash and merge
             p_merge = await asyncio.create_subprocess_exec(
@@ -762,8 +702,9 @@ async def _verify_and_auto_merge_pr(
                 "--delete-branch",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            stdout_m, stderr_m = await p_merge.communicate()
+            stdout_m, stderr_m = await asyncio.wait_for(p_merge.communicate(), timeout=10.0)
             if p_merge.returncode == 0:
                 console.print(f"  [{project.name}:devtest] [bold green]✓ DevTest E2E Complete: PR #{pr_number} auto-merged into main[/bold green]")
                 
@@ -775,8 +716,9 @@ async def _verify_and_auto_merge_pr(
                     "--add-label", "dev-implemented",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_issue_edit.wait()
+                await asyncio.wait_for(p_issue_edit.communicate(), timeout=10.0)
 
                 p_close = await asyncio.create_subprocess_exec(
                     "gh", "issue", "close", str(issue_id),
@@ -784,8 +726,9 @@ async def _verify_and_auto_merge_pr(
                     "--comment", f"🎉 **DevTest E2E Completed**: Implemented, verified against CI, and merged via PR #{pr_number}.",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_close.wait()
+                await asyncio.wait_for(p_close.communicate(), timeout=10.0)
 
                 await state_manager.sync_project_sdlc_items(
                     project.name,
@@ -797,9 +740,8 @@ async def _verify_and_auto_merge_pr(
                         "linked_pr": pr_number,
                     }],
                 )
-                await state_manager.delete_pr_artifact(project.repo, pr_number)
 
-                # 3.5 Sanitize worktree with stash protection
+                # Sanitize worktree with stash protection
                 try:
                     dev_wt = WorktreeManager.get_worktree_path(project, "devtest")
                     if dev_wt.exists():
@@ -807,7 +749,7 @@ async def _verify_and_auto_merge_pr(
                 except Exception as ex_wt:
                     _logger.debug("[%s:devtest] Worktree post-merge cleanup notice: %s", project.name, ex_wt)
 
-                # 4. Advance parent story sequence / unlock next queued subtask
+                # Advance parent story sequence / unlock next queued subtask
                 try:
                     await _advance_parent_and_unlock_next_subtask(project, state_manager, issue_id)
                 except Exception as ex:
@@ -824,8 +766,9 @@ async def _verify_and_auto_merge_pr(
                     "--add-label", "needs-refactor",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_fail.wait()
+                await asyncio.wait_for(p_fail.communicate(), timeout=10.0)
 
                 p_comm = await asyncio.create_subprocess_exec(
                     "gh", "pr", "comment", str(pr_number),
@@ -833,8 +776,9 @@ async def _verify_and_auto_merge_pr(
                     "--body", f"🤖 **DevTest Merge Quality Gate**: PR #{pr_number} cannot be merged into `main` ({err_text}). Flagging with `needs-refactor` for autonomous conflict remediation.",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_comm.wait()
+                await asyncio.wait_for(p_comm.communicate(), timeout=10.0)
 
                 await state_manager.record_anomaly_event(
                     project_name=project.name,
@@ -853,16 +797,18 @@ async def _verify_and_auto_merge_pr(
                 "--add-label", "needs-refactor",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_fail.wait()
+            await asyncio.wait_for(p_fail.communicate(), timeout=10.0)
             p_comm = await asyncio.create_subprocess_exec(
                 "gh", "pr", "comment", str(pr_number),
                 "--repo", project.repo,
                 "--body", f"🤖 **DevTest Quality Gate**: Remote CI checks failed ({ci_details}). Flagging with `needs-refactor` for autonomous remediation.",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            await p_comm.wait()
+            await asyncio.wait_for(p_comm.communicate(), timeout=10.0)
 
         await state_manager.record_anomaly_event(
             project_name=project.name,
@@ -881,8 +827,9 @@ async def _verify_and_auto_merge_pr(
             "--add-label", "dev-implemented",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
-        await p_label.wait()
+        await asyncio.wait_for(p_label.communicate(), timeout=10.0)
         p_issue = await asyncio.create_subprocess_exec(
             "gh", "issue", "edit", str(issue_id),
             "--repo", project.repo,
@@ -890,8 +837,9 @@ async def _verify_and_auto_merge_pr(
             "--add-label", "dev-implemented",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
-        await p_issue.wait()
+        await asyncio.wait_for(p_issue.communicate(), timeout=10.0)
 
     await state_manager.sync_project_sdlc_items(
         project.name,
@@ -922,6 +870,7 @@ async def _extract_issue_from_pr(repo: str, pr: Dict[str, Any]) -> tuple[Optiona
         return int(m.group(1)), title
 
     if shutil.which("gh") and pr_number:
+        env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
         try:
             p = await asyncio.create_subprocess_exec(
                 "gh", "pr", "view", str(pr_number),
@@ -929,8 +878,9 @@ async def _extract_issue_from_pr(repo: str, pr: Dict[str, Any]) -> tuple[Optiona
                 "--json", "body,headRefName,title",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            stdout, _ = await p.communicate()
+            stdout, _ = await asyncio.wait_for(p.communicate(), timeout=10.0)
             if p.returncode == 0 and stdout:
                 data = json.loads(stdout.decode("utf-8", errors="replace"))
                 b = data.get("body", "")
@@ -950,16 +900,17 @@ async def run_devtest_node(
     state_manager: StateManager,
 ) -> tuple[bool, str]:
     """
-    Executes 3Amigos DevTest Node (Implementation, CI Verification & PR Auto-Merge).
-    Zero-token gating: if no issues labeled 'ready-for-dev' and no PRs labeled 'needs-refactor' / 'dev-implemented', exits with 0 tokens consumed.
+    Executes 3Amigos DevTest Node (Implementation, Remote CI Verification & PR Auto-Merge).
+    Zero-token gating: if no actionable tasks in queue and no open PRs awaiting CI, exits with 0 tokens.
     """
     node_cfg = project.nodes.get("devtest", NodeConfig(harness="antigravity"))
     if not project.is_node_enabled("devtest"):
         return False, "DevTest node disabled for project."
 
     trigger = node_cfg.label_trigger or "ready-for-dev"
-    output_label = node_cfg.label_output or "needs-architect-review"
+    output_label = node_cfg.label_output or "dev-implemented"
     branch_prefix = node_cfg.branch_prefix or "feat/issue-"
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
 
     # Phase 1: Remediate PRs with 'needs-refactor'
     refactor_prs = await fetch_open_prs(project.repo, label="needs-refactor", limit=1)
@@ -983,10 +934,24 @@ async def run_devtest_node(
         )
 
     # Phase 2: Autonomous E2E Completion & Auto-Merge of Open PRs Awaiting CI
-    implemented_prs = await fetch_open_prs(project.repo, label="dev-implemented", limit=10)
-    for pr in implemented_prs:
+    open_prs = await fetch_open_prs(project.repo, label="dev-implemented", limit=20)
+    if not open_prs:
+        open_prs = await fetch_open_prs(project.repo, limit=20)
+
+    for pr in open_prs:
         pr_number = pr["number"]
         pr_title = pr.get("title", "")
+        branch_name = pr.get("headRefName", "")
+        labels = [l.get("name") if isinstance(l, dict) else str(l) for l in pr.get("labels", [])]
+        
+        is_devtest_pr = (
+            "dev-implemented" in labels
+            or branch_name.startswith(branch_prefix)
+            or "issue-" in branch_name
+        )
+        if not is_devtest_pr:
+            continue
+
         ci_status, ci_details = await check_pr_ci_status(project.repo, pr_number)
         if ci_status == "PASS":
             issue_id, issue_title = await _extract_issue_from_pr(project.repo, pr)
@@ -999,6 +964,7 @@ async def run_devtest_node(
                 issue_title=issue_title or pr_title,
                 trigger_label=trigger,
                 auto_merge_approved=True,
+                default_output_label=output_label,
             )
         elif ci_status == "FAIL":
             if shutil.which("gh"):
@@ -1009,16 +975,18 @@ async def run_devtest_node(
                     "--add-label", "needs-refactor",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_fail.wait()
+                await asyncio.wait_for(p_fail.communicate(), timeout=10.0)
                 p_comm = await asyncio.create_subprocess_exec(
                     "gh", "pr", "comment", str(pr_number),
                     "--repo", project.repo,
                     "--body", f"🤖 **DevTest Quality Gate**: Remote CI checks failed ({ci_details}). Flagging with `needs-refactor` for autonomous remediation.",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_comm.wait()
+                await asyncio.wait_for(p_comm.communicate(), timeout=10.0)
             await state_manager.record_anomaly_event(
                 project_name=project.name,
                 node_name="devtest",
@@ -1040,7 +1008,7 @@ async def run_devtest_node(
             "[%s:devtest] Project is locked on active story or no actionable task found. Idling (0 tokens).",
             project.name,
         )
-        return False, f"No PRs labeled 'needs-refactor'/'dev-implemented' and no actionable task for project '{project.name}' (story lock active or idle). Idle (0 tokens)."
+        return False, f"No PRs awaiting CI and no actionable task for project '{project.name}' (story lock active or idle). Idle (0 tokens)."
 
     # Pre-Flight Quota Gating (Pure local SQLite calculation, 0 LLM tokens)
     harness_name = node_cfg.harness or "antigravity"
@@ -1062,7 +1030,6 @@ async def run_devtest_node(
             target_issue_id,
             issue_state,
         )
-        # Attempt to remove stale trigger labels if any
         curr_labels = [
             l.get("name", "") if isinstance(l, dict) else str(l)
             for l in target_issue.get("labels", [])
@@ -1077,12 +1044,12 @@ async def run_devtest_node(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-                await p_clean.wait()
+                await asyncio.wait_for(p_clean.communicate(), timeout=10.0)
             except Exception as e:
                 _logger.debug("[%s:devtest] Graceful fallback on label cleanup for closed issue #%d: %s", project.name, target_issue_id, e)
 
-        # Synchronize CLOSED state into SQLite
         await state_manager.sync_project_sdlc_items(
             project.name,
             [{
@@ -1109,8 +1076,8 @@ async def run_devtest_node(
             for q_lbl in queue_labels:
                 cmd.extend(["--remove-label", q_lbl])
             try:
-                p_relbl = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                await p_relbl.wait()
+                p_relbl = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+                await asyncio.wait_for(p_relbl.communicate(), timeout=10.0)
             except Exception as e:
                 _logger.warning("[%s:devtest] Failed to update labels on Subtask #%d: %s", project.name, issue_id, e)
         console.print(f"  [bold cyan][{project.name}:devtest][/bold cyan] [bold yellow]⚡ Activating lowest open Subtask #{issue_id} ({', '.join(queue_labels) or 'unlabeled'} -> {trigger})[/bold yellow]")
@@ -1169,7 +1136,6 @@ async def run_devtest_node(
         return False, safety_msg
 
     # 3. Acquire State Lock
-    harness_name = node_cfg.harness or "antigravity"
     harness_cfg = config.harnesses.get(harness_name)
     if not harness_cfg:
         return False, f"Harness '{harness_name}' not found in configuration."
@@ -1194,7 +1160,7 @@ async def run_devtest_node(
         issue_id=issue_id,
     )
 
-    # 4. Resolve Worktree & Pre-Flight Cleanup: wipe aborted AI artifacts and ensure clean workspace
+    # 4. Resolve Worktree & Pre-Flight Cleanup
     console.print(f"\n  [bold blue]⚡ [{project.name}:devtest][/bold blue] [bold white]Implementing Subtask #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
     console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_prefix}{issue_id} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
     console.print(f"  [dim]• Scope: 3-Amigos TDD Development, Test Verification & PR Creation[/dim]")
@@ -1222,52 +1188,26 @@ async def run_devtest_node(
         )
         return False, f"Pre-flight reset failed: {e}"
 
-    adapter = AsyncHarnessAdapter(harness_name, harness_cfg)
-
-    # 5. Check Blackboard for Pre-Approved Context (AC 5)
-    artifact = await state_manager.get_pr_artifact(project.repo, issue_id)
-    is_conflict_resolution = artifact is not None and artifact.get("status") == "APPROVED_WITH_CONFLICT"
-
     context_note = ""
-    if is_conflict_resolution:
-        context_note = (
-            "🚨 CRITICAL - PRE-APPROVED CODE (BLACKBOARD CONTEXT):\n"
-            f"PR/Issue #{issue_id} has already passed ARCHITECTURAL CODE REVIEW ({artifact.get('comment')}).\n"
-            "DO NOT rewrite domain models, architectural contracts, or business logic.\n"
-            "Your objective is STRICTLY to reconcile git merge conflicts against origin/main, verify the test suite passes, commit, and push.\n"
-        )
-    elif project.context_files:
+    if project.context_files:
         files_str = ", ".join(project.context_files)
         context_note = (
             f"Read the methodology and architecture files listed in: {files_str}.\n"
             f"Implement the code strictly adhering to those local repository standards.\n"
         )
 
-    if is_conflict_resolution:
-        prompt = (
-            f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
-            f"Resolve git merge conflicts against origin/main for pre-approved Issue/PR #{issue_id} ('{issue_title}').\n\n"
-            f"{context_note}\n"
-            f"OPERATIONAL STEPS:\n"
-            f"1. Fetch origin and merge origin/main into the branch ('{branch_prefix}{issue_id}').\n"
-            f"2. Inspect and cleanly resolve all conflict markers (<<<<<<< HEAD ... ======= ... >>>>>>>).\n"
-            f"3. Run the local unit test suite and ensure all tests pass.\n"
-            f"4. Commit with a message 'chore(merge): resolve conflicts with main for #{issue_id}'.\n"
-            f"5. Push the branch to origin.\n"
-        )
-    else:
-        prompt = (
-            f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
-            f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n\n"
-            f"{context_note}"
-            f"OPERATIONAL STEPS:\n"
-            f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
-            f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
-            f"3. Implement the minimal clean code required to make all tests pass.\n"
-            f"4. Verify that the entire test suite and linter pass cleanly.\n"
-            f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
-            f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
-        )
+    prompt = (
+        f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
+        f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n\n"
+        f"{context_note}"
+        f"OPERATIONAL STEPS:\n"
+        f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
+        f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
+        f"3. Implement the minimal clean code required to make all tests pass.\n"
+        f"4. Verify that the entire test suite and linter pass cleanly.\n"
+        f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
+        f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
+    )
 
     adapter = AsyncHarnessAdapter(
         harness_name,
@@ -1301,56 +1241,53 @@ async def run_devtest_node(
             issue_number=issue_id,
         )
         if shutil.which("gh"):
-            p1 = await asyncio.create_subprocess_exec(
-                "gh", "issue", "edit", str(issue_id),
-                "--repo", project.repo,
-                "--remove-label", trigger,
-                "--add-label", "orchestration-failed",
-            )
-            await p1.wait()
+            try:
+                p1 = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "edit", str(issue_id),
+                    "--repo", project.repo,
+                    "--remove-label", trigger,
+                    "--add-label", "orchestration-failed",
+                    env=env,
+                )
+                await asyncio.wait_for(p1.communicate(), timeout=10.0)
 
-            p2 = await asyncio.create_subprocess_exec(
-                "gh", "issue", "comment", str(issue_id),
-                "--repo", project.repo,
-                "--body", f"🤖 **DevTest Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
-            )
-            await p2.wait()
+                p2 = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "comment", str(issue_id),
+                    "--repo", project.repo,
+                    "--body", f"🤖 **DevTest Node Execution Failed** (Exit Code {exit_code}). Log trace saved to `{log_file.name}`.",
+                    env=env,
+                )
+                await asyncio.wait_for(p2.communicate(), timeout=10.0)
+            except Exception:
+                pass
         return False, f"DevTest execution failed on issue #{issue_id} (exit code {exit_code})."
 
-    # 6. Verify if PR was already created by the harness (autonomous lifecycle)
+    # 6. Verify if PR was created by the harness (exact head-branch ref query)
     branch_name = f"{branch_prefix}{issue_id}"
     existing_pr: Optional[Dict[str, Any]] = None
 
     if shutil.which("gh"):
-        proc_pr = await asyncio.create_subprocess_exec(
-            "gh", "pr", "list",
-            "--repo", project.repo,
-            "--search", f"#{issue_id}",
-            "--state", "open",
-            "--json", "number,title,labels,headRefName",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_pr, _ = await proc_pr.communicate()
-        if proc_pr.returncode == 0 and stdout_pr:
-            try:
+        try:
+            proc_pr = await asyncio.create_subprocess_exec(
+                "gh", "pr", "list",
+                "--repo", project.repo,
+                "--head", branch_name,
+                "--state", "open",
+                "--json", "number,title,labels,headRefName,statusCheckRollup,mergeable",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            stdout_pr, _ = await asyncio.wait_for(proc_pr.communicate(), timeout=10.0)
+            if proc_pr.returncode == 0 and stdout_pr:
                 prs = json.loads(stdout_pr.decode("utf-8", errors="replace"))
                 if prs:
                     existing_pr = prs[0]
-            except Exception:
-                pass
+        except Exception as e:
+            _logger.debug("Head-branch PR discovery error: %s", e)
 
     if existing_pr:
         pr_num = existing_pr["number"]
-        if is_conflict_resolution:
-            await state_manager.upsert_pr_artifact(
-                repo=project.repo,
-                pr_number=issue_id,
-                node_name="devtest",
-                status="CONFLICT_RESOLVED",
-                comment=f"DevTest node resolved merge conflicts on PR #{pr_num}.",
-            )
-
         ran, msg = await _verify_and_auto_merge_pr(
             project=project,
             state_manager=state_manager,
@@ -1359,7 +1296,6 @@ async def run_devtest_node(
             issue_title=issue_title,
             trigger_label=trigger,
             auto_merge_approved=getattr(node_cfg, "auto_merge_approved", True),
-            is_conflict_resolution=is_conflict_resolution,
             default_output_label=output_label,
         )
         await state_manager.release_lock(issue_id, project.repo, "devtest")
@@ -1371,7 +1307,7 @@ async def run_devtest_node(
         cwd=str(exec_cwd),
         stdout=asyncio.subprocess.PIPE,
     )
-    diff_out, _ = await diff_proc.communicate()
+    diff_out, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=10.0)
     if not diff_out.strip():
         await state_manager.fail_job(
             issue_id=issue_id,
@@ -1409,8 +1345,9 @@ async def run_devtest_node(
                 cwd=str(exec_cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            stdout_c, _ = await p_pr.communicate()
+            stdout_c, _ = await asyncio.wait_for(p_pr.communicate(), timeout=10.0)
             if stdout_c:
                 url_str = stdout_c.decode("utf-8", errors="replace").strip()
                 if "/pull/" in url_str:
@@ -1460,5 +1397,4 @@ async def run_devtest_node(
     )
 
     await state_manager.release_lock(issue_id, project.repo, "devtest")
-    return True, f"DevTest node implemented issue #{issue_id} and opened PR with label '{output_label}'."
-
+    return True, f"DevTest node implemented issue #{issue_id} and opened PR."

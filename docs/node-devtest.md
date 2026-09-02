@@ -2,7 +2,7 @@
 
 **Module**: [`orchestrator/nodes/devtest.py`](file:///c:/Users/rogal/workspaces/ws-setups/graph-engineering/orchestrator/nodes/devtest.py)
 
-The **DevTest Node** acts as Node 2 in the pipeline—responsible for test-driven code implementation, local test suite verification, and pull request creation.
+The **DevTest Node** acts as Node 2 in the autonomous pipeline—responsible for test-driven code implementation, local test suite verification, pull request creation, remote CI monitoring, and autonomous squash-merging.
 
 ---
 
@@ -10,57 +10,64 @@ The **DevTest Node** acts as Node 2 in the pipeline—responsible for test-drive
 
 ```mermaid
 flowchart TD
-    Trigger["Issue labeled 'ready-for-dev'"] --> Lock["Acquire State Lock (TTL in state.db)"]
-    Lock --> Safety["Git Safety Pre-flight Check (Clean tree, sync origin/main)"]
-    Safety --> Harness["Run Agnostic Harness (Antigravity agy / Gemini 3.7 Flash)"]
-    
-    subgraph Agentic Implementation Loop
-        Harness --> Write["Write Code & Tests"]
-        Write --> RunTests["Run Local Test Suite & Linter"]
-        RunTests -->|Fail| Write
-        RunTests -->|Pass| Commit["Commit & Push Feature Branch"]
+    subgraph 1. Task Pickup & Activation
+        CTE["Resolve Next Task (Lowest ID / Sequence Order)"] --> Pick["Pick up 'queued' or 'ready-for-dev' Issue"]
+        Pick --> Lock["Acquire State Lock (TTL in state.db)"]
+        Lock --> Activate["Ensure Active ('ready-for-dev') on GitHub & SQLite"]
     end
-    
-    Commit --> CreatePR["Open or Detect Pull Request"]
-    CreatePR --> CheckCI{"Remote CI Status?"}
-    CheckCI -->|PASS 100% Green| AutoMerge["Auto-Merge into main (--squash --delete-branch)"]
-    AutoMerge --> CloseIssue["Close Issue & Mark 'dev-implemented'"]
-    CheckCI -->|FAIL| RefactorLabel["Flag PR with 'needs-refactor'"]
-    CheckCI -->|PENDING / Manual| ReviewLabel["Sync PR Label: 'needs-architect-review'"]
+
+    subgraph 2. Agentic Implementation Loop
+        Activate --> Safety["Git Safety Pre-flight Check (Clean worktree, sync origin/main)"]
+        Safety --> Harness["Run Coding Harness (Claude Sonnet 5 / Antigravity Flash)"]
+        Harness --> Write["Write Code & TDD Test Suite"]
+        Write --> RunTests["Run Local Test Suite & Typechecker"]
+        RunTests -->|Pass| Commit["Commit & Push Branch ('feat/issue-ID')"]
+    end
+
+    subgraph 3. Head-Branch PR Discovery & Auto-Merge
+        Commit --> CreatePR["Open Pull Request via GitHub CLI"]
+        CreatePR --> RefQuery["Stateless Head-Branch Query: gh pr list --head feat/issue-ID"]
+        RefQuery --> CheckCI{"Remote CI Status?"}
+        CheckCI -->|PASS 100% Green| AutoMerge["Auto-Merge into main (--squash --delete-branch)"]
+        AutoMerge --> CloseIssue["Close Issue & Mark 'dev-implemented'"]
+        CloseIssue --> Advance["Advance Parent Checklist & Unlock Next Ascending Subtask"]
+        CheckCI -->|FAIL| RefactorLabel["Flag PR with 'needs-refactor' for Autonomous Remediation"]
+        CheckCI -->|PENDING| Phase2["Register in SQLite (sdlc_items.linked_pr) -> Monitored by Phase 2"]
+    end
 ```
 
 ---
 
 ## 🔑 Operational Capabilities
 
-1. **Deterministic Git Safety Pre-Flight & Worktree Isolation**:
-   - Verifies that `local_path` is a valid git repository whose remote origin matches `project.repo`.
-   - Operates in its dedicated ephemeral git worktree (`.graph/worktrees/devtest_<project>`) managed via `WorktreeManager`, ensuring parallel non-destructive execution without index locking collisions.
-   - Cleans the worktree, checks out `main`, and pulls latest upstream commits prior to execution.
+### 1. Label-Agnostic Ascendant Order Task Pickup
+- Resolves actionable tasks in **ascending ID / sequence order** via SQLite CTE queries (`StateManager.get_next_devtest_task`).
+- It is **label-agnostic**: whether tasks are labeled `queued` or `ready-for-dev`, it deterministically resolves the lowest open subtask under the active User Story (or standalone tasks if no story is active).
+- Upon pickup, DevTest ensures the task is activated to `ready-for-dev`, acquires the state lock, and begins execution.
 
-2. **Agnostic Harness & Local OAuth Execution**:
-   - Executes via the configured harness adapter (`antigravity`, `claude`, or `devin`).
-   - Configured with extended print timeouts (`--print-timeout 45m`) for long multi-step compilation and testing runs.
+### 2. Ephemeral Worktree Isolation & Git Pre-Flight Safety
+- Operates in its dedicated ephemeral git worktree (`.graph/worktrees/devtest_<project>`) managed via `WorktreeManager`.
+- Executes non-destructive `clean_worktree` with stash protection before and after runs.
 
-3. **Autonomous E2E Verification & Auto-Merge**:
-   - If the AI harness autonomously branches (`feat/issue-<id>`), commits, and creates a Pull Request via GitHub CLI (or via fallback commit/push), DevTest validates remote GitHub Actions CI checks (`check_pr_ci_status`).
-   - If CI checks pass **100% Green** and `auto_merge_approved: true`, DevTest approves the PR and immediately executes **squash-and-merge** into `main` (`gh pr merge --squash --delete-branch`), closes the parent issue, and records the item as `MERGED` in SDLC memory.
-   - If remote CI fails, DevTest tags the PR with **`needs-refactor`** with details on failing checks for autonomous remediation.
-   - If manual review is explicitly configured (`auto_merge_approved: false`), attaches **`needs-architect-review`**.
+### 3. Agnostic Coding Harness Execution
+- Executes via the configured harness adapter:
+  - **Claude Sonnet 5 (`claude-sonnet-5`)** for deep architectural reasoning, large code refactors, and complex multi-file implementations.
+  - **Antigravity (`gemini-3.7-flash-medium`)** for rapid, cost-effective TDD batch implementation.
 
-4. **Sequential Subtask Progression & Autonomous Planned Story Promotion**:
-   - Checks off completed subtasks in the parent story checklist.
-   - Unlocks the next sequential child subtask (transitions label from `queued` to `ready-for-dev`).
-   - When 100% of child subtasks are completed and merged, closes the parent story with label `dev-implemented`.
-   - Automatically queries SQLite for the oldest planned story (`get_oldest_planned_story`), promotes it to `ACTIVE` (`promote_planned_story`), updates GitHub labels from `planned` to `architect-processed`, and promotes its first child subtask from `queued` to `ready-for-dev`.
+### 4. Deterministic Head-Branch PR Discovery (Zero Search Lag)
+- Queries PRs directly via exact Git head branch ref (`gh pr list --head feat/issue-<id>`), bypassing GitHub full-text search indexing delays.
+- Stores the integer `linked_pr` foreign key in SQLite `sdlc_items` for instant, query-free lifecycle management.
 
-5. **Context-Aware Conflict Resolution (Blackboard Pattern)**:
-   - Queries the local SQLite Blackboard (`pr_artifacts` table) before execution.
-   - If the task is flagged with `APPROVED_WITH_CONFLICT`, DevTest skips full code rewrites and focuses exclusively on reconciling git merge conflicts against `origin/main` without modifying pre-approved architectural contracts.
-   - Upon a clean push, marks the PR directly with `architect-approved`, avoiding duplicate review passes.
-
-6. **Self-Healing & Error Isolation**:
-   - If the build or tests cannot be resolved, the issue is labeled **`orchestration-failed`** or **`needs-po-review`** with a direct pointer to the execution log in `~/.config/orchestrator/logs/`.
+### 5. Autonomous E2E Remote CI Verification & Squash-Merge
+- Validates remote GitHub Actions CI checks (`check_pr_ci_status`).
+- When CI passes **100% Green**:
+  - Approves and squash-merges into `main` (`gh pr merge <pr_number> --squash --delete-branch`).
+  - Closes the issue with label **`dev-implemented`**.
+  - Checks off `- [x] #<id>` in the parent story body checklist.
+  - Unlocks the next ascending subtask (`queued` $	o$ `ready-for-dev`).
+  - When 100% of child subtasks are merged, automatically closes the parent story and promotes the next planned story.
+- When remote CI fails:
+  - Tags the PR with **`needs-refactor`** with details on failing checks for autonomous remediation.
 
 ---
 
@@ -72,14 +79,17 @@ Configured in `~/.config/orchestrator/config.yaml`:
 projects:
   - name: "crosstrainingapp"
     repo: "AntaresAndBharani/crosstrainingapp"
-    local_path: "c:/Users/rogal/workspaces/ws-setups/crosstrainingapp"
+    local_path: "~/workspaces/crosstrainingapp"
     nodes:
       devtest:
         enabled: true
-        harness: "antigravity"
-        model: "gemini-3.7-flash-medium"
+        # Coding Harness (Claude Sonnet 5 or Antigravity)
+        harness: "claude"
+        model: "claude-sonnet-5"
+        effort: "medium"
         label_trigger: "ready-for-dev"
-        label_output: "needs-architect-review"
+        label_output: "dev-implemented"
+        queued_label: "queued"
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
 ```
