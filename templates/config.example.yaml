@@ -8,7 +8,7 @@ version: 2
 
 # Global Engine Settings
 settings:
-  poll_interval_seconds: 300          # 5 minutes idle sweep interval
+  poll_interval_seconds: 180          # 3 minutes idle sweep interval
   supervisor_interval_seconds: 3600   # 1 hour consistency supervisor check
   bau_interval_seconds: 86400         # 1 day / 24 hours interval for BAU maintenance
   max_concurrent_jobs: 4              # Concurrency threshold to prevent RAM exhaustion
@@ -28,33 +28,21 @@ managed_labels:
   - name: "ready-for-dev"
     color: "0E8A16"
     description: "Awaiting 3Amigos DevTest implementation"
-  - name: "needs-architect-review"
-    color: "FBCA04"
-    description: "PR submitted, ready for architectural review"
-  - name: "architect-approved"
-    color: "2EA44F"
-    description: "Architectural review passed, ready for final CI merge"
-  - name: "needs-refactor"
-    color: "D93F0B"
-    description: "Architect identified structural violations, returned to DevTest"
-  - name: "dev-implemented"
-    color: "C2E0C6"
-    description: "Implementation completed by DevTest node"
-  - name: "orchestration-failed"
-    color: "B60205"
-    description: "AI Harness execution failed"
-  - name: "needs-po-review"
-    color: "D93F0B"
-    description: "Supervisor flagged methodological conflict"
+  - name: "queued"
+    color: "D4C5F9"
+    description: "Subtask queued, awaiting sequential activation"
   - name: "architect-processed"
     color: "D4C5F9"
     description: "Architect decomposition complete"
-  - name: "tech-debt"
-    color: "FBCA04"
-    description: "Technical debt or non-blocking improvement"
-  - name: "enhancement"
-    color: "A2EEEF"
-    description: "New feature request or enhancement"
+  - name: "dev-implemented"
+    color: "C2E0C6"
+    description: "Implementation completed by DevTest node"
+  - name: "needs-refactor"
+    color: "D93F0B"
+    description: "PR requires remediation or CI fixes, returned to DevTest"
+  - name: "orchestration-failed"
+    color: "B60205"
+    description: "AI Harness execution failed"
 
 # Pluggable AI CLI Harness Adapters
 # CLIs inherit active local OAuth user subscriptions (zero raw API token charges).
@@ -152,28 +140,23 @@ projects:
       - ".graph/testing-standards.md"
       - ".graph/git-workflow.md"
     nodes:
-      supervisor:
-        enabled: false
-        harness: "claude"
-        model: "claude-haiku-4-5"     # Fast, cost-efficient model for supervisor diagnosis
-        effort: "medium"              # Fast, lightweight consistency check
       architect:
         enabled: true
         harness: "claude"
         model: "claude-sonnet-5"
-        effort: "medium"              # High reasoning effort for architectural decomposition & PR review
+        effort: "medium"              # High reasoning effort for architectural decomposition
         label_trigger: "needs-triage" # Ingest trigger label (e.g. 'needs-triage' or 'stream out')
         processed_label: "architect-processed" # Transition label applied to parent story upon decomposition
         queued_label: "queued"        # Initial state label assigned to all generated subtasks
         label_output: "ready-for-dev"
-        review_trigger: "needs-architect-review"
         research_harness: "antigravity"
         research_model: "gemini-3.7-flash-high"
         research_interval_seconds: 604800  # 7 days (weekly evolutionary architecture refresh)
       devtest:
         enabled: true
-        harness: "antigravity"
-        model: "gemini-3.7-flash-medium"  # Antigravity specifies reasoning effort in model name
+        harness: "claude"
+        model: "claude-sonnet-5"
+        effort: "medium"
         label_trigger: "ready-for-dev"    # Active trigger label for subtask execution
         queued_label: "queued"            # Inactive subtask state awaiting sequential activation
         label_output: "dev-implemented"   # Completion label applied upon PR implementation
@@ -181,15 +164,7 @@ projects:
         auto_merge_approved: true
       reviewer:
         enabled: false
-        harness: "claude"
-        model: "claude-sonnet-5"
-        effort: "medium"
-        label_trigger: "architect-approved"
-        auto_merge_approved: true
-        # Cost-effective conflict resolver harness & model
-        conflict_harness: "antigravity"
-        conflict_model: "gemini-3.7-flash-low"
+      supervisor:
+        enabled: false
       bau:
         enabled: false
-        harness: "antigravity"
-        model: "gemini-3.7-flash-low"     # Fast, lightweight model for daily maintenance grouping
