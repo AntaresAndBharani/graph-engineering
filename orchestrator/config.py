@@ -272,12 +272,12 @@ def get_default_config_search_paths() -> List[Path]:
     paths.append(Path("config.yaml").resolve())
     paths.append(Path(".orchestrator.yaml").resolve())
 
-    # 2. User config path ~/.config/orchestrator/config.yaml
+    # 2. Canonical user config path ~/.orchestrator/config.yaml
     home = Path.home()
-    paths.append(home / ".config" / "orchestrator" / "config.yaml")
-
-    # 3. Windows userprofile fallback ~/.orchestrator/config.yaml
     paths.append(home / ".orchestrator" / "config.yaml")
+
+    # 3. Fallback XDG config path ~/.config/orchestrator/config.yaml
+    paths.append(home / ".config" / "orchestrator" / "config.yaml")
     return paths
 
 
