@@ -416,3 +416,145 @@ async def test_scenario_watcher_failsafe_and_path_pinning(tmp_path: Path):
     # And watcher must clear reload_requested to prevent infinite loops
     assert await state_manager.is_reload_requested() is False
 
+
+# ============================================================================
+# Targeted Named Verification Tests (Issue #148 / T-9)
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_named_config_reload(tmp_path: Path):
+    """
+    Targeted Named Test 1: Config Reload
+    Verifies centralized reload watcher, epoch timestamp tracking, daemon_control IPC,
+    and thread-safe ConfigHolder update.
+    """
+    from orchestrator.cli import _daemon_reload_watcher
+
+    config_file = tmp_path / "config.yaml"
+    db_file = tmp_path / "state.db"
+    config_file.write_text(
+        f"settings:\n  db_path: '{db_file.as_posix()}'\n  poll_interval_seconds: 120\n"
+        "projects:\n  - name: p1\n    repo: o/p1\n    local_path: .\n",
+        encoding="utf-8",
+    )
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    initial_config = load_config(config_file)
+    holder = ConfigHolder(initial_config)
+
+    pre_epoch = time.time() - 5.0
+    await state_manager.register_daemon(18532)
+    await state_manager.record_reload_complete(status="SUCCESS", projects_count=1, epoch=pre_epoch)
+
+    # Modify config on disk
+    config_file.write_text(
+        f"settings:\n  db_path: '{db_file.as_posix()}'\n  poll_interval_seconds: 45\n"
+        "projects:\n  - name: p1\n    repo: o/p1\n    local_path: .\n  - name: p2\n    repo: o/p2\n    local_path: .\n",
+        encoding="utf-8",
+    )
+
+    # Request reload
+    await state_manager.request_reload(trigger="CLI IPC")
+    assert await state_manager.is_reload_requested() is True
+
+    # Run watcher
+    watcher_task = asyncio.create_task(
+        _daemon_reload_watcher(holder, state_manager, config_file, interval_seconds=0.01)
+    )
+    for _ in range(50):
+        if not await state_manager.is_reload_requested():
+            break
+        await asyncio.sleep(0.05)
+    watcher_task.cancel()
+
+    # Assertions
+    assert await state_manager.is_reload_requested() is False
+    assert holder.config.settings.poll_interval_seconds == 45
+    assert len(holder.config.projects) == 2
+    daemon_info = await state_manager.get_daemon_info()
+    assert daemon_info.get("last_reload_status") == "SUCCESS"
+    assert daemon_info.get("last_reload_trigger") == "CLI IPC"
+    assert float(daemon_info.get("last_reload_at_epoch", 0)) > pre_epoch
+    assert daemon_info.get("last_reload_projects_count") == "2"
+
+
+@pytest.mark.asyncio
+async def test_named_multi_worker_reload(tmp_path: Path):
+    """
+    Targeted Named Test 2: Multi-Worker Reload
+    Verifies that multiple concurrent worker loops read updated configuration
+    from shared ConfigHolder without racing or invoking hot_reload_runtime.
+    """
+    from orchestrator.cli import _daemon_reload_watcher, _project_worker_loop
+    from unittest.mock import patch
+
+    config_file = tmp_path / "config.yaml"
+    db_file = tmp_path / "state.db"
+    config_file.write_text(
+        f"settings:\n  db_path: '{db_file.as_posix()}'\n  poll_interval_seconds: 100\n"
+        "projects:\n"
+        "  - name: worker-1\n    repo: org/w1\n    local_path: .\n"
+        "  - name: worker-2\n    repo: org/w2\n    local_path: .\n"
+        "  - name: worker-3\n    repo: org/w3\n    local_path: .\n",
+        encoding="utf-8",
+    )
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    initial_config = load_config(config_file)
+    holder = ConfigHolder(initial_config)
+
+    hot_reload_invocations = []
+    worker_observed_intervals = []
+
+    def mock_hot_reload(path):
+        hot_reload_invocations.append(path)
+        cfg = load_config(path)
+        cfg.settings.poll_interval_seconds = 77
+        return cfg
+
+    async def mock_run_project_cycle(proj, cfg, sm, silent_idle=False):
+        worker_observed_intervals.append(cfg.settings.poll_interval_seconds)
+        if len(worker_observed_intervals) >= 3:
+            await sm.request_stop()
+        return False
+
+    with patch("orchestrator.cli.hot_reload_runtime", side_effect=mock_hot_reload), \
+         patch("orchestrator.cli.run_project_cycle", side_effect=mock_run_project_cycle):
+
+        await state_manager.request_reload()
+        assert await state_manager.is_reload_requested() is True
+
+        watcher_task = asyncio.create_task(
+            _daemon_reload_watcher(holder, state_manager, config_file, interval_seconds=0.01)
+        )
+        for _ in range(50):
+            if not await state_manager.is_reload_requested():
+                break
+            await asyncio.sleep(0.05)
+        watcher_task.cancel()
+
+        # Sole consumer must be watcher
+        assert len(hot_reload_invocations) == 1
+        assert await state_manager.is_reload_requested() is False
+        assert holder.config.settings.poll_interval_seconds == 77
+
+        # Workers run
+        await state_manager.clear_stop_request()
+        p1 = holder.get_project("worker-1")
+        p2 = holder.get_project("worker-2")
+        p3 = holder.get_project("worker-3")
+
+        w1 = asyncio.create_task(_project_worker_loop(p1, holder, state_manager, interval=1))
+        w2 = asyncio.create_task(_project_worker_loop(p2, holder, state_manager, interval=1))
+        w3 = asyncio.create_task(_project_worker_loop(p3, holder, state_manager, interval=1))
+        await asyncio.gather(w1, w2, w3)
+
+        # Workers must never have called hot_reload_runtime
+        assert len(hot_reload_invocations) == 1
+        # All workers must have observed the reloaded interval
+        assert len(worker_observed_intervals) >= 3
+        assert all(interval == 77 for interval in worker_observed_intervals)
+
+
