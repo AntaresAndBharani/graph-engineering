@@ -949,7 +949,7 @@ def test_cli_start_help():
     result = runner.invoke(app, ["start", "--help"])
     assert result.exit_code == 0
     assert "Executes a dedicated project node lifecycle" in result.stdout
-    assert "PROJECT_NAME" in result.stdout
+    assert "project_name" in result.stdout.lower()
     assert "--node" in result.stdout
     assert "--max-passes" in result.stdout
 
