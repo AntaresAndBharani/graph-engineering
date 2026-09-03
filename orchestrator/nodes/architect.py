@@ -299,6 +299,7 @@ def build_triage_prompt(
         f"     `gh issue comment {issue_id} --repo '{project.repo}' --body 'ðŸ¤– **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
         f"   - **Case 3: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
         f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`\n"
+        f"     - CRITICAL LABELING INVARIANT: Assign ONLY the label '{queued_label}' to each newly created subtask. Do NOT use issue templates (--template) and NEVER apply legacy or prefixed labels such as 'type:subtask', 'status:ready', 'status:definition', 'type:user-story', or 'status:*'.\n"
         f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
         f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
         f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"

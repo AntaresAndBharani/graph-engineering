@@ -6,16 +6,72 @@ from typing import Dict, List
 from orchestrator.config import LabelConfig, ProjectConfig
 
 
+LEGACY_OBSOLETE_LABELS = [
+    "status:definition",
+    "status:ready",
+    "status:in-progress",
+    "status:ready-for-architect",
+    "status:needs-po-input",
+    "status:review",
+    "status:needs-clarification",
+    "status:needs-revision",
+    "status:awaiting-approval",
+    "status:pending-review",
+    "status:in-development",
+    "status:done",
+    "type:subtask",
+    "type:user-story",
+    "pipeline:locked",
+    "review:approved",
+    "review:changes-requested",
+    "origin:backlog-triage",
+    "needs-architect-review",
+    "needs-po-review",
+    "architect-approved",
+    "planned",
+    "tech-debt",
+]
+
+
+async def purge_obsolete_repository_labels(repo: str) -> List[str]:
+    """
+    Deletes known legacy/deprecated SDLC labels from the target GitHub repository.
+    """
+    if not shutil.which("gh"):
+        return []
+
+    deleted: List[str] = []
+    for label in LEGACY_OBSOLETE_LABELS:
+        cmd = ["gh", "label", "delete", label, "--repo", repo, "--yes"]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await process.wait()
+            if process.returncode == 0:
+                deleted.append(label)
+        except Exception:
+            pass
+    return deleted
+
+
 async def sync_repository_labels(
     repo: str,
     labels: List[LabelConfig],
+    purge_legacy: bool = True,
 ) -> Dict[str, bool]:
     """
     Ensures all standard taxonomy labels exist with the configured colors/descriptions
     in the target GitHub repository using `gh label create --force`.
+    Optionally purges obsolete legacy labels.
     """
     if not shutil.which("gh"):
         return {label.name: False for label in labels}
+
+    if purge_legacy:
+        await purge_obsolete_repository_labels(repo)
 
     results: Dict[str, bool] = {}
 
