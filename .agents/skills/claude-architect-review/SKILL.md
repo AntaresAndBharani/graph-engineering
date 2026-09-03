@@ -1,7 +1,7 @@
 ---
 name: claude-architect-review
 description: >-
-  Collaborative cross-architectural debate and consensus review between Gemini and Claude (Opus, High effort). Iterates up to a maximum of 3 rounds exclusively via docs/draft-requisites/implementation-plan.md, unearthing technical drawbacks, architectural hazards, and edge cases. If consensus is reached, the plan is marked approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /cross-review, /claude-review, or /claude-architect-review.
+  Collaborative cross-architectural debate and consensus review between Gemini and Claude (Opus, Medium effort). Iterates up to a maximum of 3 rounds exclusively via docs/draft-requisites/implementation-plan.md, unearthing technical drawbacks, architectural hazards, and edge cases. If consensus is reached, the plan is marked approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /cross-review, /claude-review, or /claude-architect-review.
 ---
 
 # Claude Architect Cross-Review Workflow (/cross-review)
@@ -12,11 +12,11 @@ Use this workflow whenever the user explicitly issues `/cross-review`, `/claude-
 
 ## 🎯 Purpose & Core Value
 
-This skill orchestrates a rigorous, bi-directional architectural dialogue between **Gemini** and **Claude (Opus 4.5, High effort)** to pressure-test, critique, and align on an implementation plan.
+This skill orchestrates a rigorous, bi-directional architectural dialogue between **Gemini** and **Claude (Opus 4.5, Medium effort)** to pressure-test, critique, and align on an implementation plan.
 
 Key invariants:
 1. **Single Medium of Truth:** All communication happens **exclusively** through `docs/draft-requisites/implementation-plan.md` in the target project workspace. Neither agent communicates through ephemeral chat buffers; all feedback is permanently audited.
-2. **Autonomous Headless Claude Execution:** Claude is invoked via `claude` CLI with `--model opus --effort high --dangerously-skip-permissions -p`.
+2. **Autonomous Headless Claude Execution:** Claude is invoked via `claude` CLI with `--model opus --effort medium --dangerously-skip-permissions -p`.
 3. **Hard 3-Round Cap:** The debate cannot exceed 3 rounds.
 4. **Guaranteed Operator Escalation:** If after 3 rounds agreement is not achieved (`VERDICT: AGREED`), execution halts immediately and the skill surfaces a structured dispute matrix of unresolved points directly to the human operator.
 
@@ -64,17 +64,17 @@ Before or between Claude invocations, Gemini must:
    ### 3. Edge Cases & Resilience Strategy
    ```
 
-### Step 3: Headless Claude (Opus High) Execution
+### Step 3: Headless Claude (Opus Medium) Execution
 Invoke Claude non-interactively using the provided helper script or direct CLI command.
 
 #### Option A: Via Python Helper Script
 ```powershell
-python <skill_path>/scripts/cross_review.py --model opus --effort high --max-rounds 3
+python <skill_path>/scripts/cross_review.py --model opus --effort medium --max-rounds 3
 ```
 The helper script automatically:
 - Resolves the local `docs/draft-requisites/implementation-plan.md`.
 - Formulates the architectural critique prompt.
-- Executes `claude -p ... --model opus --effort high --dangerously-skip-permissions`.
+- Executes `claude -p ... --model opus --effort medium --dangerously-skip-permissions`.
 - Parses Claude's appended section and verdict.
 - Emits structured JSON summary.
 
@@ -91,7 +91,7 @@ VERDICT: AGREED (only if 100% sound with zero unresolved drawbacks) or VERDICT: 
 4. Output a concise 3-5 bullet point summary to stdout.
 "@
 
-claude -p $prompt --model opus --effort high --dangerously-skip-permissions
+claude -p $prompt --model opus --effort medium --dangerously-skip-permissions
 ```
 
 ### Step 4: Verdict Analysis & Convergence Check

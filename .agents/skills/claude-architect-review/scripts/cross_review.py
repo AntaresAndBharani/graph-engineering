@@ -73,7 +73,7 @@ def build_claude_prompt(round_num: int, plan_rel_path: str) -> str:
     )
 
 
-def invoke_claude(prompt: str, model: str = "opus", effort: str = "high") -> Tuple[int, str, str]:
+def invoke_claude(prompt: str, model: str = "opus", effort: str = "medium") -> Tuple[int, str, str]:
     cmd = [
         "claude",
         "-p", prompt,
@@ -145,10 +145,10 @@ def extract_disagreement_points(plan_content: str, round_num: int) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cross-Review between Gemini and Claude (Opus High)")
+    parser = argparse.ArgumentParser(description="Cross-Review between Gemini and Claude (Opus Medium)")
     parser.add_argument("--plan", type=str, default=None, help="Path to implementation-plan.md")
     parser.add_argument("--model", type=str, default="opus", help="Claude model alias or full name")
-    parser.add_argument("--effort", type=str, default="high", help="Reasoning effort (low, medium, high, max)")
+    parser.add_argument("--effort", type=str, default="medium", help="Reasoning effort (low, medium, high, max)")
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum number of debate rounds")
     parser.add_argument("--check-status", action="store_true", help="Only check status and round count")
 

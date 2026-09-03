@@ -29,7 +29,7 @@ When the user prefixes their instruction with `/refine-story`, `/user-story-refi
 ## Cross-Architectural Review Protocol (`/cross-review`, `/claude-review`, `/claude-architect-review`)
 When the user prefixes their instruction with `/cross-review`, `/claude-review`, or asks to cross-examine an implementation plan between Gemini and Claude:
 1. **Single Communication Medium:** All exchanges happen strictly via `docs/draft-requisites/implementation-plan.md`. Never use temporary buffers.
-2. **Headless Claude Opus Execution:** Invoke Claude CLI (`--model opus --effort high --dangerously-skip-permissions -p`) or run `scripts/cross_review.py`.
+2. **Headless Claude Opus Execution:** Invoke Claude CLI (`--model opus --effort medium --dangerously-skip-permissions -p`) or run `scripts/cross_review.py`.
 3. **Hard 3-Round Cap:** Gemini and Claude debate for a maximum of 3 iterations (`## 🔍 Review Iteration N` and `## 🏛️ Claude Opus Review Iteration N`).
 4. **Early Exit on Consensus:** If Claude issues `VERDICT: AGREED`, mark the plan as approved and present the consensus plan to the operator.
 5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution immediately, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and surface a structured Dispute Matrix to the user highlighting the contested points, risks, and trade-offs for final human decision.
