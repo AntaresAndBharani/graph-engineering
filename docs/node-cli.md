@@ -134,6 +134,27 @@ orchestrator run [-p PROJECT] [-n NODE] [-c CONFIG]
 
 ---
 
+### `orchestrator start`
+Executes a dedicated project node lifecycle until the queue is completely drained. Reuses `_project_worker_loop` with `exit_when_idle=True`, queue drain through pending PR CI checks, distinct scriptable exit codes (`0` drained, `1` stop requested, `2` error or max passes exceeded), global stop validation, and dedicated `lifecycle_pid` tracking.
+
+```bash
+orchestrator start <project_name> [-n devtest] [-c CONFIG] [-i INTERVAL] [--max-passes 50]
+```
+
+**Options**:
+- `project_name` (Argument): Target registered project name.
+- `-n, --node TEXT`: Target node lifecycle (`devtest` or omitted for full lifecycle).
+- `-c, --config PATH`: Path to custom `config.yaml` file.
+- `-i, --interval INTEGER`: Polling interval in seconds between passes.
+- `--max-passes INTEGER`: Maximum passes to execute before aborting (default: 50).
+
+**Exit Codes**:
+- `0`: Queue completely drained (all actionable tasks implemented and PR CI checks verified/merged).
+- `1`: Stop requested or global safe stop signal active.
+- `2`: Configuration error, unhandled fatal error, or maximum passes exceeded without draining queue.
+
+---
+
 ### `orchestrator list`
 Displays a formatted Rich table of all registered repositories, assigned harnesses, status, and dedicated 7th column `Agent Model` (`—` for idle or unassigned rows).
 

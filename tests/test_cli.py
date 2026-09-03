@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from orchestrator.cli import app, run_project_cycle
 from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
 from orchestrator.db import StateManager
+from orchestrator.logging import strip_ansi
 
 runner = CliRunner()
 
@@ -943,6 +944,581 @@ projects:
     assert worker_started.is_set()
     assert len(received_sync_event) == 1
     assert isinstance(received_sync_event[0], asyncio.Event)
+
+
+def test_cli_start_help():
+    result = runner.invoke(app, ["start", "--help"])
+    assert result.exit_code == 0
+    clean_stdout = strip_ansi(result.stdout)
+    assert "Executes a dedicated project node lifecycle" in clean_stdout
+    assert "project_name" in clean_stdout.lower()
+    assert "--node" in clean_stdout
+    assert "--max-passes" in clean_stdout
+
+
+def test_cli_start_invalid_node(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+version: 2
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["start", "alpha", "-n", "architect", "--config", str(config_file)])
+    assert result.exit_code == 2
+    assert "only supports node 'devtest'" in result.stdout
+
+
+def test_cli_start_project_not_found(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+version: 2
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["start", "nonexistent", "--config", str(config_file)])
+    assert result.exit_code == 2
+    assert "Project 'nonexistent' not found" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_refuses_when_global_stop_active(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.request_stop()
+
+    result = runner.invoke(app, ["start", "alpha", "-n", "devtest", "--config", str(config_file)])
+    assert result.exit_code == 1
+    assert "Stop requested or global stop active" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_lifecycle_pid_tracking(tmp_path, monkeypatch):
+    import os
+    import aiosqlite
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.register_daemon(88888)
+
+    observed_pid = []
+    observed_daemon_pid = []
+
+    async def mock_run_cycle(project, config, state_mgr, node_name=None, silent_idle=False):
+        l_pid = await state_mgr.get_lifecycle_pid()
+        observed_pid.append(l_pid)
+        async with aiosqlite.connect(state_mgr.db_path) as db:
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'pid';")
+            row = await cursor.fetchone()
+            observed_daemon_pid.append(row[0] if row else None)
+        return False
+
+    async def mock_drained(project, state_mgr, node_name=None):
+        return True
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle)
+    monkeypatch.setattr("orchestrator.cli.is_project_queue_drained", mock_drained)
+
+    result = runner.invoke(app, ["start", "alpha", "-n", "devtest", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert observed_pid == [os.getpid()]
+    assert observed_daemon_pid == ["88888"]  # Main daemon PID is never overwritten
+
+    # Upon exit, lifecycle_pid is cleaned up, but daemon PID remains
+    final_l_pid = await state_manager.get_lifecycle_pid()
+    assert final_l_pid is None
+    async with aiosqlite.connect(state_manager.db_path) as db:
+        cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'pid';")
+        row = await cursor.fetchone()
+        assert row[0] == "88888"
+
+
+@pytest.mark.asyncio
+async def test_cli_start_aborts_on_max_passes(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    passes = []
+    async def mock_run_cycle(project, config, state_mgr, node_name=None, silent_idle=False):
+        passes.append(1)
+        return False
+
+    async def mock_drained(project, state_mgr, node_name=None):
+        return False
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle)
+    monkeypatch.setattr("orchestrator.cli.is_project_queue_drained", mock_drained)
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr("orchestrator.cli.asyncio.sleep", lambda s: orig_sleep(0.001))
+
+    result = runner.invoke(app, [
+        "start", "biq-playbook", "-n", "devtest",
+        "--config", str(config_file),
+        "--max-passes", "3",
+        "--interval", "1"
+    ])
+    assert result.exit_code == 2
+    assert len(passes) == 3
+    assert "Reached maximum passes limit" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_exits_code_1_on_stop_requested(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    async def mock_run_cycle(project, config, state_mgr, node_name=None, silent_idle=False):
+        await state_mgr.request_stop()
+        return True
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle)
+
+    result = runner.invoke(app, ["start", "biq-playbook", "-n", "devtest", "--config", str(config_file)])
+    assert result.exit_code == 1
+    assert "Safe stop active" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_drain_queue_through_pending_ci(tmp_path, monkeypatch):
+    """
+    Given project "biq-playbook" has 2 queued subtasks for "devtest"
+    When the operator executes "orchestrator start biq-playbook -n devtest"
+    Then it must execute DevTest on subtask #1, create the PR, and await CI
+    And it must NOT exit as "drained" while CI is running
+    And upon CI pass and auto-merge, it must proceed to subtask #2
+    And upon draining all actionable tasks and PRs, it must exit cleanly with code 0
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    cycle_steps = [
+        # Pass 1: DevTest implements subtask #1, creates PR #10, returns work_done=True
+        (True, "DevTest node implemented issue #1 and opened PR #10"),
+        # Pass 2: PR #10 CI is running, returns work_done=False
+        (False, "Subtask #1 already has open PR #10 (linked_pr). Waiting for Phase 2 CI verification."),
+        # Pass 3: PR #10 CI passed, auto-merged, returns work_done=True
+        (True, "DevTest node auto-merged PR #10 into main."),
+        # Pass 4: DevTest implements subtask #2, creates PR #11, returns work_done=True
+        (True, "DevTest node implemented issue #2 and opened PR #11"),
+        # Pass 5: PR #11 CI passed, auto-merged, returns work_done=True
+        (True, "DevTest node auto-merged PR #11 into main."),
+        # Pass 6: All done, returns work_done=False
+        (False, "No PRs awaiting CI and no actionable task."),
+    ]
+    step_idx = 0
+
+    # Queue drain predicate results corresponding to when work_done=False:
+    # Pass 2: PR CI running -> False (must NOT exit as drained!)
+    # Pass 6: All tasks and PRs drained -> True (exits cleanly with code 0!)
+    drained_steps = [False, True]
+    drained_idx = 0
+
+    async def mock_run_cycle(project, config, state_mgr, node_name=None, silent_idle=False):
+        nonlocal step_idx
+        res = cycle_steps[step_idx]
+        step_idx += 1
+        return res[0]
+
+    async def mock_is_drained(project, state_mgr, node_name=None):
+        nonlocal drained_idx
+        res = drained_steps[drained_idx]
+        drained_idx += 1
+        return res
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle)
+    monkeypatch.setattr("orchestrator.cli.is_project_queue_drained", mock_is_drained)
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr("orchestrator.cli.asyncio.sleep", lambda s: orig_sleep(0.001))
+
+    result = runner.invoke(app, ["start", "biq-playbook", "-n", "devtest", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert step_idx == 6
+    assert drained_idx == 2
+    assert "Queue not drained" in result.stdout
+    assert "Queue fully drained. Lifecycle complete" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_is_project_queue_drained_predicate(tmp_path, monkeypatch):
+    from orchestrator.cli import is_project_queue_drained
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    project = ProjectConfig(name="biq-playbook", repo="org/biq-playbook", local_path=str(tmp_path))
+
+    # Case 1: Active story with queued subtask
+    await state_manager.sync_project_sdlc_items(
+        "biq-playbook",
+        [
+            {"issue_number": 100, "item_type": "STORY", "title": "Story 1", "state": "OPEN", "labels": ["planned"]},
+            {"issue_number": 101, "parent_issue_id": 100, "item_type": "SUBTASK", "title": "Subtask 1", "state": "OPEN", "labels": ["queued"]},
+        ],
+    )
+    async def mock_empty_prs(repo, limit=20):
+        return []
+
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_empty_prs)
+
+    drained = await is_project_queue_drained(project, state_manager, node_name="devtest")
+    assert drained is False
+
+    # Case 2: Subtask has open PR awaiting CI
+    await state_manager.sync_project_sdlc_items(
+        "biq-playbook",
+        [
+            {
+                "issue_number": 101,
+                "parent_issue_id": 100,
+                "item_type": "SUBTASK",
+                "title": "Subtask 1",
+                "state": "IN_PROGRESS",
+                "labels": ["dev-implemented"],
+                "linked_pr": 10,
+                "pr_status": "OPEN",
+                "pr_ci_details": "RUNNING",
+            }
+        ],
+    )
+    drained = await is_project_queue_drained(project, state_manager, node_name="devtest")
+    assert drained is False
+
+    # Case 3: Open PR fetched via poller with CI running
+    async def mock_running_prs(repo, limit=20):
+        return [{
+            "number": 10,
+            "headRefName": "feat/issue-101",
+            "state": "OPEN",
+            "labels": ["dev-implemented"],
+            "statusCheckRollup": [{"status": "IN_PROGRESS"}],
+        }]
+
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_running_prs)
+    drained = await is_project_queue_drained(project, state_manager, node_name="devtest")
+    assert drained is False
+
+    # Case 4: PR merged and subtasks closed
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_empty_prs)
+    await state_manager.sync_project_sdlc_items(
+        "biq-playbook",
+        [
+            {"issue_number": 100, "item_type": "STORY", "title": "Story 1", "state": "CLOSED", "labels": []},
+            {
+                "issue_number": 101,
+                "parent_issue_id": 100,
+                "item_type": "SUBTASK",
+                "title": "Subtask 1",
+                "state": "CLOSED",
+                "labels": [],
+                "linked_pr": 10,
+                "pr_status": "MERGED",
+                "pr_ci_details": "PASS",
+            },
+        ],
+    )
+    drained = await is_project_queue_drained(project, state_manager, node_name="devtest")
+    assert drained is True
+
+
+@pytest.mark.asyncio
+async def test_stop_command_force_kills_lifecycle_pid(tmp_path, monkeypatch):
+    from orchestrator.cli import _stop_daemon
+
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.register_lifecycle(12345)
+
+    killed_pids = []
+    class DummyProc:
+        def __init__(self, pid):
+            self.pid = pid
+        def children(self, recursive=True):
+            return []
+        def kill(self):
+            killed_pids.append(self.pid)
+
+    import psutil
+    monkeypatch.setattr(psutil, "Process", DummyProc)
+
+    await _stop_daemon(force=True, config_path=config_file)
+    assert 12345 in killed_pids
+
+
+@pytest.mark.asyncio
+async def test_cli_start_refuses_when_global_stop_already_active(tmp_path, monkeypatch):
+    """
+    Scenario: Lifecycle command exits with code 1 when stop is requested
+    Given a global stop is already requested
+    When the operator executes "orchestrator start biq-playbook"
+    Then it must refuse to start and exit with code 1
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.request_stop()
+
+    result = runner.invoke(app, ["start", "biq-playbook", "--config", str(config_file)])
+    assert result.exit_code == 1
+    assert "Stop requested or global stop active" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_aborts_on_max_passes_exceeded(tmp_path, monkeypatch):
+    """
+    Scenario: Lifecycle command aborts on max passes or fatal error
+    Given "orchestrator start" reaches max_passes without draining
+    When the pass limit is exceeded
+    Then it must log an error and exit with code 2
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    pass_counter = 0
+
+    async def mock_run_cycle(project, config, state_mgr, node_name=None, silent_idle=False):
+        nonlocal pass_counter
+        pass_counter += 1
+        return False
+
+    async def mock_is_drained(project, state_mgr, node_name=None):
+        return False
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle)
+    monkeypatch.setattr("orchestrator.cli.is_project_queue_drained", mock_is_drained)
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr("orchestrator.cli.asyncio.sleep", lambda s: orig_sleep(0.001))
+
+    result = runner.invoke(app, ["start", "biq-playbook", "-n", "devtest", "--max-passes", "3", "--config", str(config_file)])
+    assert result.exit_code == 2
+    assert pass_counter == 3
+    assert "Reached maximum passes limit (3) without draining queue" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_aborts_on_fatal_error(tmp_path, monkeypatch):
+    """
+    Scenario: Lifecycle command aborts on fatal error
+    Given an unexpected exception occurs during cycle execution
+    When the error occurs with exit_when_idle=True
+    Then it must log an error and exit with code 2
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    async def mock_run_cycle_fatal(*args, **kwargs):
+        raise RuntimeError("Fatal database corruption!")
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle_fatal)
+
+    result = runner.invoke(app, ["start", "biq-playbook", "--config", str(config_file)])
+    assert result.exit_code == 2
+    assert "Worker Error" in result.stdout or "Fatal" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_start_lifecycle_pid_tracked_and_cleaned_up(tmp_path, monkeypatch):
+    """
+    Verifies that lifecycle_pid is registered in state.db during execution and unregistered upon exit.
+    """
+    import os
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    observed_pid = None
+
+    async def mock_run_cycle(project, config, state_mgr, node_name=None, silent_idle=False):
+        nonlocal observed_pid
+        observed_pid = await state_mgr.get_lifecycle_pid()
+        return False
+
+    async def mock_is_drained(project, state_mgr, node_name=None):
+        return True
+
+    monkeypatch.setattr("orchestrator.cli.run_project_cycle", mock_run_cycle)
+    monkeypatch.setattr("orchestrator.cli.is_project_queue_drained", mock_is_drained)
+
+    result = runner.invoke(app, ["start", "biq-playbook", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert observed_pid == os.getpid()
+
+    # After exit, lifecycle_pid must be unregistered
+    state_mgr = StateManager(tmp_path / "state.db")
+    assert await state_mgr.get_lifecycle_pid() is None
+
+
+def test_cli_start_invalid_node_and_project(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "biq-playbook"
+    repo: "org/biq-playbook"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+
+    # Invalid node
+    result = runner.invoke(app, ["start", "biq-playbook", "-n", "invalid_node", "--config", str(config_file)])
+    assert result.exit_code == 2
+    assert "only supports node 'devtest'" in result.stdout
+
+    # Unknown project
+    result_proj = runner.invoke(app, ["start", "unknown-proj", "--config", str(config_file)])
+    assert result_proj.exit_code == 2
+    assert "not found in configuration" in result_proj.stdout
+
+
 
 
 

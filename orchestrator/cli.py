@@ -113,6 +113,140 @@ def run_command(
     asyncio.run(_run_single_pass(project_name, node_name, config_path))
 
 
+@app.command("start")
+def start_command(
+    project_name: str = typer.Argument(
+        ...,
+        help="Target registered project name to run lifecycle on.",
+    ),
+    node_name: Optional[str] = typer.Option(
+        None,
+        "--node",
+        "-n",
+        help="Run only a specific node lifecycle ('devtest' or omitted for full lifecycle).",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+    interval: Optional[int] = typer.Option(
+        None,
+        "--interval",
+        "-i",
+        help="Polling interval in seconds between passes (overrides config setting).",
+    ),
+    max_passes: int = typer.Option(
+        50,
+        "--max-passes",
+        help="Maximum passes to execute before aborting.",
+    ),
+):
+    """Executes a dedicated project node lifecycle until the queue is completely drained."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            exit_code = pool.submit(
+                lambda: asyncio.run(_start_lifecycle(project_name, node_name, config_path, interval, max_passes))
+            ).result()
+    else:
+        exit_code = asyncio.run(_start_lifecycle(project_name, node_name, config_path, interval, max_passes))
+    raise typer.Exit(code=exit_code)
+
+
+async def _start_lifecycle(
+    project_name: str,
+    node_name: Optional[str],
+    config_path: Optional[Path],
+    interval_override: Optional[int],
+    max_passes: int = 50,
+) -> int:
+    """
+    Dedicated project node lifecycle executor.
+    Reuses _project_worker_loop with exit_when_idle=True, queue drain through pending PR CI checks,
+    scriptable exit codes (0 drained, 1 stop requested, 2 error / max passes), global stop validation,
+    and dedicated lifecycle_pid tracking.
+    """
+    clean_node = node_name.strip().lower() if node_name else None
+    if clean_node is not None and clean_node not in ("devtest",):
+        console.print(
+            f"[bold red]Configuration Error:[/bold red] 'orchestrator start' only supports node 'devtest' or omitted (full lifecycle), got '{node_name}'."
+        )
+        return 2
+
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        return 2
+
+    pinned_config_path = config.resolved_path or find_config_file(config_path)
+    config.resolved_path = pinned_config_path
+    config_holder = ConfigHolder(config)
+
+    targets = [p for p in config.projects if p.name == project_name]
+    if not targets:
+        console.print(f"[bold red]Error:[/bold red] Project '{project_name}' not found in configuration.")
+        return 2
+
+    project = targets[0]
+    if not project.enabled:
+        console.print(f"[bold yellow]Warning:[/bold yellow] Project '{project_name}' is disabled in configuration.")
+        return 2
+
+    if clean_node and not project.is_node_enabled(clean_node):
+        console.print(f"[bold yellow]Warning:[/bold yellow] Node '{clean_node}' is disabled for project '{project_name}'.")
+        return 2
+
+    setup_logger(config.settings.resolved_log_dir, config.settings.log_level)
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    # Refuse to start if global stop is active
+    if await state_manager.is_stop_requested():
+        console.print(f"[bold yellow]🛑 Stop requested or global stop active. Refusing to start lifecycle on '{project_name}'.[/bold yellow]")
+        return 1
+
+    # Dedicated lifecycle_pid tracking without overwriting main daemon PID
+    import os
+    lifecycle_pid = os.getpid()
+    await state_manager.register_lifecycle(lifecycle_pid)
+
+    interval = interval_override or config.settings.poll_interval_seconds
+    console.print(
+        f"[bold cyan]🚀 Starting dedicated lifecycle on project '[bold white]{project_name}[/bold white]' "
+        f"(Node: {clean_node or 'full lifecycle'}, Interval: {interval}s, Max Passes: {max_passes}, Lifecycle PID: {lifecycle_pid})[/bold cyan]"
+    )
+
+    try:
+        exit_code = await _project_worker_loop(
+            project=project,
+            config=config_holder,
+            state_manager=state_manager,
+            interval=interval,
+            config_path=pinned_config_path,
+            exit_when_idle=True,
+            max_passes=max_passes,
+            node_name=clean_node,
+        )
+        return exit_code
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print(f"  [yellow]🛑 [{project.name}]: Received stop signal. Terminating lifecycle gracefully...[/yellow]")
+        return 1
+    except Exception as e:
+        console.print(f"[bold red]Fatal Lifecycle Error on [{project.name}]:[/bold red] {e}")
+        _logger.error("Fatal lifecycle exception on [%s]: %s", project.name, e, exc_info=True)
+        return 2
+    finally:
+        await state_manager.unregister_lifecycle()
+
+
 def format_node_agent_spec(
     model: Optional[str] = None,
     effort: Optional[str] = None,
@@ -492,6 +626,91 @@ async def _daemon_reload_watcher(
             await asyncio.sleep(interval_seconds)
 
 
+async def is_project_queue_drained(
+    project: ProjectConfig,
+    state_manager: StateManager,
+    node_name: Optional[str] = None,
+) -> bool:
+    """
+    Evaluates whether all actionable tasks, open PRs awaiting CI, and review work
+    for the specified project and target node(s) have been completely drained.
+    Returns True if:
+      - No open PRs are awaiting CI checks (RUNNING/PENDING/PASS) or auto-merge.
+      - No PRs tagged 'needs-refactor' are awaiting remediation.
+      - No actionable tasks remain in queue for the target node(s).
+    Returns False otherwise.
+    """
+    clean_node = node_name.strip().lower() if node_name else None
+
+    # 1. Inspect SDLC items in SQLite for open PRs and pending subtasks
+    sdlc_items = await state_manager.get_sdlc_items(project.name)
+
+    # 1a. Check for open PRs awaiting CI or remediation in sdlc_items
+    for item in sdlc_items:
+        linked_pr = item.get("linked_pr")
+        if linked_pr is not None:
+            pr_status = str(item.get("pr_status") or "OPEN").upper()
+            state = str(item.get("state") or "").upper()
+            ci_details = str(item.get("pr_ci_details") or "").upper()
+            labels = str(item.get("labels") or "").lower()
+
+            if pr_status not in ("CLOSED", "MERGED") and state not in ("CLOSED", "MERGED", "DONE"):
+                if "needs-refactor" in labels:
+                    return False
+                if ci_details in ("RUNNING", "PENDING", "PASS", ""):
+                    return False
+
+    # 1b. Check open PRs via GitHub poller (Zero-Token CLI inspection)
+    try:
+        open_prs = await poller.fetch_open_prs(project.repo, limit=20)
+        for pr in open_prs:
+            pr_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in pr.get("labels", [])]
+            branch = pr.get("headRefName", "")
+            pr_state = str(pr.get("state") or "OPEN").upper()
+            if pr_state not in ("OPEN",):
+                continue
+            if "needs-refactor" in pr_labels:
+                return False
+            if "dev-implemented" in pr_labels or branch.startswith("feat/") or "issue-" in branch:
+                ci_status = poller.derive_ci_status(pr.get("statusCheckRollup"))
+                if ci_status in ("RUNNING", "PENDING", "PASS", None):
+                    return False
+            if (clean_node is None or clean_node in ("reviewer", "review")) and "needs-architect-review" in pr_labels:
+                return False
+    except Exception as e:
+        _logger.debug("[%s] Best-effort open PR inspection in queue drain predicate: %s", project.name, e)
+
+    # 2. Check for actionable tasks in queue
+    if clean_node is None or clean_node == "devtest":
+        next_task = await state_manager.get_next_devtest_task(project.name)
+        if next_task is not None:
+            return False
+
+        for item in sdlc_items:
+            item_state = str(item.get("state") or "").upper()
+            if item_state in ("CLOSED", "MERGED", "DONE"):
+                continue
+            item_labels = str(item.get("labels") or "").lower()
+            if any(b in item_labels for b in ("blocked", "status:blocked", "orchestration-failed", "status:orchestration-failed")):
+                continue
+            if item.get("parent_issue_id") is not None:
+                # Open child subtask of an active story
+                return False
+            if any(q in item_labels for q in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued", "needs-refactor")):
+                return False
+
+    if clean_node is None and project.is_node_enabled("architect"):
+        for item in sdlc_items:
+            item_state = str(item.get("state") or "").upper()
+            if item_state in ("CLOSED", "MERGED", "DONE"):
+                continue
+            item_labels = str(item.get("labels") or "").lower()
+            if "needs-triage" in item_labels or "status:needs-triage" in item_labels:
+                return False
+
+    return True
+
+
 async def _project_worker_loop(
     project: ProjectConfig,
     config: GlobalConfig | ConfigHolder,
@@ -499,7 +718,10 @@ async def _project_worker_loop(
     interval: int,
     config_path: Optional[Path] = None,
     sync_event: Optional[asyncio.Event] = None,
-) -> None:
+    exit_when_idle: bool = False,
+    max_passes: int = 50,
+    node_name: Optional[str] = None,
+) -> int:
     """
     Independent worker loop for a single project.
     Runs sequentially within this project.
@@ -507,41 +729,85 @@ async def _project_worker_loop(
     If work is performed in a pass, immediately starts the next pass (with a 1s debounce).
     Reads the active configuration from the shared ConfigHolder on every iteration.
     Only sleeps for `interval` when all nodes in this project are idle.
+    When exit_when_idle is True, evaluates queue drain predicate and exits when drained.
+    Returns:
+      0: Queue completely drained.
+      1: Stop requested or cancellation signal received.
+      2: Max passes exceeded or fatal error.
     """
+    passes_count = 0
+
     if sync_event is not None and not sync_event.is_set():
         try:
             await asyncio.wait_for(sync_event.wait(), timeout=60.0)
         except asyncio.TimeoutError:
             console.print(f"  [yellow]⚠ [{project.name}]: Label sync timed out after 60s; proceeding with first cycle.[/yellow]")
         except asyncio.CancelledError:
-            return
+            return 1
 
     while True:
         try:
             if await state_manager.is_stop_requested():
                 console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
-                break
+                return 1
+
+            if exit_when_idle and passes_count >= max_passes:
+                _logger.error("[%s] Reached maximum passes limit (%d) without draining queue.", project.name, max_passes)
+                console.print(f"[bold red]❌ [{project.name}]: Reached maximum passes limit ({max_passes}) without draining queue.[/bold red]")
+                return 2
+
+            passes_count += 1
 
             current_config = config.config if hasattr(config, "config") else config
             matching = [p for p in current_config.projects if p.name == project.name]
             current_project = matching[0] if matching else project
 
             await state_manager.cleanup_expired_locks()
-            work_done = await run_project_cycle(current_project, current_config, state_manager, silent_idle=False)
+            if node_name is not None:
+                work_done = await run_project_cycle(
+                    current_project,
+                    current_config,
+                    state_manager,
+                    node_name=node_name,
+                    silent_idle=False,
+                )
+            else:
+                work_done = await run_project_cycle(
+                    current_project,
+                    current_config,
+                    state_manager,
+                    silent_idle=False,
+                )
 
             if await state_manager.is_stop_requested():
                 console.print(f"  [yellow]🛑 [{current_project.name}]: Safe stop active. Halting worker loop...[/yellow]")
-                break
+                return 1
 
             if work_done:
                 console.print(f"[bold cyan]⚡ [{current_project.name}]: Active work completed. Starting immediate follow-up pass...[/bold cyan]")
                 await asyncio.sleep(1)
             else:
-                await asyncio.sleep(interval)
+                if exit_when_idle:
+                    drained = await is_project_queue_drained(current_project, state_manager, node_name=node_name)
+                    if drained:
+                        console.print(f"[bold green]✅ [{current_project.name}]: Queue fully drained. Lifecycle complete.[/bold green]")
+                        return 0
+                    else:
+                        if passes_count >= max_passes:
+                            _logger.error("[%s] Reached maximum passes limit (%d) without draining queue.", current_project.name, max_passes)
+                            console.print(f"[bold red]❌ [{current_project.name}]: Reached maximum passes limit ({max_passes}) without draining queue.[/bold red]")
+                            return 2
+                        console.print(f"  [dim]⏳ [{current_project.name}]: Queue not drained (pending PR CI checks or queued tasks in progress). Waiting {interval}s...[/dim]")
+                        await asyncio.sleep(interval)
+                else:
+                    await asyncio.sleep(interval)
         except asyncio.CancelledError:
-            break
+            return 1
         except Exception as e:
             console.print(f"[bold red]Worker Error on [{project.name}]:[/bold red] {e}")
+            _logger.error("Unhandled worker exception on [%s]: %s", project.name, e, exc_info=True)
+            if exit_when_idle:
+                return 2
             await asyncio.sleep(interval)
 
 
@@ -1377,21 +1643,27 @@ async def _stop_daemon(force: bool, config_path: Optional[Path]) -> None:
     await state_manager.init_db()
 
     daemon_pid = await state_manager.request_stop()
+    lifecycle_pid = await state_manager.get_lifecycle_pid()
     active_killed = AsyncHarnessAdapter.terminate_all_active()
 
-    if force and daemon_pid:
+    if force and (daemon_pid or lifecycle_pid):
         try:
             import psutil
-            proc = psutil.Process(daemon_pid)
-            for child in proc.children(recursive=True):
-                try:
-                    child.kill()
-                except Exception:
-                    pass
-            proc.kill()
-            console.print(f"[bold green]✓ Force killed daemon process (PID: {daemon_pid}) and active agent processes.[/bold green]")
+            for pid, proc_name in [(daemon_pid, "daemon"), (lifecycle_pid, "lifecycle")]:
+                if pid:
+                    try:
+                        proc = psutil.Process(pid)
+                        for child in proc.children(recursive=True):
+                            try:
+                                child.kill()
+                            except Exception:
+                                pass
+                        proc.kill()
+                        console.print(f"[bold green]✓ Force killed {proc_name} process (PID: {pid}) and active agent processes.[/bold green]")
+                    except Exception as e:
+                        console.print(f"[bold yellow]{proc_name.capitalize()} PID {pid} was not active or already terminated: {e}[/bold yellow]")
         except Exception as e:
-            console.print(f"[bold yellow]Daemon PID {daemon_pid} was not active or already terminated: {e}[/bold yellow]")
+            console.print(f"[bold yellow]Process termination error: {e}[/bold yellow]")
     else:
         console.print("[bold green]✓ Safe stop signal registered in state database.[/bold green]")
         console.print("[dim]Daemon workers will finish current step without scheduling any new nodes.[/dim]")
