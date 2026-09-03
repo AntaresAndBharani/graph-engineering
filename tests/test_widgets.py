@@ -904,5 +904,133 @@ async def test_scenario_sdlc_table_column_prioritization_and_badges(tmp_path: Pa
         assert row2[3] == "queued"
 
 
+@pytest.mark.asyncio
+async def test_scenario_sdlc_progress_widget_positional_assertions_and_cell_alignment(tmp_path: Path):
+    """
+    Scenario: SDLC progress widget positional assertions and cell alignment
+      Given SDLC items with diverse PR statuses, locked states, and tree levels
+      When the SDLC progress table is queried
+      Then the headers must match ["ID", "PR Status", "Title", "Status/Label"]
+      And row cell contents must strictly align with updated column positions
+    """
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    items = [
+        {
+            "issue_number": 600,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "Authentication Epic",
+            "state": "OPEN",
+            "labels": "architect-processed",
+        },
+        {
+            "issue_number": 601,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Running CI Task",
+            "state": "OPEN",
+            "labels": "dev-implemented",
+            "parent_issue_id": 600,
+            "linked_pr": 701,
+            "pr_status": "OPEN",
+            "pr_ci_details": "RUNNING",
+        },
+        {
+            "issue_number": 602,
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "title": "Failing CI Task",
+            "state": "OPEN",
+            "labels": "needs-refactor",
+            "parent_issue_id": 600,
+            "linked_pr": 702,
+            "pr_status": "OPEN",
+            "pr_ci_details": "FAIL",
+        },
+        {
+            "issue_number": 603,
+            "item_type": "SUBTASK",
+            "sequence_order": 3,
+            "title": "Draft PR Task",
+            "state": "OPEN",
+            "labels": "in-progress",
+            "parent_issue_id": 600,
+            "linked_pr": 703,
+            "pr_status": "DRAFT",
+        },
+        {
+            "issue_number": 604,
+            "item_type": "SUBTASK",
+            "sequence_order": 4,
+            "title": "Unlinked Queued Task",
+            "state": "OPEN",
+            "labels": "queued",
+            "parent_issue_id": 600,
+            "linked_pr": None,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("align-proj", items)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="align-proj")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+
+        # 1. Assert Headers
+        assert widget.TABLE_COLUMNS == ["ID", "PR Status", "Title", "Status/Label"]
+        assert [str(c.label) for c in widget.columns.values()] == ["ID", "PR Status", "Title", "Status/Label"]
+        assert widget.row_count == 5
+
+        # 2. Row 0: Locked Story
+        r0 = widget.get_row_at(0)
+        assert r0[0] == "#600 [LOCKED]"
+        assert r0[1] == "-"
+        assert r0[2] == "Authentication Epic"
+        assert r0[3] == "architect-processed"
+
+        # 3. Row 1: Subtask with RUNNING CI
+        r1 = widget.get_row_at(1)
+        assert r1[0] == "#601"
+        assert r1[1] == "#701 [yellow]RUNNING[/yellow]"
+        assert r1[2] == "  ├─ Running CI Task"
+        assert r1[3] == "dev-implemented"
+
+        # 4. Row 2: Subtask with FAIL CI
+        r2 = widget.get_row_at(2)
+        assert r2[0] == "#602"
+        assert r2[1] == "#702 [red]FAIL[/red]"
+        assert r2[2] == "  ├─ Failing CI Task"
+        assert r2[3] == "needs-refactor"
+
+        # 5. Row 3: Subtask with DRAFT PR
+        r3 = widget.get_row_at(3)
+        assert r3[0] == "#603"
+        assert r3[1] == "#703 [DRAFT]"
+        assert r3[2] == "  ├─ Draft PR Task"
+        assert r3[3] == "in-progress"
+
+        # 6. Row 4: Final Subtask without PR
+        r4 = widget.get_row_at(4)
+        assert r4[0] == "#604"
+        assert r4[1] == "-"
+        assert r4[2] == "  └─ Unlinked Queued Task"
+        assert r4[3] == "queued"
+
+        # 7. Test Empty State on non-existent project
+        await widget.update_project("non-existent-proj")
+        assert widget.row_count == 1
+        rempty = widget.get_row_at(0)
+        assert rempty[0] == "-"
+        assert rempty[1] == "-"
+        assert rempty[2] == "No active SDLC items"
+        assert rempty[3] == "-"
+
+
+
 
 

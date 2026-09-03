@@ -4006,6 +4006,149 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         assert str(log_view.border_title).replace(r"\[", "[") == "Live Output [biq-playbook]"
 
 
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #167: SDLC Verification Suite
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_sdlc_progress_widget_renders_columns_in_updated_order_across_dashboard_views(tmp_path: Path):
+    """
+    Scenario: SDLC progress widget renders columns in updated order across dashboard views
+      Given the dashboard is rendered in the TUI
+      When the SDLC progress table is queried
+      Then the headers must match ["ID", "PR Status", "Title", "Status/Label"]
+      And row cell contents must align with the updated column positions
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path)),
+            ProjectConfig(name="beta", repo="org/beta", local_path=str(tmp_path)),
+            ProjectConfig(name="gamma_empty", repo="org/gamma", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Project alpha items: locked story #100, subtask #101 with PASS PR, subtask #102 with MERGED PR
+    alpha_items = [
+        {
+            "issue_number": 100,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "Alpha Primary Feature Story",
+            "state": "OPEN",
+            "labels": "architect-processed",
+        },
+        {
+            "issue_number": 101,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "Alpha Subtask 1",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+            "parent_issue_id": 100,
+            "linked_pr": 201,
+            "pr_status": "OPEN",
+            "pr_ci_details": "PASS",
+        },
+        {
+            "issue_number": 102,
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "title": "Alpha Subtask 2",
+            "state": "OPEN",
+            "labels": "dev-implemented",
+            "parent_issue_id": 100,
+            "linked_pr": 202,
+            "pr_status": "MERGED",
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("alpha", alpha_items)
+
+    # Project beta items: standalone task #300
+    beta_items = [
+        {
+            "issue_number": 300,
+            "item_type": "TASK",
+            "sequence_order": 1,
+            "title": "Beta Standalone Task",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+            "linked_pr": 401,
+            "pr_status": "OPEN",
+            "pr_ci_details": "RUNNING",
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("beta", beta_items)
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        projects_table = app.query_one("#projects_table", DataTable)
+
+        # 1. Assert Headers on the queried SDLC table
+        assert sdlc_widget.TABLE_COLUMNS == ["ID", "PR Status", "Title", "Status/Label"]
+        column_labels = [str(col.label) for col in sdlc_widget.columns.values()]
+        assert column_labels == ["ID", "PR Status", "Title", "Status/Label"]
+
+        # 2. View 1: Initial project 'alpha' selected
+        assert app.selected_project == "alpha"
+        assert sdlc_widget.row_count == 3
+
+        # Row 0: Locked Parent Story #100
+        row0 = sdlc_widget.get_row_at(0)
+        assert row0[0] == "#100 [LOCKED]"
+        assert row0[1] == "-"
+        assert row0[2] == "Alpha Primary Feature Story"
+        assert row0[3] == "architect-processed"
+
+        # Row 1: Subtask #101 with PASS PR #201
+        row1 = sdlc_widget.get_row_at(1)
+        assert row1[0] == "#101"
+        assert row1[1] == "#201 [green]PASS[/green]"
+        assert row1[2] == "  ├─ Alpha Subtask 1"
+        assert row1[3] == "ready-for-dev"
+
+        # Row 2: Subtask #102 with MERGED PR #202
+        row2 = sdlc_widget.get_row_at(2)
+        assert row2[0] == "#102"
+        assert row2[1] == "#202 [blue]MERGED[/blue]"
+        assert row2[2] == "  └─ Alpha Subtask 2"
+        assert row2[3] == "dev-implemented"
+
+        # 3. View 2: Switch to project 'beta'
+        projects_table.focus()
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert app.selected_project == "beta"
+        assert sdlc_widget.row_count == 1
+        row_beta = sdlc_widget.get_row_at(0)
+        assert row_beta[0] == "#300"
+        assert row_beta[1] == "#401 [yellow]RUNNING[/yellow]"
+        assert row_beta[2] == "Beta Standalone Task"
+        assert row_beta[3] == "ready-for-dev"
+
+        # 4. View 3: Switch to empty project 'gamma_empty'
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert app.selected_project == "gamma_empty"
+        assert sdlc_widget.row_count == 1
+        row_empty = sdlc_widget.get_row_at(0)
+        assert row_empty[0] == "-"
+        assert row_empty[1] == "-"
+        assert "No active SDLC items" in str(row_empty[2])
+        assert row_empty[3] == "-"
+
+        # 5. Re-assert header stability across all view transitions
+        assert [str(col.label) for col in sdlc_widget.columns.values()] == ["ID", "PR Status", "Title", "Status/Label"]
+
+
+
 
 
 
