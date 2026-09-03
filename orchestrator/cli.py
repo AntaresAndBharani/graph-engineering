@@ -16,7 +16,7 @@ from rich.live import Live
 _logger = logging.getLogger(__name__)
 
 from orchestrator import __version__
-from orchestrator.config import GlobalConfig, load_config
+from orchestrator.config import GlobalConfig, find_config_file, load_config
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.housekeeping import sync_all_projects_labels, sync_repository_labels
@@ -31,7 +31,7 @@ from orchestrator.nodes.supervisor import (
     run_supervisor_node,
 )
 from orchestrator import poller
-from orchestrator.reloader import hot_reload_runtime
+from orchestrator.reloader import ConfigHolder, hot_reload_runtime
 
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
@@ -400,9 +400,78 @@ async def _run_single_pass(
     await asyncio.gather(*tasks)
 
 
+async def _daemon_reload_watcher(
+    config_holder: ConfigHolder,
+    state_manager: StateManager,
+    pinned_config_path: Optional[Path] = None,
+    interval_seconds: float = 1.0,
+    on_reload: Optional[Any] = None,
+) -> None:
+    """
+    Dedicated single-consumer reload watcher task running in the daemon.
+    Polls state_manager.is_reload_requested() every interval_seconds (default 1.0s).
+    Consumes reload requests, triggers hot_reload_runtime, records status and numeric
+    epoch float timestamp in daemon_control, and updates the shared ConfigHolder.
+    If reload encounters malformed config or syntax error, records last_reload_status='FAILED',
+    retains previous valid config in ConfigHolder, and clears reload_requested.
+    """
+    while True:
+        try:
+            if await state_manager.is_stop_requested():
+                break
+
+            if await state_manager.is_reload_requested():
+                _logger.info("Hot-reload signal detected by daemon reload watcher.")
+                try:
+                    new_config = hot_reload_runtime(pinned_config_path)
+                    if pinned_config_path and not new_config.resolved_path:
+                        new_config.resolved_path = pinned_config_path
+
+                    config_holder.update(new_config)
+                    enabled_count = len([p for p in new_config.projects if p.enabled])
+
+                    await state_manager.record_reload_complete(
+                        status="SUCCESS",
+                        projects_count=enabled_count,
+                        config_path=pinned_config_path,
+                        trigger="CLI IPC",
+                    )
+                    await state_manager.clear_reload_request()
+
+                    if on_reload:
+                        res = on_reload(new_config)
+                        if asyncio.iscoroutine(res):
+                            await res
+
+                    _logger.info(
+                        "In-Memory Hot-Reload Complete! (Projects: %d, Poll: %ds)",
+                        enabled_count,
+                        new_config.settings.poll_interval_seconds,
+                    )
+                except Exception as re_err:
+                    _logger.error(
+                        "Hot-Reload Error: %s. Retaining previous valid configuration.",
+                        re_err,
+                    )
+                    await state_manager.record_reload_complete(
+                        status="FAILED",
+                        projects_count=len([p for p in config_holder.config.projects if p.enabled]),
+                        config_path=pinned_config_path,
+                        trigger="CLI IPC",
+                    )
+                    await state_manager.clear_reload_request()
+
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            _logger.error("Error in daemon reload watcher: %s", e)
+            await asyncio.sleep(interval_seconds)
+
+
 async def _project_worker_loop(
     project: ProjectConfig,
-    config: GlobalConfig,
+    config: GlobalConfig | ConfigHolder,
     state_manager: StateManager,
     interval: int,
     config_path: Optional[Path] = None,
@@ -411,7 +480,7 @@ async def _project_worker_loop(
     Independent worker loop for a single project.
     Runs sequentially within this project.
     If work is performed in a pass, immediately starts the next pass (with a 1s debounce).
-    Checks for manual reload signals via SQLite IPC before each pass.
+    Reads the active configuration from the shared ConfigHolder on every iteration.
     Only sleeps for `interval` when all nodes in this project are idle.
     """
     while True:
@@ -420,34 +489,19 @@ async def _project_worker_loop(
                 console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
                 break
 
-            # In-Memory Hot-Reload Check (Deterministic IPC Signal)
-            if await state_manager.is_reload_requested():
-                console.print(f"\n  [bold cyan]🔄 [Manual Reload Requested][/bold cyan] 'orchestrator config reload' signal detected.")
-                console.print("  [dim]⚙️ Reloading in-memory configuration and runtime Python modules...[/dim]")
-                try:
-                    config = hot_reload_runtime(config_path)
-                    await state_manager.clear_reload_request()
-                    matching = [p for p in config.projects if p.name == project.name]
-                    if matching:
-                        project = matching[0]
-                    console.print(
-                        f"  [bold green]✓ In-Memory Hot-Reload Complete![/bold green] "
-                        f"[dim](Project: {project.name} | Poll: {config.settings.poll_interval_seconds}s)[/dim]"
-                    )
-                except Exception as re_err:
-                    _logger.error("Hot-Reload Error: %s. Retaining previous valid configuration.", re_err)
-                    console.print(f"  [bold red]Hot-Reload Error:[/bold red] {re_err}. Retaining previous configuration.")
-                    await state_manager.clear_reload_request()
+            current_config = config.config if hasattr(config, "config") else config
+            matching = [p for p in current_config.projects if p.name == project.name]
+            current_project = matching[0] if matching else project
 
             await state_manager.cleanup_expired_locks()
-            work_done = await run_project_cycle(project, config, state_manager, silent_idle=False)
+            work_done = await run_project_cycle(current_project, current_config, state_manager, silent_idle=False)
 
             if await state_manager.is_stop_requested():
-                console.print(f"  [yellow]🛑 [{project.name}]: Safe stop active. Halting worker loop...[/yellow]")
+                console.print(f"  [yellow]🛑 [{current_project.name}]: Safe stop active. Halting worker loop...[/yellow]")
                 break
 
             if work_done:
-                console.print(f"[bold cyan]⚡ [{project.name}]: Active work completed. Starting immediate follow-up pass...[/bold cyan]")
+                console.print(f"[bold cyan]⚡ [{current_project.name}]: Active work completed. Starting immediate follow-up pass...[/bold cyan]")
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(interval)
@@ -509,6 +563,10 @@ async def _watch_daemon_headless(
         console.print(f"[bold red]Configuration Error:[/bold red] {e}")
         raise typer.Exit(code=2)
 
+    pinned_config_path = config.resolved_path or find_config_file(config_path)
+    config.resolved_path = pinned_config_path
+    config_holder = ConfigHolder(config)
+
     logger = setup_logger(config.settings.resolved_log_dir, config.settings.log_level)
     state_manager = StateManager(config.settings.resolved_db_path)
     await state_manager.init_db()
@@ -521,6 +579,14 @@ async def _watch_daemon_headless(
 
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
+
+    # Initial daemon boot reload info
+    await state_manager.record_reload_complete(
+        status="SUCCESS",
+        projects_count=len(enabled_projects),
+        config_path=pinned_config_path,
+        trigger="Daemon Startup",
+    )
 
     console.print(Panel(
         f"[bold green]Starting Orchestrator Daemon[/bold green]\n"
@@ -545,19 +611,26 @@ async def _watch_daemon_headless(
         await state_manager.unregister_daemon()
         return
 
+    # Dedicated reload watcher task
+    watcher_task = asyncio.create_task(
+        _daemon_reload_watcher(config_holder, state_manager, pinned_config_path, interval_seconds=1.0)
+    )
+
     # Spawn concurrent worker tasks for each project
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path))
+        asyncio.create_task(_project_worker_loop(p, config_holder, state_manager, interval, config_path=pinned_config_path))
         for p in enabled_projects
     ]
 
     try:
-        await asyncio.gather(*workers)
+        await asyncio.gather(*workers, watcher_task)
     except asyncio.CancelledError:
         for w in workers:
             w.cancel()
+        watcher_task.cancel()
         console.print("[yellow]Daemon stopped by user.[/yellow]")
     finally:
+        watcher_task.cancel()
         AsyncHarnessAdapter.terminate_all_active()
         await state_manager.unregister_daemon()
 
@@ -576,6 +649,10 @@ async def _watch_daemon_tui(
         console.print(f"[bold red]Configuration Error:[/bold red] {e}")
         raise typer.Exit(code=2)
 
+    pinned_config_path = config.resolved_path or find_config_file(config_path)
+    config.resolved_path = pinned_config_path
+    config_holder = ConfigHolder(config)
+
     textual_handler = TextualLogHandler(maxlen=1000)
     logger = setup_logger(
         config.settings.resolved_log_dir,
@@ -593,6 +670,14 @@ async def _watch_daemon_tui(
     interval = interval_override or config.settings.poll_interval_seconds
     enabled_projects = [p for p in config.projects if p.enabled]
 
+    # Initial daemon boot reload info
+    await state_manager.record_reload_complete(
+        status="SUCCESS",
+        projects_count=len(enabled_projects),
+        config_path=pinned_config_path,
+        trigger="Daemon Startup",
+    )
+
     render_node_status_table(config, console_out=console)
 
     # Startup label synchronization
@@ -606,30 +691,38 @@ async def _watch_daemon_tui(
         quota_manager=quota_manager,
     )
 
+    # Dedicated reload watcher task
+    watcher_task = asyncio.create_task(
+        _daemon_reload_watcher(config_holder, state_manager, pinned_config_path, interval_seconds=1.0)
+    )
+
     if not enabled_projects:
         try:
             await app_instance.run_async()
         finally:
+            watcher_task.cancel()
             await app_instance.teardown()
             await state_manager.unregister_daemon()
         return
 
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config, state_manager, interval, config_path=config_path))
+        asyncio.create_task(_project_worker_loop(p, config_holder, state_manager, interval, config_path=pinned_config_path))
         for p in enabled_projects
     ]
     tui_task = asyncio.create_task(app_instance.run_async())
 
     try:
-        done, pending = await asyncio.wait([tui_task, *workers], return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait([tui_task, watcher_task, *workers], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
     except asyncio.CancelledError:
         for w in workers:
             w.cancel()
+        watcher_task.cancel()
         tui_task.cancel()
     finally:
+        watcher_task.cancel()
         await app_instance.teardown()
         AsyncHarnessAdapter.terminate_all_active()
         await state_manager.unregister_daemon()
@@ -1192,6 +1285,9 @@ def reload_command(
 
 
 async def _reload_daemon(config_path: Optional[Path]) -> None:
+    from datetime import datetime
+    import psutil
+
     try:
         config = load_config(config_path)
     except Exception as e:
@@ -1201,12 +1297,73 @@ async def _reload_daemon(config_path: Optional[Path]) -> None:
     state_manager = StateManager(config.settings.resolved_db_path)
     await state_manager.init_db()
 
-    daemon_pid = await state_manager.request_reload()
+    # Pre-reload epoch and daemon status inspection
+    daemon_info = await state_manager.get_daemon_info()
+    pre_epoch = 0.0
+    if "last_reload_at_epoch" in daemon_info:
+        try:
+            pre_epoch = float(daemon_info["last_reload_at_epoch"])
+        except (ValueError, TypeError):
+            pre_epoch = 0.0
+
+    registered_pid: Optional[int] = None
+    if "pid" in daemon_info and daemon_info["pid"]:
+        try:
+            registered_pid = int(daemon_info["pid"])
+        except (ValueError, TypeError):
+            registered_pid = None
+
+    daemon_alive = False
+    if registered_pid is not None:
+        try:
+            daemon_alive = psutil.pid_exists(registered_pid)
+        except Exception:
+            daemon_alive = False
+
+    await state_manager.request_reload(trigger="CLI IPC ('orchestrator config reload')")
     console.print("[bold green]✓ In-memory hot-reload signal registered in state database.[/bold green]")
-    if daemon_pid:
-        console.print(f"[dim]Active daemon (PID: {daemon_pid}) notified. It will reload configuration and Python modules on its next cycle.[/dim]")
+
+    if not daemon_alive or not registered_pid:
+        console.print("[dim]No active daemon running. Signal is queued for the next daemon startup.[/dim]")
+        return
+
+    # Daemon is active with verified PID: poll up to 2.0s for confirmation
+    poll_start = time.time()
+    ack_info = None
+    while time.time() - poll_start < 2.0:
+        await asyncio.sleep(0.1)
+        info = await state_manager.get_daemon_info()
+        epoch_val = info.get("last_reload_at_epoch")
+        if epoch_val:
+            try:
+                curr_epoch = float(epoch_val)
+                if curr_epoch > pre_epoch:
+                    ack_info = info
+                    break
+            except (ValueError, TypeError):
+                pass
+
+    if ack_info:
+        reload_ts = ack_info.get("last_reload_timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        proj_count = (
+            ack_info.get("last_reload_projects_count")
+            or ack_info.get("active_projects_count")
+            or len([p for p in config.projects if p.enabled])
+        )
+        status = ack_info.get("last_reload_status", "SUCCESS")
+        if status == "FAILED":
+            console.print(
+                f"[bold red]✗ Configuration reload FAILED in daemon (PID: {registered_pid}). Previous valid configuration retained.[/bold red]"
+            )
+        else:
+            console.print(f"[bold green]✓ Daemon PID {registered_pid} acknowledged and reloaded configuration![/bold green]")
+            console.print(f"  • Confirmed Reload Timestamp: [cyan]{reload_ts}[/cyan]")
+            console.print(f"  • Daemon PID: [cyan]{registered_pid}[/cyan]")
+            console.print(f"  • Active Project Count: [cyan]{proj_count}[/cyan]")
     else:
-        console.print("[dim]The daemon will reload configuration and Python modules on its next cycle check.[/dim]")
+        console.print(
+            f"[bold yellow]⚠️ Reload signal queued for active daemon (PID: {registered_pid}), but daemon acknowledgement timed out after 2.0s.[/bold yellow]"
+        )
 
 
 

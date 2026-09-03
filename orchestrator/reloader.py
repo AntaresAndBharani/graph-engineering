@@ -3,9 +3,54 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
-from typing import Optional
+import threading
+from typing import Any, Optional
 
-from orchestrator.config import GlobalConfig
+from orchestrator.config import GlobalConfig, ProjectConfig
+
+
+class ConfigHolder:
+    """
+    Thread-safe and async-safe container for the active GlobalConfig instance.
+    Provides atomic read and update access across background tasks and worker loops.
+    """
+
+    def __init__(self, initial_config: GlobalConfig) -> None:
+        self._lock = threading.RLock()
+        self._config: GlobalConfig = initial_config
+
+    @property
+    def config(self) -> GlobalConfig:
+        """Returns the current active GlobalConfig snapshot."""
+        with self._lock:
+            return self._config
+
+    def get(self) -> GlobalConfig:
+        """Alias for .config property."""
+        with self._lock:
+            return self._config
+
+    def update(self, new_config: GlobalConfig) -> None:
+        """Atomically updates the held GlobalConfig."""
+        with self._lock:
+            self._config = new_config
+
+    def set(self, new_config: GlobalConfig) -> None:
+        """Alias for update()."""
+        with self._lock:
+            self._config = new_config
+
+    def get_project(self, project_name: str) -> Optional[ProjectConfig]:
+        """Convenience accessor to look up a ProjectConfig by name atomically."""
+        with self._lock:
+            for p in self._config.projects:
+                if p.name == project_name:
+                    return p
+            return None
+
+    def __getattr__(self, item: str) -> Any:
+        with self._lock:
+            return getattr(self._config, item)
 
 
 def hot_reload_runtime(config_path: Optional[Path] = None) -> GlobalConfig:

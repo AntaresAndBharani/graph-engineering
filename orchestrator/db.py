@@ -281,7 +281,7 @@ class StateManager:
             )
             await db.commit()
 
-    async def request_reload(self) -> Optional[int]:
+    async def request_reload(self, trigger: str = "CLI IPC") -> Optional[int]:
         """
         Signals an in-memory hot-reload to the running daemon.
         Returns the registered daemon PID if currently active.
@@ -295,6 +295,11 @@ class StateManager:
                 "ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at;",
                 (now,),
             )
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('reload_trigger', ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;",
+                (trigger, now),
+            )
             await db.commit()
 
             cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'pid';")
@@ -305,6 +310,47 @@ class StateManager:
                 except (ValueError, TypeError):
                     return None
             return None
+
+    async def record_reload_complete(
+        self,
+        status: str = "SUCCESS",
+        projects_count: Optional[int] = None,
+        config_path: Optional[str | Path] = None,
+        trigger: str = "CLI IPC",
+        epoch: Optional[float] = None,
+    ) -> float:
+        """
+        Records the completion (success or failure) of a configuration reload in daemon_control.
+        Saves last_reload_at_epoch as a numeric float string, last_reload_status,
+        last_reload_timestamp, last_reload_trigger, and optional project count / config path.
+        Returns the epoch timestamp recorded.
+        """
+        now = epoch if epoch is not None else time.time()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+
+            entries: List[tuple[str, str]] = [
+                ("last_reload_at_epoch", str(now)),
+                ("last_reload_status", status),
+                ("last_reload_timestamp", now_str),
+                ("last_reload_trigger", trigger),
+            ]
+            if projects_count is not None:
+                entries.append(("active_projects_count", str(projects_count)))
+                entries.append(("last_reload_projects_count", str(projects_count)))
+            if config_path is not None:
+                entries.append(("last_reload_config_path", str(config_path)))
+
+            for key, val in entries:
+                await db.execute(
+                    "INSERT INTO daemon_control (key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;",
+                    (key, val, now),
+                )
+            await db.commit()
+        return now
 
     async def is_reload_requested(self) -> bool:
         """Checks whether an in-memory hot-reload has been requested."""
