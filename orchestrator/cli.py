@@ -113,17 +113,37 @@ def run_command(
     asyncio.run(_run_single_pass(project_name, node_name, config_path))
 
 
+def format_node_agent_spec(
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> str:
+    """
+    Pure, harness-agnostic formatter for node agent model and optional reasoning effort.
+    Returns '<model> (<effort>)' when effort is non-empty, '<model>' when effort is omitted,
+    or '—' (em-dash) when model is None or empty (idle/unassigned).
+    Zero harness-specific branching or hardcoded harness names.
+    """
+    if not model or not model.strip():
+        return "—"
+    clean_model = model.strip()
+    if effort and effort.strip():
+        return f"{clean_model} ({effort.strip()})"
+    return clean_model
+
+
 def render_node_status_table(config: GlobalConfig, console_out: Optional[Console] = None) -> Table:
     """
     Renders a formatted Rich table listing each node (architect, devtest, reviewer, supervisor, bau)
-    with ENABLED/DISABLED status, harness, and worktree/concurrency mode.
+    with ENABLED/DISABLED status, harness, concurrency mode, and agent model.
     """
     table = Table(title="Autonomous Node Status Registry", header_style="bold cyan")
-    table.add_column("Project", style="magenta", no_wrap=True)
+    table.add_column("Project", style="magenta", no_wrap=True, min_width=10)
+    table.add_column("Repository", style="magenta", no_wrap=True)
     table.add_column("Node", style="bold white", no_wrap=True)
-    table.add_column("Status", style="bold", no_wrap=True)
+    table.add_column("Status", style="bold", no_wrap=True, min_width=8)
     table.add_column("Harness", style="blue", no_wrap=True)
     table.add_column("Concurrency Mode", style="yellow", no_wrap=True)
+    table.add_column("Agent Model", style="cyan", no_wrap=True)
 
     default_harnesses = {
         "architect": "claude",
@@ -142,8 +162,11 @@ def render_node_status_table(config: GlobalConfig, console_out: Optional[Console
             status_str = "[bold green]ENABLED[/bold green]" if is_enabled else "[dim red]DISABLED[/dim red]"
 
             harness_str = (node_cfg.harness if node_cfg and node_cfg.harness else default_harnesses.get(node_name, "claude"))
-            if node_cfg and node_cfg.model:
-                harness_str = f"{harness_str} ({node_cfg.model})"
+
+            if is_enabled and node_cfg:
+                agent_model_str = format_node_agent_spec(node_cfg.model, node_cfg.effort)
+            else:
+                agent_model_str = "—"
 
             if node_name in ("architect", "devtest"):
                 concurrency_str = "Worktree (Concurrent)" if worktrees_on else "Serial (Primary)"
@@ -156,7 +179,7 @@ def render_node_status_table(config: GlobalConfig, console_out: Optional[Console
             else:
                 concurrency_str = "Serial"
 
-            table.add_row(project.name, node_name, status_str, harness_str, concurrency_str)
+            table.add_row(project.name, project.repo, node_name, status_str, harness_str, concurrency_str, agent_model_str)
 
     if console_out is not None:
         try:
@@ -741,7 +764,7 @@ def list_command(
     asyncio.run(_list_projects(config_path))
 
 
-async def _list_projects(config_path: Optional[Path]) -> None:
+async def _list_projects(config_path: Optional[Path]) -> Table:
     try:
         config = load_config(config_path)
     except Exception as e:
@@ -751,6 +774,11 @@ async def _list_projects(config_path: Optional[Path]) -> None:
     state_manager = StateManager(config.settings.resolved_db_path)
     await state_manager.init_db()
     paused_projects = await state_manager.get_paused_projects()
+    active_jobs = []
+    try:
+        active_jobs = await state_manager.get_active_jobs()
+    except Exception:
+        pass
 
     table = Table(title="Managed Project Repositories", header_style="bold cyan")
     table.add_column("Name", style="bold white")
@@ -759,6 +787,7 @@ async def _list_projects(config_path: Optional[Path]) -> None:
     table.add_column("Architect Harness", style="blue")
     table.add_column("DevTest Harness", style="yellow")
     table.add_column("Status", style="bold")
+    table.add_column("Agent Model", style="cyan", no_wrap=True)
 
     for p in config.projects:
         arch_cfg = p.nodes.get("architect")
@@ -772,13 +801,23 @@ async def _list_projects(config_path: Optional[Path]) -> None:
         else:
             status = "[bold green]Active[/bold green]"
 
-        table.add_row(p.name, p.repo, str(p.local_path), arch_str, dev_str, status)
+        matching_jobs = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "RUNNING"]
+        if matching_jobs:
+            active_node_type = matching_jobs[0].get("node_type")
+            node_cfg = p.nodes.get(active_node_type) if active_node_type else None
+            agent_model = format_node_agent_spec(node_cfg.model, node_cfg.effort) if node_cfg else "—"
+        else:
+            agent_model = "—"
+
+        table.add_row(p.name, p.repo, str(p.local_path), arch_str, dev_str, status, agent_model)
 
     try:
         console.print(table)
     except Exception:
         # Fallback for legacy console encodings
         console.print(str(table))
+
+    return table
 
 
 @app.command("init")
