@@ -16,12 +16,15 @@ from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
 from textual.widgets.data_table import RowDoesNotExist
 
-from rich.text import Text
-
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler, matches_node_scope
+from orchestrator.logging import (
+    ProjectLogBufferManager,
+    TextualLogHandler,
+    matches_node_scope,
+    strip_ansi,
+)
 from orchestrator.quota import QuotaManager
 from orchestrator.reloader import ConfigHolder
 from orchestrator.ui.widgets import (
@@ -141,6 +144,9 @@ class DashboardApp(App):
         )
         self._last_bottom_pane_fingerprint: Optional[str] = None
         self._last_reload_at_epoch: Optional[float] = None
+        self._last_tail_file: Optional[Path] = None
+        self._last_tail_offset: int = 0
+        self._placeholder_active: bool = False
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
         self.auto_scroll: bool = True
@@ -277,16 +283,61 @@ class DashboardApp(App):
                 )
                 and (
                     not node_name
-                    or matches_node_scope(node_name, self.buffer_manager.extract_node_name(rec))
+                    or (
+                        self.buffer_manager.extract_node_name(rec) is not None
+                        and matches_node_scope(node_name, self.buffer_manager.extract_node_name(rec))
+                    )
                 )
             ]
 
-        log_view.clear()
-        for line in lines:
-            if isinstance(line, str):
-                log_view.write(rich.markup.escape(line))
+        target_file = getattr(query_result, "target_file", None)
+        file_size = getattr(query_result, "file_size", 0)
+
+        if target_file is None and project_name:
+            try:
+                disk_res = self.buffer_manager.tail_latest_project_logs(
+                    project_name=project_name,
+                    log_dir=log_dir,
+                    max_lines=100,
+                    node_name=node_name,
+                )
+                if disk_res.target_file is not None:
+                    target_file = disk_res.target_file
+                    file_size = disk_res.file_size
+            except Exception:
+                pass
+
+        self._last_tail_file = target_file
+        self._last_tail_offset = file_size
+
+        if not lines:
+            if node_name:
+                if target_file is not None and file_size == 0:
+                    active_issue = issue_id if issue_id is not None else self.selected_issue_id
+                    if active_issue is not None:
+                        clean_issue = str(active_issue).lstrip("#")
+                        placeholder = f"⚡ Initializing {node_name} harness on Issue #{clean_issue}... Awaiting output."
+                    else:
+                        placeholder = f"⚡ Initializing {node_name} harness... Awaiting output."
+                    log_view.clear()
+                    log_view.write(rich.markup.escape(placeholder))
+                    self._placeholder_active = True
+                else:
+                    placeholder = f"No execution logs found yet for node '{node_name}'"
+                    log_view.clear()
+                    log_view.write(rich.markup.escape(placeholder))
+                    self._placeholder_active = True
             else:
-                log_view.write(line)
+                log_view.clear()
+                self._placeholder_active = False
+        else:
+            self._placeholder_active = False
+            log_view.clear()
+            for line in lines:
+                if isinstance(line, str):
+                    log_view.write(rich.markup.escape(line))
+                else:
+                    log_view.write(line)
 
     def _handle_log_record(self, record: logging.LogRecord, formatted: str) -> None:
         """Callback invoked by TextualLogHandler on new log emissions."""
@@ -299,6 +350,13 @@ class DashboardApp(App):
 
         try:
             log_view = self.query_one("#log_view", RichLog)
+            if self._placeholder_active:
+                self._placeholder_active = False
+                if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
+                    self.call_from_thread(log_view.clear)
+                else:
+                    log_view.clear()
+
             escaped = rich.markup.escape(formatted)
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
                 self.call_from_thread(log_view.write, escaped)
@@ -337,11 +395,24 @@ class DashboardApp(App):
 
         try:
             log_view = self.query_one("#log_view", RichLog)
+            if self._placeholder_active:
+                self._placeholder_active = False
+                if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
+                    self.call_from_thread(log_view.clear)
+                else:
+                    log_view.clear()
+
             escaped = rich.markup.escape(line)
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
                 self.call_from_thread(log_view.write, escaped)
             else:
                 log_view.write(escaped)
+
+            if self._last_tail_file and self._last_tail_file.exists():
+                try:
+                    self._last_tail_offset = self._last_tail_file.stat().st_size
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -612,6 +683,7 @@ class DashboardApp(App):
 
         if self.selected_project:
             await self._update_bottom_panes(self.selected_project, force=False)
+            await self._poll_active_log_file()
         else:
             try:
                 quota_widget = self.query_one(HarnessQuotaWidget)
@@ -632,6 +704,114 @@ class DashboardApp(App):
                     )
             except Exception:
                 pass
+
+    async def _poll_active_log_file(self) -> None:
+        """
+        Incremental log tailer executed on the 2.0s table refresh tick.
+        Performs offset handoff from hydrate_project_logs, reading strictly from _last_tail_offset.
+        Recovers gracefully on log rotation (FileNotFoundError or size truncation) by resetting
+        _last_tail_file and _last_tail_offset to None and 0, re-discovering the active log file on the next tick.
+        Cleanly retires any active startup placeholder when live output bytes arrive.
+        """
+        if not self.selected_project:
+            return
+
+        try:
+            log_view = self.query_one("#log_view", RichLog)
+        except Exception:
+            return
+
+        log_dir = self.config.settings.resolved_log_dir if (self.config and self.config.settings) else None
+
+        # Re-discovery on next tick if currently not tracking a target file
+        if self._last_tail_file is None:
+            if not self.selected_node:
+                return
+
+            try:
+                disk_res = self.buffer_manager.tail_latest_project_logs(
+                    project_name=self.selected_project,
+                    log_dir=log_dir,
+                    max_lines=100,
+                    node_name=self.selected_node,
+                )
+            except Exception:
+                return
+
+            if disk_res.target_file is not None and disk_res.target_file.exists():
+                self._last_tail_file = disk_res.target_file
+                if disk_res.file_size == 0:
+                    self._last_tail_offset = 0
+                    if self.selected_node:
+                        active_issue = self.selected_issue_id
+                        if active_issue is not None:
+                            clean_issue = str(active_issue).lstrip("#")
+                            placeholder = f"⚡ Initializing {self.selected_node} harness on Issue #{clean_issue}... Awaiting output."
+                        else:
+                            placeholder = f"⚡ Initializing {self.selected_node} harness... Awaiting output."
+                        log_view.clear()
+                        log_view.write(rich.markup.escape(placeholder))
+                        self._placeholder_active = True
+                else:
+                    if self._placeholder_active:
+                        log_view.clear()
+                        self._placeholder_active = False
+                    for line in disk_res.lines:
+                        log_view.write(rich.markup.escape(line))
+                    self._last_tail_offset = disk_res.file_size
+            return
+
+        target_file = self._last_tail_file
+
+        # Check for rotation / deletion / size truncation
+        try:
+            stat = target_file.stat()
+            current_size = stat.st_size
+        except FileNotFoundError:
+            self._last_tail_file = None
+            self._last_tail_offset = 0
+            return
+        except OSError:
+            if not target_file.exists():
+                self._last_tail_file = None
+                self._last_tail_offset = 0
+            return
+
+        # Detect size truncation (e.g. log rotated in place or file truncated)
+        if current_size < self._last_tail_offset:
+            self._last_tail_file = None
+            self._last_tail_offset = 0
+            return
+
+        # No new bytes written
+        if current_size == self._last_tail_offset:
+            return
+
+        # Incremental read strictly from byte offset N
+        offset = self._last_tail_offset
+        try:
+            with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(offset)
+                new_content = f.read()
+                self._last_tail_offset = f.tell()
+        except FileNotFoundError:
+            self._last_tail_file = None
+            self._last_tail_offset = 0
+            return
+        except OSError:
+            if not target_file.exists():
+                self._last_tail_file = None
+                self._last_tail_offset = 0
+            return
+
+        if new_content:
+            if self._placeholder_active:
+                log_view.clear()
+                self._placeholder_active = False
+
+            for line in new_content.splitlines():
+                clean_line = strip_ansi(line).rstrip("\r\n")
+                log_view.write(rich.markup.escape(clean_line))
 
     @on(DataTable.RowHighlighted, "#projects_table")
     async def on_project_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
