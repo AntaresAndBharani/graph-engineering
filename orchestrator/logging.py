@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import datetime
 import logging
 from pathlib import Path
@@ -10,6 +11,53 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Union
 from rich.logging import RichHandler
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+@dataclass
+class LogQueryResult:
+    """
+    Typed query result contract for project and node-scoped log queries.
+    Encapsulates retrieved lines, target log file path on disk (if located), and byte size.
+    Supports backwards-compatible iterable unpacking, length inspection, slicing, and equality comparisons.
+    """
+    lines: List[str] = field(default_factory=list)
+    target_file: Optional[Path] = None
+    file_size: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.lines, list):
+            self.lines = list(self.lines)
+        if self.target_file is not None and not isinstance(self.target_file, Path):
+            self.target_file = Path(self.target_file)
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def __len__(self) -> int:
+        return len(self.lines)
+
+    def __getitem__(self, index: Any) -> Any:
+        return self.lines[index]
+
+    def __bool__(self) -> bool:
+        return bool(self.lines)
+
+    def __contains__(self, item: Any) -> bool:
+        return item in self.lines
+
+    def __reversed__(self):
+        return reversed(self.lines)
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, LogQueryResult):
+            return (
+                self.lines == other.lines
+                and self.target_file == other.target_file
+                and self.file_size == other.file_size
+            )
+        if isinstance(other, (list, tuple)):
+            return self.lines == list(other)
+        return False
 
 
 def matches_node_scope(selected_node: Optional[str], target_node: Optional[str]) -> bool:
@@ -183,14 +231,16 @@ class ProjectLogBufferManager:
         log_dir: Optional[Union[Path, str]] = None,
         max_lines: int = 100,
         node_name: Optional[str] = None,
-    ) -> List[str]:
+    ) -> LogQueryResult:
         """
         Pure Python recursive disk-tailing fallback (pathlib.Path.rglob) reading the last max_lines (default 100)
         from the latest execution log file under <log_dir>/<project_name>/<node_name>/*.log (if node_name provided)
         or <log_dir>/<project_name>/**/*.log using bounded deque streaming.
+        Returns a typed LogQueryResult preserving target_file path and file_size metadata (including 0-byte files).
+        Enforces strict node isolation when node_name is supplied, never falling back to unfiltered project files.
         """
         if not project_name:
-            return []
+            return LogQueryResult(lines=[], target_file=None, file_size=0)
 
         resolved_log_dir: Path
         if log_dir is not None:
@@ -200,27 +250,34 @@ class ProjectLogBufferManager:
 
         target_dir = resolved_log_dir / project_name
         if not target_dir.exists() or not target_dir.is_dir():
-            return []
+            return LogQueryResult(lines=[], target_file=None, file_size=0)
 
         try:
             log_files = [p for p in target_dir.rglob("*.log") if p.is_file()]
             if not log_files:
-                return []
+                return LogQueryResult(lines=[], target_file=None, file_size=0)
 
             if node_name:
-                filtered_files = [
+                log_files = [
                     p for p in log_files
                     if matches_node_scope(node_name, p.parent.name) or matches_node_scope(node_name, p.stem)
                 ]
-                if filtered_files:
-                    log_files = filtered_files
+                if not log_files:
+                    return LogQueryResult(lines=[], target_file=None, file_size=0)
 
             latest_file = max(log_files, key=lambda p: (p.stat().st_mtime, p.name))
+            file_stat = latest_file.stat()
+            file_size = file_stat.st_size
+
+            if file_size == 0:
+                return LogQueryResult(lines=[], target_file=latest_file, file_size=0)
+
             with open(latest_file, "r", encoding="utf-8", errors="replace") as f:
                 dq: Deque[str] = deque(f, maxlen=max_lines)
-            return [strip_ansi(line).rstrip("\r\n") for line in dq]
+            lines = [strip_ansi(line).rstrip("\r\n") for line in dq]
+            return LogQueryResult(lines=lines, target_file=latest_file, file_size=file_size)
         except Exception:
-            return []
+            return LogQueryResult(lines=[], target_file=None, file_size=0)
 
     @classmethod
     def get_project_logs(
@@ -229,46 +286,55 @@ class ProjectLogBufferManager:
         log_dir: Optional[Union[Path, str]] = None,
         max_lines: int = 100,
         node_name: Optional[str] = None,
-    ) -> List[str]:
+    ) -> LogQueryResult:
         """
         Retrieves scoped historical log lines for the given project (and optional node).
         If in-memory deque has entries matching the scope via matches_node_scope, returns them.
-        If in-memory deque is empty for the requested scope and project_name is provided,
+        When node_name is supplied, untagged in-memory lines are strictly excluded.
+        If in-memory deque has no matching entries for the requested scope and project_name is provided,
         falls back to tailing disk logs.
-        If no disk logs exist or project_name is None, returns global buffer (when node_name is None) or [].
+        Enforces strict node isolation: if node_name is supplied and has no disk logs,
+        never falls back to unfiltered project files or global buffer.
         """
         if not project_name:
-            return list(cls.GLOBAL_LOG_BUFFER)
+            if node_name is not None:
+                return LogQueryResult(lines=[], target_file=None, file_size=0)
+            return LogQueryResult(lines=list(cls.GLOBAL_LOG_BUFFER), target_file=None, file_size=0)
 
         buf = cls.PROJECT_BUFFERS.get(project_name)
         if buf:
             if node_name is not None:
                 matching = [
-                    item[1] if isinstance(item, tuple) else item
+                    item[1]
                     for item in buf
-                    if isinstance(item, tuple) and matches_node_scope(node_name, item[0])
+                    if isinstance(item, tuple) and item[0] is not None and matches_node_scope(node_name, item[0])
                 ]
                 if matching:
-                    return matching
+                    return LogQueryResult(lines=matching, target_file=None, file_size=0)
             else:
-                return [item[1] if isinstance(item, tuple) else item for item in buf]
+                lines = [item[1] if isinstance(item, tuple) else item for item in buf]
+                return LogQueryResult(lines=lines, target_file=None, file_size=0)
 
-        disk_lines = cls.tail_latest_project_logs(
+        disk_result = cls.tail_latest_project_logs(
             project_name=project_name,
             log_dir=log_dir,
             max_lines=max_lines,
             node_name=node_name,
         )
-        if disk_lines:
+        if disk_result.lines:
             if project_name not in cls.PROJECT_BUFFERS:
                 cls.PROJECT_BUFFERS[project_name] = deque(maxlen=500)
-            cls.PROJECT_BUFFERS[project_name].extend((node_name, line) for line in disk_lines)
-            return disk_lines
+            cls.PROJECT_BUFFERS[project_name].extend((node_name, line) for line in disk_result.lines)
+            return disk_result
+
+        # If a 0-byte file was located on disk, preserve metadata without clearing or polluting memory
+        if disk_result.target_file is not None:
+            return disk_result
 
         if node_name is not None:
-            return []
+            return LogQueryResult(lines=[], target_file=None, file_size=0)
 
-        return list(cls.GLOBAL_LOG_BUFFER)
+        return LogQueryResult(lines=list(cls.GLOBAL_LOG_BUFFER), target_file=None, file_size=0)
 
 
 GLOBAL_LOG_BUFFER = ProjectLogBufferManager.GLOBAL_LOG_BUFFER
@@ -280,9 +346,24 @@ def tail_latest_project_logs(
     log_dir: Optional[Union[Path, str]] = None,
     max_lines: int = 100,
     node_name: Optional[str] = None,
-) -> List[str]:
-    """Module-level pure Python recursive disk-tailing fallback."""
+) -> LogQueryResult:
+    """Module-level pure Python recursive disk-tailing fallback returning LogQueryResult."""
     return ProjectLogBufferManager.tail_latest_project_logs(
+        project_name=project_name,
+        log_dir=log_dir,
+        max_lines=max_lines,
+        node_name=node_name,
+    )
+
+
+def get_project_logs(
+    project_name: Optional[str] = None,
+    log_dir: Optional[Union[Path, str]] = None,
+    max_lines: int = 100,
+    node_name: Optional[str] = None,
+) -> LogQueryResult:
+    """Module-level scoped historical log retrieval returning LogQueryResult."""
+    return ProjectLogBufferManager.get_project_logs(
         project_name=project_name,
         log_dir=log_dir,
         max_lines=max_lines,

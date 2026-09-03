@@ -810,6 +810,206 @@ def test_scenario_compound_node_log_retrieval(tmp_path: Path):
     assert "DevTest implementation" not in arch_logs
 
 
+# ---------------------------------------------------------------------------
+# Gherkin Acceptance Criteria Tests for Issue #155 (LogQueryResult Contract)
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_issue_155_typed_query_result_contract(tmp_path: Path):
+    """
+    Scenario: Typed query result contract
+      Given log querying is requested for project "biq-playbook"
+      When "tail_latest_project_logs" or "get_project_logs" executes
+      Then it must return a "LogQueryResult" instance containing "lines: List[str]", "target_file: Optional[Path]", and "file_size: int"
+      And it must support backwards-compatible iterable unpacking of lines.
+    """
+    from orchestrator.logging import (
+        LogQueryResult,
+        ProjectLogBufferManager,
+        get_project_logs,
+        tail_latest_project_logs,
+    )
+
+    ProjectLogBufferManager.reset()
+
+    # 1. Setup mock disk logs for biq-playbook
+    log_dir = tmp_path / "logs"
+    arch_dir = log_dir / "biq-playbook" / "architect"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    log_file = arch_dir / "20260903_120000_architect_issue_155.log"
+    log_content = "Line 1: Planning architecture\nLine 2: Generating INVEST decomposition\n"
+    log_file.write_text(log_content, encoding="utf-8")
+
+    # When tail_latest_project_logs executes
+    tail_res = tail_latest_project_logs("biq-playbook", log_dir=log_dir, node_name="architect")
+
+    # Then it must return a LogQueryResult instance containing lines, target_file, file_size
+    assert isinstance(tail_res, LogQueryResult)
+    assert tail_res.lines == [
+        "Line 1: Planning architecture",
+        "Line 2: Generating INVEST decomposition",
+    ]
+    assert tail_res.target_file == log_file
+    assert tail_res.file_size == log_file.stat().st_size
+
+    # And it must support backwards-compatible iterable unpacking of lines
+    line_a, line_b = tail_res
+    assert line_a == "Line 1: Planning architecture"
+    assert line_b == "Line 2: Generating INVEST decomposition"
+    assert list(tail_res) == tail_res.lines
+    assert len(tail_res) == 2
+    assert tail_res[0] == "Line 1: Planning architecture"
+    assert tail_res[-1] == "Line 2: Generating INVEST decomposition"
+    assert "Line 1: Planning architecture" in tail_res
+    assert list(reversed(tail_res)) == [
+        "Line 2: Generating INVEST decomposition",
+        "Line 1: Planning architecture",
+    ]
+    assert bool(tail_res) is True
+    assert tail_res == tail_res.lines
+    assert tail_res.lines == tail_res
+
+    # When get_project_logs executes (disk fallback)
+    ProjectLogBufferManager.reset()
+    get_res_disk = get_project_logs("biq-playbook", log_dir=log_dir, node_name="architect")
+    assert isinstance(get_res_disk, LogQueryResult)
+    assert get_res_disk.lines == tail_res.lines
+    assert get_res_disk.target_file == log_file
+    assert get_res_disk.file_size == tail_res.file_size
+
+    # When get_project_logs executes (in-memory buffer hit)
+    ProjectLogBufferManager.add_line("Line 3: Triage approved", project_name="biq-playbook", node_name="architect")
+    get_res_mem = ProjectLogBufferManager.get_project_logs("biq-playbook", node_name="architect")
+    assert isinstance(get_res_mem, LogQueryResult)
+    assert "Line 3: Triage approved" in get_res_mem.lines
+    assert get_res_mem.target_file is None
+    assert get_res_mem.file_size == 0
+    # Iterable unpacking on in-memory result
+    for line in get_res_mem:
+        assert isinstance(line, str)
+
+    # Empty result contract
+    empty_res = tail_latest_project_logs("nonexistent-project", log_dir=log_dir)
+    assert isinstance(empty_res, LogQueryResult)
+    assert empty_res.lines == []
+    assert empty_res.target_file is None
+    assert empty_res.file_size == 0
+    assert bool(empty_res) is False
+    assert len(empty_res) == 0
+    assert empty_res == []
+    assert [] == empty_res
+
+
+def test_scenario_issue_155_strict_node_scope_isolation(tmp_path: Path):
+    """
+    Scenario: Strict node scope isolation across disk and in-memory buffers
+      Given project "biq-playbook" has devtest logs on disk and untagged lines in memory
+      When "get_project_logs" is invoked with "node_name='architect'"
+      Then it must NOT return devtest logs or untagged in-memory lines
+      And it must never fall back to unfiltered project files when the requested node has no logs.
+    """
+    from orchestrator.logging import (
+        LogQueryResult,
+        ProjectLogBufferManager,
+        get_project_logs,
+        tail_latest_project_logs,
+    )
+
+    ProjectLogBufferManager.reset()
+
+    # Given project "biq-playbook" has devtest logs on disk
+    log_dir = tmp_path / "logs"
+    devtest_dir = log_dir / "biq-playbook" / "devtest"
+    devtest_dir.mkdir(parents=True, exist_ok=True)
+    devtest_file = devtest_dir / "20260903_110000_devtest_run.log"
+    devtest_file.write_text("DevTest disk line 1\nDevTest disk line 2\n", encoding="utf-8")
+
+    # And untagged lines in memory (as well as devtest lines in memory)
+    ProjectLogBufferManager.add_line("Untagged system heartbeat 1", project_name="biq-playbook")
+    ProjectLogBufferManager.add_line("Untagged system heartbeat 2", project_name="biq-playbook", node_name=None)
+    ProjectLogBufferManager.add_line("DevTest in-memory line", project_name="biq-playbook", node_name="devtest")
+
+    # When "get_project_logs" is invoked with "node_name='architect'"
+    result = get_project_logs(
+        project_name="biq-playbook",
+        log_dir=log_dir,
+        node_name="architect",
+    )
+
+    # Then it must return a LogQueryResult
+    assert isinstance(result, LogQueryResult)
+    # Then it must NOT return devtest logs or untagged in-memory lines
+    assert result.lines == []
+    assert not any("Untagged" in line for line in result.lines)
+    assert not any("DevTest" in line for line in result.lines)
+    # And it must never fall back to unfiltered project files when requested node has no logs
+    assert result.target_file is None
+    assert result.file_size == 0
+
+    # Also verify tail_latest_project_logs directly enforces strict isolation
+    tail_res = tail_latest_project_logs("biq-playbook", log_dir=log_dir, node_name="architect")
+    assert isinstance(tail_res, LogQueryResult)
+    assert tail_res.lines == []
+    assert tail_res.target_file is None
+    assert tail_res.file_size == 0
+
+
+def test_scenario_issue_155_zero_byte_active_file_metadata_preservation(tmp_path: Path):
+    """
+    Scenario: 0-byte active file metadata preservation
+      Given a freshly spawned node creates an initial 0-byte log file
+      When "tail_latest_project_logs" locates the node's log files
+      Then "LogQueryResult" must identify "target_file" with "file_size=0"
+      And empty lines must not clear existing active context unexpectedly.
+    """
+    from orchestrator.logging import (
+        LogQueryResult,
+        ProjectLogBufferManager,
+        get_project_logs,
+        tail_latest_project_logs,
+    )
+
+    ProjectLogBufferManager.reset()
+
+    # Given a freshly spawned node creates an initial 0-byte log file
+    log_dir = tmp_path / "logs"
+    arch_dir = log_dir / "biq-playbook" / "architect"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    initial_0byte_file = arch_dir / "20260903_130000_architect_issue_155.log"
+    initial_0byte_file.touch()
+
+    assert initial_0byte_file.exists()
+    assert initial_0byte_file.stat().st_size == 0
+
+    # When "tail_latest_project_logs" locates the node's log files
+    tail_result = tail_latest_project_logs("biq-playbook", log_dir=log_dir, node_name="architect")
+
+    # Then "LogQueryResult" must identify "target_file" with "file_size=0"
+    assert isinstance(tail_result, LogQueryResult)
+    assert tail_result.lines == []
+    assert tail_result.target_file == initial_0byte_file
+    assert tail_result.file_size == 0
+
+    # When "get_project_logs" is invoked on the cold start 0-byte file
+    get_result = get_project_logs("biq-playbook", log_dir=log_dir, node_name="architect")
+    assert isinstance(get_result, LogQueryResult)
+    assert get_result.lines == []
+    assert get_result.target_file == initial_0byte_file
+    assert get_result.file_size == 0
+
+    # And empty lines must not clear existing active context unexpectedly:
+    # Seed active in-memory context for another node
+    ProjectLogBufferManager.add_line("DevTest active execution line", project_name="biq-playbook", node_name="devtest")
+    # Calling get_project_logs on architect with 0-byte file on disk
+    res_arch = get_project_logs("biq-playbook", log_dir=log_dir, node_name="architect")
+    assert res_arch.target_file == initial_0byte_file
+    assert res_arch.file_size == 0
+    # Existing devtest active context in project buffer was not cleared
+    devtest_res = get_project_logs("biq-playbook", log_dir=log_dir, node_name="devtest")
+    assert devtest_res.lines == ["DevTest active execution line"]
+
+
+
 
 
 
