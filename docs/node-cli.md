@@ -26,8 +26,8 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
 │ zebra           AntaresAndBharani/zebra       Idle          Paused   14:52:10       None         —               │
 ├──────────────────────────────────────────────────┬─────────────────────────────────────────────────┤
 │ Active SDLC Items (alpha)                        │ [ Logs ]  Quota Limits  Alerts (24h)            │
-│ ID    Title                   Status   PR        │ 14:52:08 [INFO] Daemon started                  │
-│ #27   feat(ui): dashboard     dev      #32       │ 14:52:10 [INFO] [alpha] DevTest: Starting TDD   │
+│ ID    PR Status    Title                   Status│ 14:52:08 [INFO] Daemon started                  │
+│ #27   #32 [green]  feat(ui): dashboard     ready │ 14:52:10 [INFO] [alpha] DevTest: Starting TDD   │
 └──────────────────────────────────────────────────┴───── Q: Quit  R: Refresh  Space: Auto-Scroll ┘
 ```
 
@@ -43,7 +43,11 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
    - Dedicated 7th column **Agent Model** renders pure harness-agnostic specifications via `format_node_agent_spec(model, effort)` (e.g. `claude-sonnet-5 (medium)` or `gemini-3.8-flash-high`), rendering `—` for idle or unassigned project rows.
 3. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
-   - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite with prioritized column layout `[ID | PR Status | Title | Status/Label]`. The `[LOCKED]` badge is surfaced in Column 0 (ID) alongside the active parent story, and titles exceeding 45 characters are capped with ellipsis (`...`) overflow to guarantee visibility of PR badges and locked status without requiring horizontal scrolling.
+   - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite with prioritized column layout `["ID", "PR Status", "Title", "Status/Label"]`:
+     - **Column 0 (`ID`)**: Renders `#<issue_number>` with `[LOCKED]` visual badge (e.g. `#27 [LOCKED]`) when a parent story is locked by an active node, or clean `#<issue_number>` for unlocked items. Renders `-` for empty states.
+     - **Column 1 (`PR Status`)**: Prioritized ahead of Title to eliminate horizontal scrolling. Renders linked PR numbers and color-coded CI statuses (`#32 [green]PASS[/green]`, `#32 [yellow]RUNNING[/yellow]`, `#32 [red]FAIL[/red]`, `#32 [blue]MERGED[/blue]`, `#32`, or `-`).
+     - **Column 2 (`Title`)**: Renders hierarchical tree prefixes (`  ├─ `, `  └─ `) for child subtasks, capped at width 45 with ellipsis (`...`) overflow to preserve visibility of PR badges and lock states. Displays `No active SDLC items` in empty states.
+     - **Column 3 (`Status/Label`)**: Renders clean, sanitized comma-separated label strings (`ready-for-dev`, `queued`, `architect-processed`) or item state. Raw Python dictionaries (`{'name': ...}`) are completely eliminated via SQLite sanitization migration.
    - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`), quota limits (`HarnessQuotaWidget`), and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
 4. **Reactive Project Selection**:
    - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.
@@ -150,8 +154,25 @@ orchestrator start <project_name> [-n devtest] [-c CONFIG] [-i INTERVAL] [--max-
 
 **Exit Codes**:
 - `0`: Queue completely drained (all actionable tasks implemented and PR CI checks verified/merged).
-- `1`: Stop requested or global safe stop signal active.
+- `1`: Stop requested via IPC (`orchestrator stop`) or global safe stop signal active.
 - `2`: Configuration error, unhandled fatal error, or maximum passes exceeded without draining queue.
+
+**Lifecycle Execution & Queue Drain Architecture**:
+- **Reused Worker Loop**: Executes `_project_worker_loop` with `exit_when_idle=True`, immediately following up active work with a 1.0s debounce pause without waiting for the full polling interval.
+- **Queue Drain Predicate (`is_project_queue_drained`)**: Protects against premature lifecycle exits by verifying that:
+  1. No feature-branch PRs are awaiting CI checks (`RUNNING`, `PENDING`, `PASS`) or auto-merge.
+  2. No PRs tagged `needs-refactor` are awaiting remediation.
+  3. No actionable tasks remain in SQLite or GitHub queues.
+- **Dedicated Lifecycle PID Tracking**: Registers the running process under `lifecycle_pid` in SQLite `daemon_control` without overwriting main daemon PID or control flags. Force stop (`orchestrator stop --force`) terminates active lifecycle runners alongside daemon workers.
+- **Global Safe Stop Validation**: Immediately refuses to start if a global stop request is active.
+
+#### Deterministic Lowest-ID Subtask Dispatch Invariant
+To prevent out-of-order execution, race conditions, or skipped prerequisites across active development pipelines, `graph-orchestrator` enforces deterministic lowest-ID dispatch across all evaluation paths:
+- **Strict Ascending Order (`issue_number ASC`)**: When multiple subtasks are available, DevTest strictly selects the subtask with the **lowest ID (`issue_number ASC`)**, regardless of whether its current label is `ready-for-dev` or `queued`. A lower-numbered `queued` subtask is never skipped in favor of a higher-numbered `ready-for-dev` subtask.
+- **Automatic Promotion on Pickup**: When an active parent story's child subtasks are evaluated in `StateManager.get_next_devtest_task`, open child items are ordered strictly by `issue_number ASC`. If the selected candidate is labeled `queued`, DevTest automatically promotes it to `ready-for-dev` via GitHub CLI (`gh issue edit <id> --add-label ready-for-dev --remove-label queued`) upon execution.
+- **Fallback 1 Query Window & Skip-and-Continue**: When no active User Story is locked, `get_next_devtest_task` evaluates unlinked standalone tasks using a widened query window (`LIMIT 10`) searching for `(ready-for-dev OR queued)` items. It iterates through the window skipping blocked (`blocked`, `status:blocked`) or in-progress candidates, dispatching the lowest available candidate to prevent pipeline stalls.
+- **Safe Sequential Advancement**: When a subtask's PR is merged, `_advance_sequential_subtask` evaluates remaining open child subtasks, strictly excluding closed (`CLOSED`, `MERGED`, `DONE`), implemented (`dev-implemented`), in-progress (`in-progress`), blocked (`blocked`), orchestration-failed (`orchestration-failed`), and the just-merged subtask ID, promoting `min(number)` to unlock the next sequential step.
+- **Phase 3 Duplicate PR Prevention**: Before dispatching an LLM coding harness, DevTest inspects `sdlc_items.linked_pr` and queries open PRs for `feat/issue-<id>`. If an open PR already exists, it transitions immediately to awaiting Phase 2 CI verification rather than spawning a duplicate implementation harness.
 
 ---
 

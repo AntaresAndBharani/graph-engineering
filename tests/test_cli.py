@@ -1519,6 +1519,222 @@ projects:
     assert "not found in configuration" in result_proj.stdout
 
 
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #167: CLI Documentation & E2E Lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_cli_documentation_reflects_start_command_and_column_order():
+    """
+    Scenario: CLI documentation reflects start command and column order
+      Given the operator views "docs/node-cli.md"
+      Then "orchestrator start" syntax, flags, and exit codes must be documented
+      And SDLC table column order and deterministic lowest-ID dispatch must be detailed
+    """
+    doc_path = Path("docs/node-cli.md")
+    assert doc_path.exists(), "docs/node-cli.md must exist"
+
+    content = doc_path.read_text(encoding="utf-8")
+
+    # 1. "orchestrator start" syntax, arguments, and flags
+    assert "orchestrator start <project_name>" in content
+    assert "-n, --node" in content
+    assert "-c, --config" in content
+    assert "-i, --interval" in content
+    assert "--max-passes" in content
+
+    # 2. Distinct scriptable exit codes
+    assert "Exit Codes" in content
+    assert "0" in content and "drained" in content.lower()
+    assert "1" in content and "stop requested" in content.lower()
+    assert "2" in content and "error" in content.lower()
+
+    # 3. SDLC table column order
+    assert '["ID", "PR Status", "Title", "Status/Label"]' in content
+    assert "Column 0 (`ID`)" in content
+    assert "Column 1 (`PR Status`)" in content
+    assert "Column 2 (`Title`)" in content
+    assert "Column 3 (`Status/Label`)" in content
+
+    # 4. Deterministic lowest-ID dispatch detailed
+    assert "Deterministic Lowest-ID Subtask Dispatch" in content
+    assert "issue_number ASC" in content
+    assert "queued" in content and "ready-for-dev" in content
+    assert "Fallback 1" in content
+    assert "_advance_sequential_subtask" in content
+
+
+@pytest.mark.asyncio
+async def test_scenario_end_to_end_lifecycle_runs_start_command_to_completion(tmp_path, monkeypatch):
+    """
+    Scenario: End-to-end lifecycle test runs start command to completion
+      Given a mock repository with queued subtasks
+      When "orchestrator start" executes
+      Then all subtasks must be processed in ascending order (#1, #2)
+      And the process must exit with code 0 upon drain
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "mock-repo"
+    repo: "org/mock-repo"
+    local_path: "{posix_path}"
+        """,
+        encoding="utf-8",
+    )
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Seed initial SDLC items: Parent Story #100 with subtask #1 (queued) and #2 (ready-for-dev)
+    # Testing both ascending dispatch AND deterministic selection (#1 chosen before #2 despite labels)
+    initial_items = [
+        {
+            "issue_number": 100,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "Epic: Authentication Lifecycle",
+            "state": "OPEN",
+            "labels": "architect-processed",
+        },
+        {
+            "issue_number": 1,
+            "item_type": "SUBTASK",
+            "parent_issue_id": 100,
+            "sequence_order": 1,
+            "title": "Subtask 1: Schema Migration",
+            "state": "OPEN",
+            "labels": "queued",
+        },
+        {
+            "issue_number": 2,
+            "item_type": "SUBTASK",
+            "parent_issue_id": 100,
+            "sequence_order": 2,
+            "title": "Subtask 2: API Route Implementation",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("mock-repo", initial_items)
+
+    processed_order: list[int] = []
+    cycle_phase = {1: "not_started", 2: "not_started"}
+
+    async def mock_run_devtest(project, config, state_mgr):
+        # Deterministically query next task from SQLite StateManager
+        next_task_id = await state_mgr.get_next_devtest_task(project.name)
+
+        if next_task_id == 1:
+            if cycle_phase[1] == "not_started":
+                processed_order.append(1)
+                cycle_phase[1] = "pr_opened"
+                # Link PR #10 with running CI in SQLite
+                await state_mgr.sync_project_sdlc_items(
+                    project.name,
+                    [
+                        {
+                            "issue_number": 1,
+                            "linked_pr": 10,
+                            "pr_status": "OPEN",
+                            "pr_ci_details": "RUNNING",
+                            "labels": "dev-implemented",
+                        }
+                    ],
+                )
+                return True, "DevTest implemented subtask #1 and opened PR #10"
+            elif cycle_phase[1] == "pr_opened":
+                # Simulated pass where CI is still running -> returns work_done=False
+                cycle_phase[1] = "ci_verified"
+                return False, "Subtask #1 waiting for Phase 2 CI verification on PR #10"
+            elif cycle_phase[1] == "ci_verified":
+                # CI passed -> auto-merge PR #10 and close subtask #1
+                cycle_phase[1] = "merged"
+                await state_mgr.sync_project_sdlc_items(
+                    project.name,
+                    [
+                        {
+                            "issue_number": 1,
+                            "state": "CLOSED",
+                            "linked_pr": 10,
+                            "pr_status": "MERGED",
+                            "pr_ci_details": "PASS",
+                            "labels": "dev-implemented",
+                        }
+                    ],
+                )
+                return True, "DevTest auto-merged PR #10 into main."
+
+        elif next_task_id == 2:
+            if cycle_phase[2] == "not_started":
+                processed_order.append(2)
+                cycle_phase[2] = "pr_opened"
+                # Link PR #11 with running CI in SQLite
+                await state_mgr.sync_project_sdlc_items(
+                    project.name,
+                    [
+                        {
+                            "issue_number": 2,
+                            "linked_pr": 11,
+                            "pr_status": "OPEN",
+                            "pr_ci_details": "RUNNING",
+                            "labels": "dev-implemented",
+                        }
+                    ],
+                )
+                return True, "DevTest implemented subtask #2 and opened PR #11"
+            elif cycle_phase[2] == "pr_opened":
+                # CI passes immediately on next pass -> auto-merge PR #11 and close subtask #2
+                cycle_phase[2] = "merged"
+                await state_mgr.sync_project_sdlc_items(
+                    project.name,
+                    [
+                        {
+                            "issue_number": 2,
+                            "state": "CLOSED",
+                            "linked_pr": 11,
+                            "pr_status": "MERGED",
+                            "pr_ci_details": "PASS",
+                            "labels": "dev-implemented",
+                        },
+                        {
+                            "issue_number": 100,
+                            "state": "CLOSED",
+                            "labels": "architect-processed",
+                        },
+                    ],
+                )
+                return True, "DevTest auto-merged PR #11 into main."
+
+        return False, "No actionable devtest tasks remaining"
+
+    monkeypatch.setattr("orchestrator.cli.run_devtest_node", mock_run_devtest)
+
+    # Accelerate loop sleep
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr("orchestrator.cli.asyncio.sleep", lambda s: orig_sleep(0.001))
+
+    # Also mock poller.fetch_open_prs in queue drain predicate to return empty
+    async def mock_fetch_open_prs(repo, limit=20):
+        return []
+
+    monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_fetch_open_prs)
+    monkeypatch.setattr("orchestrator.poller.poll_project_sdlc_items", lambda p, s: asyncio.sleep(0))
+
+    result = runner.invoke(app, ["start", "mock-repo", "-n", "devtest", "--config", str(config_file)])
+
+    assert result.exit_code == 0
+    assert processed_order == [1, 2], f"Expected subtasks to be processed in ascending order [1, 2], got {processed_order}"
+    assert "Queue fully drained. Lifecycle complete" in result.stdout
+
+
+
 
 
 
