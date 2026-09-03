@@ -3203,7 +3203,7 @@ async def test_scenario_identity_transition_sequential_lifecycle_and_idle_recove
     )
 
     async with app.run_test() as pilot:
-        table = app.query_one("#projects_table", DataTable)
+        _ = app.query_one("#projects_table", DataTable)
         log_view = app.query_one("#log_view", RichLog)
         await pilot.pause()
 
@@ -3265,6 +3265,396 @@ def test_scenario_issue_id_plumbing_attributes():
     app2 = DashboardApp(selected_project="biq-playbook", issue_id=789)
     assert app2.selected_issue_id == 789
     assert app2.issue_id == 789
+
+
+# ---------------------------------------------------------------------------
+# Issue #157 BDD Scenarios: Seamless Offset Handoff, Incremental Log Polling,
+# Disambiguated Placeholders & Log Rotation Recovery
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_seamless_offset_handoff_prevents_duplicate_and_dropped_lines(tmp_path: Path):
+    """
+    Scenario: Seamless offset handoff prevents duplicate and dropped lines
+      Given "hydrate_project_logs" finishes reading byte offset N from the active log file
+      When the incremental tailer "_poll_active_log_file" runs on the 2.0s table refresh tick
+      Then it must begin reading strictly from byte offset N
+      And previously hydrated lines must not be duplicated in the log pane.
+    """
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    project_log_dir = logs_root / "biq-playbook" / "architect"
+    project_log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = project_log_dir / "20260903_120000_architect_run.log"
+
+    initial_content = "Line 1: triage starting\nLine 2: analyzing requirements\n"
+    log_file.write_text(initial_content, encoding="utf-8")
+    initial_byte_offset = log_file.stat().st_size
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="biq-playbook",
+                repo="BasketIQ/biq-playbook",
+                local_path=str(tmp_path),
+                nodes={"architect": NodeConfig(model="claude-sonnet-5")},
+            ),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.acquire_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+        selected_node="architect",
+        selected_issue_id=75,
+    )
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Given "hydrate_project_logs" finishes reading byte offset N from the active log file
+        assert app._last_tail_file == log_file
+        assert app._last_tail_offset == initial_byte_offset
+
+        rendered = [line.text for line in log_view.lines]
+        assert "Line 1: triage starting" in rendered
+        assert "Line 2: analyzing requirements" in rendered
+        assert len(log_view.lines) == 2
+
+        # When the incremental tailer "_poll_active_log_file" runs on the 2.0s table refresh tick
+        # (Case A: No new lines written -> offset unchanged, no duplicates)
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert app._last_tail_offset == initial_byte_offset
+        assert len(log_view.lines) == 2
+        rendered_after_idle_poll = [line.text for line in log_view.lines]
+        assert rendered_after_idle_poll.count("Line 1: triage starting") == 1
+        assert rendered_after_idle_poll.count("Line 2: analyzing requirements") == 1
+
+        # Case B: Incremental new bytes written to the active log file
+        appended_content = "Line 3: decomposing INVEST stories\nLine 4: triage complete\n"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(appended_content)
+
+        expected_total_offset = log_file.stat().st_size
+
+        # When "_poll_active_log_file" runs on the 2.0s tick
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        # Then it must begin reading strictly from byte offset N
+        assert app._last_tail_offset == expected_total_offset
+
+        # And previously hydrated lines must not be duplicated in the log pane
+        final_rendered = [line.text for line in log_view.lines]
+        assert final_rendered == [
+            "Line 1: triage starting",
+            "Line 2: analyzing requirements",
+            "Line 3: decomposing INVEST stories",
+            "Line 4: triage complete",
+        ]
+        assert final_rendered.count("Line 1: triage starting") == 1
+        assert final_rendered.count("Line 2: analyzing requirements") == 1
+        assert final_rendered.count("Line 3: decomposing INVEST stories") == 1
+        assert final_rendered.count("Line 4: triage complete") == 1
+
+
+@pytest.mark.asyncio
+async def test_scenario_disambiguated_placeholders_and_clean_retirement(tmp_path: Path):
+    """
+    Scenario: Disambiguated placeholders and clean retirement
+      Given an active node has been selected on the dashboard
+      When no log file exists on disk, the view must display "No execution logs found yet for node '{node_name}'"
+      And when a 0-byte active startup file exists, the view must display "⚡ Initializing {node_name} harness on Issue #{issue_id}... Awaiting output."
+      And when the harness emits its first byte, the placeholder must cleanly retire.
+    """
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    project_log_dir = logs_root / "biq-playbook" / "architect"
+    project_log_dir.mkdir(parents=True, exist_ok=True)
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="biq-playbook",
+                repo="BasketIQ/biq-playbook",
+                local_path=str(tmp_path),
+                nodes={
+                    "architect": NodeConfig(model="claude-sonnet-5"),
+                    "devtest": NodeConfig(model="gemini-3.8-flash-high"),
+                },
+            ),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.acquire_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+
+    # 1. Given an active node has been selected on the dashboard
+    # When no log file exists on disk, the view must display "No execution logs found yet for node '{node_name}'"
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+        selected_node="architect",
+        selected_issue_id=75,
+    )
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        assert app._last_tail_file is None
+        assert app._last_tail_offset == 0
+        assert app._placeholder_active is True
+        rendered = [line.text for line in log_view.lines]
+        assert rendered == ["No execution logs found yet for node 'architect'"]
+
+        # 2. When a 0-byte active startup file exists, the view must display "⚡ Initializing {node_name} harness on Issue #{issue_id}... Awaiting output."
+        startup_log_file = project_log_dir / "20260903_120500_architect_run.log"
+        startup_log_file.write_text("", encoding="utf-8")
+        assert startup_log_file.stat().st_size == 0
+
+        await app.hydrate_project_logs("biq-playbook", node_name="architect", issue_id=75)
+        await pilot.pause()
+
+        assert app._last_tail_file == startup_log_file
+        assert app._last_tail_offset == 0
+        assert app._placeholder_active is True
+        rendered_startup = [line.text for line in log_view.lines]
+        assert rendered_startup == ["⚡ Initializing architect harness on Issue #75... Awaiting output."]
+
+        # 3. And when the harness emits its first byte, the placeholder must cleanly retire.
+        # Subcase A: Retirement via live harness stream listener
+        stream_line = "  [biq-playbook:architect] Initializing graph-orchestrator context..."
+        app._handle_harness_stream_line(
+            project_name="biq-playbook",
+            node_name="architect",
+            line=stream_line,
+        )
+        await pilot.pause()
+
+        assert app._placeholder_active is False
+        rendered_after_stream = [line.text for line in log_view.lines]
+        assert rendered_after_stream == ["  [biq-playbook:architect] Initializing graph-orchestrator context..."]
+        assert not any("⚡ Initializing" in r for r in rendered_after_stream)
+
+        # Subcase B: Retirement via incremental tailer polling disk write
+        devtest_dir = logs_root / "biq-playbook" / "devtest"
+        devtest_dir.mkdir(parents=True, exist_ok=True)
+        devtest_log_file = devtest_dir / "20260903_121000_devtest_run.log"
+        devtest_log_file.write_text("", encoding="utf-8")
+
+        # Switch to active devtest node on issue 76
+        await state_manager.release_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+        await state_manager.acquire_lock(issue_id=76, repo="BasketIQ/biq-playbook", node_type="devtest")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node == "devtest"
+        assert app.selected_issue_id == 76
+        assert app._last_tail_file == devtest_log_file
+        assert app._last_tail_offset == 0
+        assert app._placeholder_active is True
+        assert [line.text for line in log_view.lines] == ["⚡ Initializing devtest harness on Issue #76... Awaiting output."]
+
+        # Now harness writes its first byte to the 0-byte active startup file on disk
+        first_disk_bytes = "DevTest execution: running pytest test suite\n"
+        devtest_log_file.write_text(first_disk_bytes, encoding="utf-8")
+
+        # When "_poll_active_log_file" runs on the next tick
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        # The placeholder must cleanly retire and be replaced with live output
+        assert app._placeholder_active is False
+        assert app._last_tail_offset == devtest_log_file.stat().st_size
+        rendered_after_poll = [line.text for line in log_view.lines]
+        assert rendered_after_poll == ["DevTest execution: running pytest test suite"]
+        assert not any("⚡ Initializing" in r for r in rendered_after_poll)
+
+
+@pytest.mark.asyncio
+async def test_scenario_graceful_recovery_on_log_rotation(tmp_path: Path):
+    """
+    Scenario: Graceful recovery on log rotation
+      Given an actively tailed log file is rotated or unlinked by "rotate_logs"
+      When "_poll_active_log_file" encounters "FileNotFoundError" or size truncation
+      Then it must reset tracked target file and byte offset to None and 0
+      And cleanly re-discover the active log file on the next tick.
+    """
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    project_log_dir = logs_root / "biq-playbook" / "architect"
+    project_log_dir.mkdir(parents=True, exist_ok=True)
+    initial_log_file = project_log_dir / "20260903_100000_architect_run.log"
+    initial_log_file.write_text("Active run before rotation line 1\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="biq-playbook",
+                repo="BasketIQ/biq-playbook",
+                local_path=str(tmp_path),
+                nodes={"architect": NodeConfig(model="claude-sonnet-5")},
+            ),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.acquire_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+        selected_node="architect",
+        selected_issue_id=75,
+    )
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Given an actively tailed log file
+        assert app._last_tail_file == initial_log_file
+        assert app._last_tail_offset > 0
+        assert any("Active run before rotation" in line.text for line in log_view.lines)
+
+        # ------------------------------------------------------------------
+        # Branch A: Log file unlinked by rotate_logs / file rotation
+        # ------------------------------------------------------------------
+        initial_log_file.unlink()
+        assert not initial_log_file.exists()
+
+        # When "_poll_active_log_file" encounters FileNotFoundError
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        # Then it must reset tracked target file and byte offset to None and 0
+        assert app._last_tail_file is None
+        assert app._last_tail_offset == 0
+
+        # And cleanly re-discover the active log file on the next tick
+        # Simulate new rotated log file arriving on disk
+        rotated_log_file = project_log_dir / "20260903_110000_architect_run.log"
+        new_content = "Rotated run line 1: Fresh active agent cycle\n"
+        rotated_log_file.write_text(new_content, encoding="utf-8")
+
+        # Next tick poll
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert app._last_tail_file == rotated_log_file
+        assert app._last_tail_offset == rotated_log_file.stat().st_size
+        assert any("Rotated run line 1" in line.text for line in log_view.lines)
+
+        # ------------------------------------------------------------------
+        # Branch B: Size truncation recovery (e.g. truncated in-place)
+        # ------------------------------------------------------------------
+        # File is truncated to a smaller size (e.g. 10 bytes while offset was ~45 bytes)
+        truncated_content = "Truncated\n"
+        rotated_log_file.write_text(truncated_content, encoding="utf-8")
+        assert rotated_log_file.stat().st_size < app._last_tail_offset
+
+        # When "_poll_active_log_file" encounters size truncation
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        # Then it must reset tracked target file and byte offset to None and 0
+        assert app._last_tail_file is None
+        assert app._last_tail_offset == 0
+
+        # And cleanly re-discover the active log file on the next tick
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert app._last_tail_file == rotated_log_file
+        assert app._last_tail_offset == rotated_log_file.stat().st_size
+        assert any("Truncated" in line.text for line in log_view.lines)
+
+
+@pytest.mark.asyncio
+async def test_scenario_log_rotation_integration_with_rotate_logs_utility(tmp_path: Path):
+    """
+    Scenario: End-to-end integration test of log rotation with orchestrator.logging.rotate_logs
+    """
+    from orchestrator.logging import rotate_logs
+
+    ProjectLogBufferManager.reset()
+
+    logs_root = tmp_path / "logs"
+    project_log_dir = logs_root / "biq-playbook" / "architect"
+    project_log_dir.mkdir(parents=True, exist_ok=True)
+
+    old_log = project_log_dir / "20260801_100000_architect_run.log"
+    old_log.write_text("Old log line\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="biq-playbook",
+                repo="BasketIQ/biq-playbook",
+                local_path=str(tmp_path),
+                nodes={"architect": NodeConfig(model="claude-sonnet-5")},
+            ),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.acquire_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+        selected_node="architect",
+        selected_issue_id=75,
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._last_tail_file == old_log
+
+        # Simulate age rotation: rotate_logs unlinks files older than max_age_days
+        old_mtime = 1700000000.0  # deep in the past
+        import os
+        os.utime(old_log, (old_mtime, old_mtime))
+        rotate_logs(logs_root, max_age_days=1)
+        assert not old_log.exists()
+
+        # Incremental poll detects rotation
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert app._last_tail_file is None
+        assert app._last_tail_offset == 0
+
+        # Create fresh active log file
+        fresh_log = project_log_dir / "20260903_123000_architect_run.log"
+        fresh_log.write_text("Fresh post-rotation line\n", encoding="utf-8")
+
+        # Next tick re-discovers fresh log
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert app._last_tail_file == fresh_log
+        assert app._last_tail_offset == fresh_log.stat().st_size
+
 
 
 
