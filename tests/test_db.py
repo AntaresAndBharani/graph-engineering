@@ -2412,6 +2412,97 @@ async def test_scenario_idempotent_sqlite_migration_cleans_legacy_dicts(tmp_path
     assert row_map_after[103]["labels"] == "architect-processed"
 
 
+@pytest.mark.asyncio
+async def test_get_next_devtest_task_selects_lowest_id_subtask_across_active_story(tmp_path: Path):
+    """
+    Scenario: DevTest selects lowest-ID subtask across active story
+      Given an active story has subtask #155 labeled "queued" and #156 labeled "ready-for-dev"
+      When "get_next_devtest_task" is evaluated
+      Then it must select subtask #155
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 150,
+            "title": "Active Parent Story",
+            "item_type": "STORY",
+            "state": "OPEN",
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 155,
+            "title": "Subtask 1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 150,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 2,  # Even with higher sequence_order, lowest-ID must be selected
+        },
+        {
+            "issue_number": 156,
+            "title": "Subtask 2",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 150,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 1,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    selected = await manager.get_next_devtest_task("graph-engineering")
+    assert selected == 155
+
+
+@pytest.mark.asyncio
+async def test_get_next_devtest_task_standalone_fallback_skips_blocked_and_in_progress(tmp_path: Path):
+    """
+    Scenario: Standalone fallback selects lowest unblocked task without stalling
+      Given unlinked standalone task #200 is blocked and #201 is queued
+      When "get_next_devtest_task" evaluates Fallback 1
+      Then it must skip blocked task #200 and select task #201
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 200,
+            "title": "Standalone Blocked Task",
+            "item_type": "STANDALONE",
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["status:blocked"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 201,
+            "title": "Standalone Queued Task",
+            "item_type": "STANDALONE",
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["queued"],
+            "sequence_order": 2,
+        },
+    ]
+    await manager.sync_project_sdlc_items("graph-engineering", items)
+
+    selected = await manager.get_next_devtest_task("graph-engineering")
+    assert selected == 201
+
+    # Also test when #200 is IN_PROGRESS:
+    await manager.sync_project_sdlc_items(
+        "graph-engineering",
+        [{"issue_number": 200, "state": "IN_PROGRESS", "labels": ["ready-for-dev"]}],
+    )
+    selected_after_progress = await manager.get_next_devtest_task("graph-engineering")
+    assert selected_after_progress == 201
+
+
 
 
 

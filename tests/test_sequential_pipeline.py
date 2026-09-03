@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import asyncio
+import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.nodes.architect import build_triage_prompt
-from orchestrator.nodes.devtest import _advance_parent_and_unlock_next_subtask
+from orchestrator.nodes.devtest import (
+    _advance_parent_and_unlock_next_subtask,
+    _advance_sequential_subtask,
+    run_devtest_node,
+)
 
 
 @pytest.mark.asyncio
@@ -831,5 +835,180 @@ async def test_clean_worktree_stashes_untracked_files(tmp_path: Path, monkeypatc
     assert "push" in stash_called[0]
     assert "-u" in stash_called[0]
     assert len(checkout_called) == 1
+
+
+def test_advance_sequential_subtask_selects_lowest_open_uncompleted_child():
+    """
+    Scenario: Sequential advance selects lowest open uncompleted child
+      Given subtask #154 is merged and closed
+      And remaining open subtasks are #155 (queued) and #156 (queued)
+      When "_advance_sequential_subtask" executes
+      Then it must select #155 as the next subtask to promote
+      And it must NOT select the just-closed subtask #154 or skip #155
+    """
+    children = [
+        {"number": 154, "title": "Subtask 154", "state": "CLOSED", "labels": [{"name": "dev-implemented"}]},
+        {"number": 155, "title": "Subtask 155", "state": "OPEN", "labels": [{"name": "queued"}]},
+        {"number": 156, "title": "Subtask 156", "state": "OPEN", "labels": [{"name": "queued"}]},
+    ]
+
+    selected = _advance_sequential_subtask(children, queued_label="queued", exclude_ids={154})
+    assert selected is not None
+    assert selected["number"] == 155
+
+    # Also test with state MERGED and blocked item #153
+    children_with_merged_and_blocked = [
+        {"number": 153, "title": "Subtask 153", "state": "OPEN", "labels": [{"name": "blocked"}]},
+        {"number": 154, "title": "Subtask 154", "state": "MERGED", "labels": []},
+        {"number": 155, "title": "Subtask 155", "state": "OPEN", "labels": [{"name": "queued"}]},
+        {"number": 156, "title": "Subtask 156", "state": "OPEN", "labels": [{"name": "queued"}]},
+    ]
+    selected2 = _advance_sequential_subtask(children_with_merged_and_blocked, queued_label="queued")
+    assert selected2 is not None
+    assert selected2["number"] == 155
+
+
+@pytest.mark.asyncio
+async def test_devtest_selects_lowest_id_subtask_and_promotes_upon_execution(tmp_path: Path, monkeypatch):
+    """
+    Scenario: DevTest selects lowest-ID subtask across active story and promotes it upon execution
+      Given an active story has subtask #155 labeled "queued" and #156 labeled "ready-for-dev"
+      When "get_next_devtest_task" is evaluated
+      Then it must select subtask #155
+      And DevTest must promote #155 to "ready-for-dev" upon execution
+    """
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    items = [
+        {"issue_number": 150, "title": "Active Story", "item_type": "STORY", "state": "OPEN", "sequence_order": 1},
+        {"issue_number": 155, "title": "Subtask 1", "item_type": "SUBTASK", "parent_issue_id": 150, "state": "OPEN", "labels": ["queued"], "sequence_order": 2},
+        {"issue_number": 156, "title": "Subtask 2", "item_type": "SUBTASK", "parent_issue_id": 150, "state": "OPEN", "labels": ["ready-for-dev"], "sequence_order": 1},
+    ]
+    await state_manager.sync_project_sdlc_items(project.name, items)
+
+    # 1. Verify get_next_devtest_task selects #155
+    selected_id = await state_manager.get_next_devtest_task(project.name)
+    assert selected_id == 155
+
+    # 2. Mock GitHub CLI and run run_devtest_node to assert promotion
+    config = GlobalConfig()
+    gh_calls = []
+
+    class MockProc:
+        returncode = 0
+        def __init__(self, out=b"", err=b""):
+            self.out = out
+            self.err = err
+        async def communicate(self):
+            return self.out, self.err
+        async def wait(self):
+            return 0
+
+    async def mock_subproc(*cmd, **kw):
+        gh_calls.append(list(cmd))
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "issue view 155" in cmd_str:
+            data = {"number": 155, "title": "Subtask 1", "state": "OPEN", "labels": [{"name": "queued"}]}
+            return MockProc(out=json.dumps(data).encode())
+        return MockProc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subproc)
+    monkeypatch.setattr("shutil.which", lambda cmd: "gh")
+    monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "OK")))
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_dispatch_quota", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "orchestrator.nodes.devtest.fetch_issue_by_number",
+        AsyncMock(return_value={"number": 155, "title": "Subtask 1", "state": "OPEN", "labels": [{"name": "queued"}]}),
+    )
+    monkeypatch.setattr("orchestrator.worktree.WorktreeManager.ensure_worktree", AsyncMock(return_value=tmp_path))
+    monkeypatch.setattr("orchestrator.harness.AsyncHarnessAdapter.execute", AsyncMock(return_value=0))
+
+    ok, msg = await run_devtest_node(project, config, state_manager)
+
+    # Verify #155 was promoted (add-label ready-for-dev, remove-label queued)
+    promoted = any("issue" in c and "edit" in c and "155" in c and "ready-for-dev" in c for c in gh_calls)
+    assert promoted is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_pr_prevention_in_phase_3(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Duplicate PR prevention in Phase 3
+      Given subtask #155 has an open PR or linked_pr in sdlc_items
+      When DevTest Phase 3 evaluates the subtask
+      Then it must NOT re-dispatch an LLM implementation harness
+      And it must wait for Phase 2 CI verification
+    """
+    project = ProjectConfig(
+        name="graph-engineering",
+        repo="AntaresAndBharani/graph-engineering",
+        local_path=str(tmp_path),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Case A: linked_pr in sdlc_items
+    items = [
+        {"issue_number": 150, "title": "Active Story", "item_type": "STORY", "state": "OPEN"},
+        {
+            "issue_number": 155,
+            "title": "Subtask 1",
+            "item_type": "SUBTASK",
+            "parent_issue_id": 150,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "linked_pr": 42,
+        },
+    ]
+    await state_manager.sync_project_sdlc_items(project.name, items)
+
+    config = GlobalConfig()
+    mock_execute = AsyncMock(return_value=0)
+    monkeypatch.setattr("orchestrator.harness.AsyncHarnessAdapter.execute", mock_execute)
+    monkeypatch.setattr("orchestrator.nodes.devtest.verify_git_safety", AsyncMock(return_value=(True, "OK")))
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_dispatch_quota", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "orchestrator.nodes.devtest.fetch_issue_by_number",
+        AsyncMock(return_value={"number": 155, "title": "Subtask 1", "state": "OPEN", "labels": [{"name": "ready-for-dev"}]}),
+    )
+
+    ok, msg = await run_devtest_node(project, config, state_manager)
+    assert ok is False
+    assert "waiting for phase 2 ci verification" in msg.lower() or "open pr #42" in msg.lower()
+    assert mock_execute.call_count == 0
+
+    # Case B: open PR exists on GitHub (headRefName feat/issue-155) even if linked_pr was None
+    await state_manager.sync_project_sdlc_items(
+        project.name,
+        [{"issue_number": 155, "linked_pr": None}],
+    )
+    open_pr = {
+        "number": 99,
+        "title": "feat: Subtask 1",
+        "headRefName": "feat/issue-155",
+        "body": "Closes #155",
+        "labels": [{"name": "dev-implemented"}],
+    }
+
+    async def mock_fetch_prs(repo, label=None, limit=20):
+        if label == "needs-refactor":
+            return []
+        return [open_pr]
+
+    monkeypatch.setattr("orchestrator.nodes.devtest.fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr("orchestrator.nodes.devtest.check_pr_ci_status", AsyncMock(return_value=("PENDING", "running")))
+
+    ok_b, msg_b = await run_devtest_node(project, config, state_manager)
+    assert ok_b is False
+    assert mock_execute.call_count == 0
+    assert "open pr #99" in msg_b.lower()
 
 
