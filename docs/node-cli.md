@@ -43,7 +43,7 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
    - Dedicated 7th column **Agent Model** renders pure harness-agnostic specifications via `format_node_agent_spec(model, effort)` (e.g. `claude-sonnet-5 (medium)` or `gemini-3.8-flash-high`), rendering `—` for idle or unassigned project rows.
 3. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
-   - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite.
+   - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite with prioritized column layout `[ID | PR Status | Title | Status/Label]`. The `[LOCKED]` badge is surfaced in Column 0 (ID) alongside the active parent story, and titles exceeding 45 characters are capped with ellipsis (`...`) overflow to guarantee visibility of PR badges and locked status without requiring horizontal scrolling.
    - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`), quota limits (`HarnessQuotaWidget`), and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
 4. **Reactive Project Selection**:
    - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.

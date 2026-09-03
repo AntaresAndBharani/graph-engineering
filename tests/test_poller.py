@@ -804,5 +804,75 @@ async def test_scenario_label_taxonomy_dual_format_resolution(tmp_path: Path, mo
     assert item_map[4]["parent_issue_id"] == 3
 
 
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #164: Clean Label Persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_clean_label_persistence_from_github_objects(tmp_path: Path, monkeypatch):
+    """
+    Scenario: Clean label persistence and idempotent migration
+      Given GitHub returns issue labels as structured objects
+      When "poll_project_sdlc_items" syncs labels to SQLite
+      Then "sdlc_items.labels" must store clean comma-separated label names
+      And raw Python dict representations must never be persisted in SQLite
+    """
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    project = ProjectConfig(
+        name="clean-labels-proj",
+        repo="org/clean-labels-proj",
+        local_path=tmp_path / "clean-labels-proj",
+    )
+
+    mock_issues = [
+        {
+            "number": 10,
+            "title": "Story with multiple structured label objects",
+            "state": "OPEN",
+            "labels": [
+                {"id": "LA_1", "name": "architect-processed", "color": "0075ca"},
+                {"id": "LA_2", "name": "enhancement", "color": "a2eeef"},
+            ],
+            "body": "Story body",
+            "updatedAt": "2026-09-03T18:00:00Z",
+        },
+        {
+            "number": 11,
+            "title": "Subtask with single structured label object",
+            "state": "OPEN",
+            "labels": [{"id": "LA_3", "name": "ready-for-dev", "color": "0e8a16"}],
+            "body": "Subtask\nParent: #10",
+            "updatedAt": "2026-09-03T18:05:00Z",
+        },
+    ]
+
+    monkeypatch.setattr(poller, "fetch_all_open_issues", AsyncMock(return_value=mock_issues))
+    monkeypatch.setattr(poller, "fetch_open_prs", AsyncMock(return_value=[]))
+
+    items = await poller.poll_project_sdlc_items(project, state_manager)
+
+    # 1. Returned items have clean label strings
+    assert items[0]["labels"] == "architect-processed, enhancement"
+    assert "{" not in items[0]["labels"]
+    assert items[1]["labels"] == "ready-for-dev"
+    assert "{" not in items[1]["labels"]
+
+    # 2. Persisted SQLite records store clean comma-separated label names
+    stored = await state_manager.get_sdlc_items("clean-labels-proj")
+    stored_map = {item["issue_number"]: item for item in stored}
+
+    assert stored_map[10]["labels"] == "architect-processed, enhancement"
+    assert "{" not in stored_map[10]["labels"]
+    assert "dict" not in stored_map[10]["labels"]
+
+    assert stored_map[11]["labels"] == "ready-for-dev"
+    assert "{" not in stored_map[11]["labels"]
+    assert "dict" not in stored_map[11]["labels"]
+
+
 
 

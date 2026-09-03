@@ -8,8 +8,10 @@ import shutil
 import time
 from typing import Any, Dict, List, Optional
 from orchestrator.config import GlobalConfig, ProjectConfig
-from orchestrator.db import StateManager
+from orchestrator.db import StateManager, sanitize_labels
 from orchestrator.quota import QuotaCheckResult, QuotaManager
+
+normalize_labels = sanitize_labels
 
 _logger = logging.getLogger(__name__)
 
@@ -319,9 +321,10 @@ async def poll_project_sdlc_items(
         parent_match = re.search(r"Parent:\s*#(\d+)", body, re.IGNORECASE)
         parent_issue_id = int(parent_match.group(1)) if parent_match else None
 
-        # Extract label names for deterministic classification
-        lbl_names = [l.get("name", "") if isinstance(l, dict) else str(l) for l in labels]
-        lbl_lower = [l.lower() for l in lbl_names]
+        # Extract label names for deterministic classification and clean persistence
+        clean_labels = normalize_labels(labels)
+        lbl_names = [lbl.strip() for lbl in clean_labels.split(",") if lbl.strip()]
+        lbl_lower = [lbl.lower() for lbl in lbl_names]
 
         # Determine item_type
         if parent_issue_id:
@@ -349,7 +352,7 @@ async def poll_project_sdlc_items(
             "item_type": item_type,
             "title": title,
             "state": state,
-            "labels": labels,
+            "labels": clean_labels,
             "linked_pr": linked_pr,
             "pr_status": pr_status,
             "pr_ci_details": pr_ci_details,

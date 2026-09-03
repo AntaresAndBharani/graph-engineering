@@ -107,24 +107,24 @@ async def test_scenario_hierarchical_sdlc_tree_rendering_multi_child(tmp_path: P
 
         # Row 0: Root Story #454
         row0 = widget.get_row_at(0)
-        assert row0[0] == "#454"
-        assert row0[1] == "Email Password Setup"
-        assert row0[2] == "[LOCKED] architect-processed"
-        assert row0[3] == "-"
+        assert row0[0] == "#454 [LOCKED]"
+        assert row0[1] == "-"
+        assert row0[2] == "Email Password Setup"
+        assert row0[3] == "architect-processed"
 
         # Row 1: Subtask #455 (First child -> ├─ prefix)
         row1 = widget.get_row_at(1)
         assert row1[0] == "#455"
-        assert row1[1] == "  ├─ Extract modular dialog"
-        assert row1[2] == "dev-implemented"
-        assert "[blue]MERGED[/blue]" in row1[3]
+        assert "[blue]MERGED[/blue]" in row1[1]
+        assert row1[2] == "  ├─ Extract modular dialog"
+        assert row1[3] == "dev-implemented"
 
         # Row 2: Subtask #456 (Last child -> └─ prefix)
         row2 = widget.get_row_at(2)
         assert row2[0] == "#456"
-        assert row2[1] == "  └─ Sanitize email input"
-        assert row2[2] == "ready-for-dev"
-        assert row2[3] == "-"
+        assert row2[1] == "-"
+        assert row2[2] == "  └─ Sanitize email input"
+        assert row2[3] == "ready-for-dev"
 
 
 @pytest.mark.asyncio
@@ -164,9 +164,9 @@ async def test_sdlc_progress_widget_tree_prefix_single_child(tmp_path: Path):
     async with app.run_test() as _:
         widget = app.query_one(SDLCProgressWidget)
         assert widget.row_count == 2
-        assert widget.get_row_at(0)[0] == "#100"
+        assert "#100" in widget.get_row_at(0)[0]
         assert widget.get_row_at(1)[0] == "#101"
-        assert widget.get_row_at(1)[1] == "  └─ Sole Subtask"
+        assert widget.get_row_at(1)[2] == "  └─ Sole Subtask"
 
 
 @pytest.mark.asyncio
@@ -193,9 +193,9 @@ async def test_sdlc_progress_widget_tree_prefix_three_children(tmp_path: Path):
     async with app.run_test() as _:
         widget = app.query_one(SDLCProgressWidget)
         assert widget.row_count == 4
-        assert widget.get_row_at(1)[1] == "  ├─ Step 1"
-        assert widget.get_row_at(2)[1] == "  ├─ Step 2"
-        assert widget.get_row_at(3)[1] == "  └─ Step 3"
+        assert widget.get_row_at(1)[2] == "  ├─ Step 1"
+        assert widget.get_row_at(2)[2] == "  ├─ Step 2"
+        assert widget.get_row_at(3)[2] == "  └─ Step 3"
 
 
 @pytest.mark.asyncio
@@ -253,13 +253,13 @@ async def test_scenario_smart_visibility_prevents_orphaned_subtask_loss_ui(tmp_p
         assert widget.row_count >= 2
         root_row = widget.get_row_at(0)
         assert root_row[0] == "#454"
-        assert root_row[1] == "Email Password Setup"
+        assert root_row[2] == "Email Password Setup"
 
         # Check subtasks under root
         sub_row = widget.get_row_at(2)
         assert sub_row[0] == "#456"
-        assert "Sanitize email input" in sub_row[1]
-        assert sub_row[2] == "ready-for-dev"
+        assert "Sanitize email input" in sub_row[2]
+        assert sub_row[3] == "ready-for-dev"
 
 
 @pytest.mark.asyncio
@@ -302,7 +302,7 @@ async def test_scenario_pr_status_badge_display(tmp_path: Path):
         widget = app.query_one(SDLCProgressWidget)
         row1 = widget.get_row_at(1)
         assert row1[0] == "#455"
-        assert row1[3] == "#459 [green]PASS[/green]"
+        assert row1[1] == "#459 [green]PASS[/green]"
 
 
 @pytest.mark.asyncio
@@ -359,8 +359,8 @@ async def test_scenario_cursor_stability_across_refresh_cycle(tmp_path: Path, mo
         # Verify cursor position is maintained
         assert widget.cursor_row == 1
         assert widget.row_count == 3
-        assert widget.get_row("20")[1] == "Story 20 (Active)"
-        assert widget.get_row("20")[3] == "#100 [green]PASS[/green]"
+        assert widget.get_row("20")[2] == "Story 20 (Active)"
+        assert widget.get_row("20")[1] == "#100 [green]PASS[/green]"
 
 
 @pytest.mark.asyncio
@@ -470,32 +470,38 @@ async def test_scenario_sdlc_widget_shows_active_lock(tmp_path: Path):
 
         # Row 0: Story #90 (Active Locked Story)
         row0 = widget.get_row_at(0)
-        assert row0[0] == "#90"
-        assert row0[1] == "Active Locked Story A"
-        assert "[LOCKED]" in row0[2]
-        assert row0[2] == "[LOCKED] architect-processed"
+        assert row0[0] == "#90 [LOCKED]"
+        assert "[LOCKED]" in row0[0]
+        assert row0[1] == "-"
+        assert row0[2] == "Active Locked Story A"
+        assert row0[3] == "architect-processed"
+        assert "[LOCKED]" not in row0[3]
 
         # Row 1: Subtask #93 (No locked badge)
         row1 = widget.get_row_at(1)
         assert row1[0] == "#93"
-        assert "[LOCKED]" not in row1[2]
+        assert "[LOCKED]" not in row1[0]
+        assert "[LOCKED]" not in row1[3]
 
         # Row 2: Subtask #94 (No locked badge)
         row2 = widget.get_row_at(2)
         assert row2[0] == "#94"
-        assert "[LOCKED]" not in row2[2]
+        assert "[LOCKED]" not in row2[0]
+        assert "[LOCKED]" not in row2[3]
 
         # Row 3: Story #95 (Concurrently open story -> NO locked badge)
         row3 = widget.get_row_at(3)
         assert row3[0] == "#95"
-        assert row3[1] == "Concurrently Open Story B"
-        assert "[LOCKED]" not in row3[2]
-        assert row3[2] == "architect-processed"
+        assert "[LOCKED]" not in row3[0]
+        assert row3[2] == "Concurrently Open Story B"
+        assert row3[3] == "architect-processed"
+        assert "[LOCKED]" not in row3[3]
 
         # Row 4: Subtask #98 (No locked badge)
         row4 = widget.get_row_at(4)
         assert row4[0] == "#98"
-        assert "[LOCKED]" not in row4[2]
+        assert "[LOCKED]" not in row4[0]
+        assert "[LOCKED]" not in row4[3]
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +799,109 @@ async def test_scenario_non_blocking_refresh_preserves_cursor_stability(tmp_path
         assert "[bold red]" in str(row_claude_updated[1])
         assert "200k / 5.0M (4%)" in str(row_claude_updated[1])
         assert '"proj-x": 100%' in str(row_claude_updated[5])
+
+
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #164: SDLC Table Column Prioritization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_sdlc_table_column_prioritization_and_badges(tmp_path: Path):
+    """
+    Scenario: SDLC table displays PR Status as second column and preserves badges
+      Given the dashboard displays the SDLC items table
+      When the table is rendered
+      Then column 0 must be "ID" (with "[LOCKED]" badge if active)
+      And column 1 must be "PR Status"
+      And column 2 must be "Title" (capped at width 45 with ellipsis)
+      And column 3 must be "Status/Label"
+      And PR badges and locked status must be visible without horizontal scrolling
+    """
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    items = [
+        {
+            "issue_number": 500,
+            "item_type": "STORY",
+            "sequence_order": 1,
+            "title": "A Very Long Epic Parent Story Title That Surely Exceeds Forty Five Characters In Total Length",
+            "state": "OPEN",
+            "labels": "architect-processed",
+        },
+        {
+            "issue_number": 501,
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+            "title": "A Very Long Subtask Title That Exceeds Forty Five Characters For Truncation",
+            "state": "OPEN",
+            "labels": "ready-for-dev",
+            "parent_issue_id": 500,
+            "linked_pr": 555,
+            "pr_status": "OPEN",
+            "pr_ci_details": "PASS",
+        },
+        {
+            "issue_number": 502,
+            "item_type": "SUBTASK",
+            "sequence_order": 2,
+            "title": "Short Task",
+            "state": "OPEN",
+            "labels": "queued",
+            "parent_issue_id": 500,
+            "linked_pr": 556,
+            "pr_status": "MERGED",
+        },
+    ]
+    await state_manager.sync_project_sdlc_items("col-test-proj", items)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(state_manager=state_manager, project_name="col-test-proj")
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+
+        # 1. Assert Column Order
+        assert widget.TABLE_COLUMNS == ["ID", "PR Status", "Title", "Status/Label"]
+        column_labels = [str(col.label) for col in widget.columns.values()]
+        assert column_labels == ["ID", "PR Status", "Title", "Status/Label"]
+
+        assert widget.row_count == 3
+
+        # 2. Row 0: Active Locked Story #500
+        row0 = widget.get_row_at(0)
+        assert row0[0] == "#500 [LOCKED]"
+        assert "[LOCKED]" in row0[0]
+        assert row0[1] == "-"
+        # Title capped at 45 with ellipsis
+        assert len(row0[2]) == 45
+        assert row0[2].endswith("...")
+        assert row0[2] == "A Very Long Epic Parent Story Title That S..."
+        assert row0[3] == "architect-processed"
+        assert "[LOCKED]" not in row0[3]
+
+        # 3. Row 1: Subtask #501 with PR badge
+        row1 = widget.get_row_at(1)
+        assert row1[0] == "#501"
+        assert "[LOCKED]" not in row1[0]
+        assert row1[1] == "#555 [green]PASS[/green]"
+        # Title capped at 45 with ellipsis
+        assert len(row1[2]) == 45
+        assert row1[2].endswith("...")
+        assert row1[2].startswith("  ├─ ")
+        assert row1[3] == "ready-for-dev"
+
+        # 4. Row 2: Subtask #502 with merged PR badge and short title
+        row2 = widget.get_row_at(2)
+        assert row2[0] == "#502"
+        assert row2[1] == "#556 [blue]MERGED[/blue]"
+        assert row2[2] == "  └─ Short Task"
+        assert len(row2[2]) <= 45
+        assert not row2[2].endswith("...")
+        assert row2[3] == "queued"
 
 
 

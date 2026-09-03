@@ -491,22 +491,22 @@ async def test_sdlc_progress_widget_renders_items(tmp_path: Path):
     app = TestApp()
     async with app.run_test() as _:
         widget = app.query_one(SDLCProgressWidget)
-        assert widget.TABLE_COLUMNS == ["ID", "Title", "Status/Label", "PR Status"]
+        assert widget.TABLE_COLUMNS == ["ID", "PR Status", "Title", "Status/Label"]
         column_labels = [str(col.label) for col in widget.columns.values()]
-        assert column_labels == ["ID", "Title", "Status/Label", "PR Status"]
+        assert column_labels == ["ID", "PR Status", "Title", "Status/Label"]
 
         assert widget.row_count == 2
         row0 = widget.get_row_at(0)
         assert row0[0] == "#42"
-        assert row0[1] == "feat(core): implement feature"
-        assert row0[2] == "ready-for-dev"
-        assert row0[3] == "#105"
+        assert row0[1] == "#105"
+        assert row0[2] == "feat(core): implement feature"
+        assert row0[3] == "ready-for-dev"
 
         row1 = widget.get_row_at(1)
         assert row1[0] == "#43"
-        assert row1[1] == "fix(core): fix bug"
-        assert row1[2] == "needs-architect-review"
-        assert row1[3] == "-"
+        assert row1[1] == "-"
+        assert row1[2] == "fix(core): fix bug"
+        assert row1[3] == "needs-architect-review"
 
 
 @pytest.mark.asyncio
@@ -531,7 +531,7 @@ async def test_sdlc_progress_widget_empty_state(tmp_path: Path):
         widget = app.query_one(SDLCProgressWidget)
         assert widget.row_count == 1
         row = widget.get_row_at(0)
-        assert "No active SDLC items" in str(row[1])
+        assert "No active SDLC items" in str(row[2])
 
 
 @pytest.mark.asyncio
@@ -563,12 +563,12 @@ async def test_sdlc_progress_widget_dynamic_project_update(tmp_path: Path):
         await widget.update_project("p2")
         assert widget.row_count == 1
         assert widget.get_row_at(0)[0] == "#2"
-        assert widget.get_row_at(0)[3] == "#50"
+        assert widget.get_row_at(0)[1] == "#50"
 
         # Switch to non-existent project
         await widget.update_project("p3")
         assert widget.row_count == 1
-        assert "No active SDLC items" in str(widget.get_row_at(0)[1])
+        assert "No active SDLC items" in str(widget.get_row_at(0)[2])
 
 
 @pytest.mark.asyncio
@@ -740,7 +740,7 @@ async def test_dashboard_no_project_selected_empty_state(tmp_path: Path):
 
         # Before any project row selection, both widgets show graceful empty states
         assert sdlc_widget.row_count == 1
-        assert "No active SDLC items" in str(sdlc_widget.get_row_at(0)[1])
+        assert "No active SDLC items" in str(sdlc_widget.get_row_at(0)[2])
 
         assert alerts_widget.row_count == 1
         assert "No anomalies in last 24h" in str(alerts_widget.get_row_at(0)[2])
@@ -749,10 +749,11 @@ async def test_dashboard_no_project_selected_empty_state(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: Path):
     """
-    Scenario: Reactive project selection updates SDLC pane
-    Given multiple projects are listed in the top ProjectStatusTable
-    When the user highlights a project row via Up/Down arrow keys (DataTable.RowHighlighted)
-    Then SDLCProgressWidget immediately re-queries local SQLite and displays that project's active issues/PRs
+    Scenario: Reactive Project Selection Updates SDLC Pane
+      Given the dashboard is running with multiple configured projects ("alpha", "beta")
+      When the user selects a project in the Projects DataTable
+      Then SDLCProgressWidget immediately re-queries local SQLite and displays that project's active issues/PRs
+      And preserves the visual state without screen flicker.
     """
     config = GlobalConfig(
         projects=[
@@ -763,39 +764,24 @@ async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: 
     state_manager = StateManager(tmp_path / "state.db")
     await state_manager.init_db()
 
-    # Seed SDLC items for alpha and beta
+    # Populate SDLC items for both projects
     await state_manager.sync_project_sdlc_items(
         "alpha",
-        [
-            {
-                "issue_number": 101,
-                "title": "feat(core): alpha feature",
-                "state": "OPEN",
-                "labels": "ready-for-dev",
-                "linked_pr": 201,
-            }
-        ],
+        [{"issue_number": 101, "title": "feat(core): alpha feature", "labels": "ready-for-dev", "linked_pr": 201}],
     )
     await state_manager.sync_project_sdlc_items(
         "beta",
-        [
-            {
-                "issue_number": 102,
-                "title": "fix(core): beta bugfix",
-                "state": "OPEN",
-                "labels": "needs-architect-review",
-                "linked_pr": None,
-            }
-        ],
+        [{"issue_number": 102, "title": "fix(core): beta bugfix", "labels": "needs-architect-review", "linked_pr": None}],
     )
 
     app = DashboardApp(config=config, state_manager=state_manager)
     async with app.run_test() as pilot:
-        table = app.query_one("#projects_table", DataTable)
+        await pilot.pause()
         sdlc_widget = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        table = app.query_one("#projects_table", DataTable)
         table.focus()
 
-        # Highlight row 1 (beta) via Down arrow
+        # Navigate Down to select row 1 (beta)
         await pilot.press("down")
         await pilot.pause()
 
@@ -803,9 +789,9 @@ async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: 
         assert sdlc_widget.row_count == 1
         row_beta = sdlc_widget.get_row_at(0)
         assert row_beta[0] == "#102"
-        assert row_beta[1] == "fix(core): beta bugfix"
-        assert row_beta[2] == "needs-architect-review"
-        assert row_beta[3] == "-"
+        assert row_beta[1] == "-"
+        assert row_beta[2] == "fix(core): beta bugfix"
+        assert row_beta[3] == "needs-architect-review"
 
         # Highlight row 0 (alpha) via Up arrow
         await pilot.press("up")
@@ -815,9 +801,9 @@ async def test_dashboard_reactive_project_selection_updates_sdlc_pane(tmp_path: 
         assert sdlc_widget.row_count == 1
         row_alpha = sdlc_widget.get_row_at(0)
         assert row_alpha[0] == "#101"
-        assert row_alpha[1] == "feat(core): alpha feature"
-        assert row_alpha[2] == "ready-for-dev"
-        assert row_alpha[3] == "#201"
+        assert row_alpha[1] == "#201"
+        assert row_alpha[2] == "feat(core): alpha feature"
+        assert row_alpha[3] == "ready-for-dev"
 
 
 @pytest.mark.asyncio
@@ -1343,8 +1329,8 @@ async def test_dashboard_reactive_and_stable_project_selection_for_child_panes(t
 
         assert app.selected_project == "graph-engineering"
         assert sdlc_widget.row_count == 1
-        assert sdlc_widget.get_row("71")[1] == "In-Place Diffing"
-        assert sdlc_widget.get_row("71")[3] == "#72"
+        assert sdlc_widget.get_row("71")[2] == "In-Place Diffing"
+        assert sdlc_widget.get_row("71")[1] == "#72"
 
         assert alerts_widget.row_count == 1
         assert alerts_widget.get_row_at(0)[2] == "HarnessTimeout"
@@ -1381,7 +1367,7 @@ async def test_dashboard_reactive_and_stable_project_selection_for_child_panes(t
         # Because fingerprint changed, SDLC items re-queried and updated in child pane
         assert sdlc_spy.call_count >= 1
         assert sdlc_widget.row_count == 2
-        assert sdlc_widget.get_row("75")[1] == "New Story"
+        assert sdlc_widget.get_row("75")[2] == "New Story"
         assert app.selected_project == "graph-engineering"
         assert table.cursor_row == 1
 
@@ -1462,19 +1448,19 @@ async def test_sdlc_progress_widget_keyed_inplace_diffing_preserves_cursor(tmp_p
         # Row 0: Issue 10 updated
         row0 = widget.get_row("10")
         assert row0[0] == "#10"
-        assert row0[2] == "in-progress"
+        assert row0[3] == "in-progress"
 
         # Row 1: Issue 20 updated in-place and cursor is PRESERVED on row 1
         row1 = widget.get_row("20")
         assert row1[0] == "#20"
-        assert row1[2] == "architect-approved"
-        assert row1[3] == "#99"
+        assert row1[1] == "#99"
+        assert row1[3] == "architect-approved"
         assert widget.cursor_row == 1
 
         # Row 40 added
         row_new = widget.get_row("40")
         assert row_new[0] == "#40"
-        assert row_new[1] == "Issue Forty"
+        assert row_new[2] == "Issue Forty"
 
         # Row 30 removed from table.rows
         assert "30" not in widget.rows
@@ -1639,7 +1625,7 @@ async def test_widgets_empty_state_transitions(tmp_path: Path):
 
         # 1. Initially empty
         assert sdlc.row_count == 1
-        assert "No active SDLC items" in str(sdlc.get_row_at(0)[1])
+        assert "No active SDLC items" in str(sdlc.get_row_at(0)[2])
         assert alerts.row_count == 1
         assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
 
@@ -1660,7 +1646,7 @@ async def test_widgets_empty_state_transitions(tmp_path: Path):
         await pilot.pause()
 
         assert sdlc.row_count == 1
-        assert sdlc.get_row("55")[1] == "Added Issue"
+        assert sdlc.get_row("55")[2] == "Added Issue"
         assert alerts.row_count == 1
         assert alerts.get_row_at(0)[2] == "ErrorX"
 
@@ -1675,7 +1661,7 @@ async def test_widgets_empty_state_transitions(tmp_path: Path):
         await pilot.pause()
 
         assert sdlc.row_count == 1
-        assert "No active SDLC items" in str(sdlc.get_row_at(0)[1])
+        assert "No active SDLC items" in str(sdlc.get_row_at(0)[2])
         assert alerts.row_count == 1
         assert "No anomalies in last 24h" in str(alerts.get_row_at(0)[2])
 
