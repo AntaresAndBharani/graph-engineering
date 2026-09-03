@@ -264,6 +264,7 @@ class GlobalConfig(OrchestratorBaseModel):
     harnesses: Dict[str, HarnessConfig] = Field(default_factory=lambda: dict(DEFAULT_HARNESSES))
     quota: QuotaSettings = Field(default_factory=QuotaSettings)
     projects: List[ProjectConfig] = Field(default_factory=list)
+    resolved_path: Optional[Path] = None
 
 
 def get_default_config_search_paths() -> List[Path]:
@@ -307,6 +308,8 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
 
     with open(config_path, "r", encoding="utf-8") as f:
         raw_data = yaml.safe_load(f) or {}
+
+    raw_data.setdefault("resolved_path", config_path)
 
     # Merge default labels and harnesses if omitted in user config
     if "managed_labels" not in raw_data or not raw_data["managed_labels"]:
