@@ -235,7 +235,7 @@ graph-engineering/
 - **Pure Function Extraction**: Business logic (e.g. anomaly detection, git URL parsing, timestamp parsing) must be separated into pure helper functions to ensure 100% testability with unit mocks.
 - **Explicit Typing**: All functions must have complete type annotations (`from __future__ import annotations`).
 - **Disabled Node Resource Isolation**: CLI loops and schedulers must never allocate resources (memory buffers, git worktrees) for disabled nodes (`node.enabled == False`).
-- **Startup Node Status Registry**: CLI daemon initialization must render a formatted Rich status table registering all project nodes, their enabled status, harness, and concurrency mode.
+- **Startup Node Status Registry**: CLI daemon initialization must render a formatted Rich status table registering all project nodes, their repository, enabled status, harness, concurrency mode, and pure harness-agnostic agent model in a dedicated 7th column.
 
 ---
 

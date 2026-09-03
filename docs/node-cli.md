@@ -80,7 +80,7 @@ orchestrator watch [OPTIONS]
 ---
 
 ### `orchestrator run`
-Executes an immediate single evaluation pass across registered projects. At startup, renders the formatted **Autonomous Node Status Registry** table displaying each node (`architect`, `devtest`, `reviewer`, `supervisor`, `bau`), its `ENABLED`/`DISABLED` status, assigned harness (and model), and concurrency mode across configured projects before executing the dispatch pass.
+Executes an immediate single evaluation pass across registered projects. At startup, renders the formatted **Autonomous Node Status Registry** table displaying each node (`architect`, `devtest`, `reviewer`, `supervisor`, `bau`), its repository, `ENABLED`/`DISABLED` status, assigned harness, concurrency mode, and pure harness-agnostic `Agent Model` across configured projects before executing the dispatch pass.
 
 ```bash
 orchestrator run [-p PROJECT] [-n NODE] [-c CONFIG]
@@ -89,7 +89,7 @@ orchestrator run [-p PROJECT] [-n NODE] [-c CONFIG]
 ---
 
 ### `orchestrator list`
-Displays a formatted Rich table of all registered repositories, assigned harnesses, and status.
+Displays a formatted Rich table of all registered repositories, assigned harnesses, status, and dedicated 7th column `Agent Model` (`—` for idle or unassigned rows).
 
 ```bash
 orchestrator list [-c CONFIG]

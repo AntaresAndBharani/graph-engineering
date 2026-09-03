@@ -517,7 +517,7 @@ def test_scenario_startup_node_status_registry_table_ux(tmp_path: Path):
     config = GlobalConfig(projects=[project])
 
     buf = io.StringIO()
-    test_console = Console(file=buf, force_terminal=False, color_system=None, width=120)
+    test_console = Console(file=buf, force_terminal=False, color_system=None, width=140)
 
     table = render_node_status_table(config, console_out=test_console)
     output = buf.getvalue()
@@ -535,13 +535,19 @@ def test_scenario_startup_node_status_registry_table_ux(tmp_path: Path):
     assert "ENABLED" in output
     assert "DISABLED" in output
 
-    # Harnesses & Concurrency Modes
-    assert "claude (sonnet-5)" in output
+    # Harnesses & Concurrency Modes & Agent Models
+    assert "claude" in output
+    assert "sonnet-5" in output
+    assert "gemini-3.7-flash-low" in output
     assert "antigravity" in output
     assert "Worktree (Concurrent)" in output
     assert "Serial (Gatekeeper)" in output
     assert "Serial (Watchdog)" in output
     assert "Serial (Maintenance)" in output
+
+    # 7th Column verification
+    assert len(table.columns) == 7
+    assert table.columns[6].header == "Agent Model"
 
 
 def test_cli_run_renders_startup_node_status_table(tmp_path: Path, monkeypatch):
@@ -580,11 +586,11 @@ projects:
     graph_dir.mkdir(parents=True, exist_ok=True)
     (graph_dir / "architecture.md").write_text("# Architecture Standards\n", encoding="utf-8")
 
-    async def mock_issues(repo, label):
+    async def mock_issues(repo, *args, **kwargs):
         return []
-    async def mock_prs(repo, label):
+    async def mock_prs(repo, *args, **kwargs):
         return []
-    async def mock_all_issues(repo):
+    async def mock_all_issues(repo, *args, **kwargs):
         return []
     monkeypatch.setattr("orchestrator.poller.fetch_issues_with_label", mock_issues)
     monkeypatch.setattr("orchestrator.poller.fetch_open_prs", mock_prs)
@@ -665,6 +671,188 @@ async def test_scenario_disabled_nodes_bypass_execution_dispatch_in_cli_loop(tmp
     assert "reviewer" not in invoked_nodes
     assert "supervisor" not in invoked_nodes
     assert "bau" not in invoked_nodes
+
+
+def test_scenario_clean_harness_agnostic_agent_and_effort_representation():
+    """
+    Scenario: Clean harness-agnostic agent and effort representation
+      Given a model string and optional effort
+      When "format_node_agent_spec(model, effort)" is invoked
+      Then it must return "<model> (<effort>)" when effort is non-empty
+      And it must return "<model>" when effort is None or empty, with zero harness-specific branching or hardcoded harness names.
+    """
+    from orchestrator.cli import format_node_agent_spec
+
+    # Effort is non-empty -> <model> (<effort>)
+    assert format_node_agent_spec("claude-sonnet-5", "medium") == "claude-sonnet-5 (medium)"
+    assert format_node_agent_spec("claude-opus-4", "high") == "claude-opus-4 (high)"
+    assert format_node_agent_spec("custom-model-x", "low") == "custom-model-x (low)"
+
+    # Effort is None or empty -> <model>
+    assert format_node_agent_spec("gemini-3.8-flash-high", None) == "gemini-3.8-flash-high"
+    assert format_node_agent_spec("gemini-3.8-flash-high", "") == "gemini-3.8-flash-high"
+    assert format_node_agent_spec("gemini-3.8-flash-high", "   ") == "gemini-3.8-flash-high"
+    assert format_node_agent_spec("claude-sonnet-5", None) == "claude-sonnet-5"
+    assert format_node_agent_spec("claude-sonnet-5", "") == "claude-sonnet-5"
+
+    # Whitespace cleanup
+    assert format_node_agent_spec("  claude-sonnet-5  ", "  medium  ") == "claude-sonnet-5 (medium)"
+    assert format_node_agent_spec("  gemini-3.8-flash-high  ", None) == "gemini-3.8-flash-high"
+
+
+def test_scenario_idle_and_none_model_fallback():
+    """
+    Scenario: Idle and None model fallback
+      Given a node with no model configured or in an idle state
+      When "format_node_agent_spec(model, effort)" is invoked
+      Then it must return "—".
+    """
+    from orchestrator.cli import format_node_agent_spec
+
+    # Model is None
+    assert format_node_agent_spec(None, None) == "—"
+    assert format_node_agent_spec(None, "medium") == "—"
+
+    # Model is empty string or pure whitespace
+    assert format_node_agent_spec("", None) == "—"
+    assert format_node_agent_spec("   ", None) == "—"
+    assert format_node_agent_spec("", "high") == "—"
+    assert format_node_agent_spec("   ", "medium") == "—"
+
+
+def test_scenario_cli_table_agent_model_surfacing_render_node_status_table(tmp_path: Path):
+    """
+    Scenario: CLI table agent model surfacing in render_node_status_table
+      Given configured projects in "config.yaml"
+      When the operator checks "render_node_status_table"
+      Then the table must render an explicit 7th column titled "Agent Model"
+      And active nodes must display the formatted model and effort string
+      And idle rows must display "—".
+    """
+    from rich.console import Console
+    import io
+    from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
+    from orchestrator.cli import render_node_status_table
+
+    project = ProjectConfig(
+        name="status-proj",
+        repo="org/status-proj",
+        local_path=str(tmp_path),
+        worktrees_enabled=True,
+        nodes={
+            "architect": NodeConfig(enabled=True, harness="claude", model="claude-sonnet-5", effort="medium"),
+            "devtest": NodeConfig(enabled=True, harness="antigravity", model="gemini-3.8-flash-high", effort=None),
+            "reviewer": NodeConfig(enabled=True, harness="claude", model=None),  # Active node, no model configured
+            "supervisor": NodeConfig(enabled=False, harness="antigravity", model="gemini-3.7-flash-low"),  # Disabled / idle node
+            "bau": NodeConfig(enabled=False, harness="antigravity"),  # Disabled / idle node
+        },
+    )
+    config = GlobalConfig(projects=[project])
+
+    buf = io.StringIO()
+    test_console = Console(file=buf, force_terminal=False, color_system=None, width=140)
+
+    table = render_node_status_table(config, console_out=test_console)
+    output = buf.getvalue()
+
+    # Explicit 7th column titled "Agent Model"
+    assert len(table.columns) == 7
+    assert table.columns[6].header == "Agent Model"
+    assert "Agent Model" in output
+
+    # Active nodes display formatted model and effort string
+    assert "claude-sonnet-5 (medium)" in output
+    assert "gemini-3.8-flash-high" in output
+
+    # Idle / unassigned nodes display "—"
+    assert "—" in output
+
+
+def test_scenario_cli_table_agent_model_surfacing_orchestrator_list(tmp_path: Path):
+    """
+    Scenario: CLI table agent model surfacing in orchestrator list
+      Given configured projects in "config.yaml"
+      When the operator executes "orchestrator list"
+      Then the table must render an explicit 7th column titled "Agent Model"
+      And active nodes must display the formatted model and effort string
+      And idle rows must display "—".
+    """
+    import asyncio
+    from orchestrator.cli import _list_projects, app
+    from orchestrator.db import StateManager
+
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    asyncio.run(state_manager.init_db())
+
+    # Register an active running job for 'active-proj' devtest node
+    asyncio.run(
+        state_manager.acquire_lock(
+            issue_id=42,
+            repo="org/active-proj",
+            node_type="devtest",
+            ttl_minutes=30,
+        )
+    )
+
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "active-proj"
+    repo: "org/active-proj"
+    local_path: "{posix_path}"
+    enabled: true
+    nodes:
+      architect:
+        enabled: true
+        harness: "claude"
+        model: "claude-sonnet-5"
+        effort: "medium"
+      devtest:
+        enabled: true
+        harness: "antigravity"
+        model: "gemini-3.8-flash-high"
+  - name: "idle-proj"
+    repo: "org/idle-proj"
+    local_path: "{posix_path}"
+    enabled: true
+    nodes:
+      architect:
+        enabled: true
+        harness: "claude"
+        model: "claude-sonnet-5"
+  - name: "disabled-proj"
+    repo: "org/disabled-proj"
+    local_path: "{posix_path}"
+    enabled: false
+    nodes:
+      architect:
+        enabled: true
+        harness: "claude"
+        """,
+        encoding="utf-8",
+    )
+
+    # 1. Verify programmatically via _list_projects
+    table = asyncio.run(_list_projects(config_file))
+    assert len(table.columns) == 7
+    assert table.columns[6].header == "Agent Model"
+
+    # 2. Verify via CLI runner invoke with adequate terminal width
+    result = runner.invoke(app, ["list", "--config", str(config_file)], env={"COLUMNS": "140"})
+    assert result.exit_code == 0
+    assert "Agent Model" in result.stdout
+    # Active node with running devtest job displays formatted model
+    assert "gemini-3.8-flash-high" in result.stdout
+    # Idle and disabled projects display "—"
+    assert "—" in result.stdout
+
 
 
 
