@@ -279,6 +279,13 @@ def format_pr_status_badge(
     return f"#{linked_pr}"
 
 
+def _truncate_title(title: str, max_width: int = 45) -> str:
+    """Capped at max_width with ellipsis overflow."""
+    if len(title) > max_width:
+        return title[: max_width - 3] + "..."
+    return title
+
+
 class SDLCProgressWidget(DataTable):
     """
     Read-only DataTable widget rendering active SDLC items (Stories, Subtasks, PRs)
@@ -288,9 +295,9 @@ class SDLCProgressWidget(DataTable):
 
     TABLE_COLUMNS = [
         "ID",
+        "PR Status",
         "Title",
         "Status/Label",
-        "PR Status",
     ]
 
     def __init__(
@@ -329,7 +336,7 @@ class SDLCProgressWidget(DataTable):
             if not self.project_name or not self.state_manager:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "No active SDLC items", "-", "-"))],
+                    [("-empty-", ("-", "-", "No active SDLC items", "-"))],
                 )
                 return
 
@@ -346,7 +353,7 @@ class SDLCProgressWidget(DataTable):
             if not hierarchy:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "No active SDLC items", "-", "-"))],
+                    [("-empty-", ("-", "-", "No active SDLC items", "-"))],
                 )
                 return
 
@@ -355,10 +362,12 @@ class SDLCProgressWidget(DataTable):
                 root_num = root.get("issue_number") or root.get("id") or root.get("number")
                 root_id = f"#{root_num}" if (root_num is not None and str(root_num) != "-") else "-"
                 root_title = str(root.get("title", ""))
+                root_title_display = _truncate_title(root_title, 45)
 
                 raw_labels = root.get("labels")
                 raw_state = root.get("state") or root.get("status")
                 base_status = str(raw_labels) if raw_labels else (str(raw_state) if raw_state else "-")
+                status_label = base_status
 
                 is_locked = (
                     active_locked_id is not None
@@ -367,9 +376,9 @@ class SDLCProgressWidget(DataTable):
                     and int(root_num) == int(active_locked_id)
                 )
                 if is_locked:
-                    status_label = f"[LOCKED] {base_status}" if base_status != "-" else "[LOCKED]"
+                    root_id_cell = f"{root_id} [LOCKED]" if root_id != "-" else "[LOCKED]"
                 else:
-                    status_label = base_status
+                    root_id_cell = root_id
 
                 linked_pr = root.get("linked_pr")
                 pr_status = root.get("pr_status")
@@ -377,7 +386,7 @@ class SDLCProgressWidget(DataTable):
                 pr_badge = format_pr_status_badge(linked_pr, pr_status, pr_ci)
 
                 row_key = str(root_num) if root_num is not None else f"story_{root_title}"
-                target_rows.append((row_key, (root_id, root_title, status_label, pr_badge)))
+                target_rows.append((row_key, (root_id_cell, pr_badge, root_title_display, status_label)))
 
                 subtasks = root.get("subtasks") or root.get("children") or []
                 total_subtasks = len(subtasks)
@@ -386,7 +395,7 @@ class SDLCProgressWidget(DataTable):
                     sub_id = f"#{sub_num}" if (sub_num is not None and str(sub_num) != "-") else "-"
                     sub_title = str(sub.get("title", ""))
                     prefix = "  └─ " if idx == total_subtasks - 1 else "  ├─ "
-                    display_title = f"{prefix}{sub_title}"
+                    display_title = _truncate_title(f"{prefix}{sub_title}", 45)
 
                     sub_labels = sub.get("labels")
                     sub_state = sub.get("state") or sub.get("status")
@@ -398,7 +407,7 @@ class SDLCProgressWidget(DataTable):
                     sub_pr_badge = format_pr_status_badge(sub_pr, sub_pr_status, sub_pr_ci)
 
                     sub_row_key = str(sub_num) if sub_num is not None else f"sub_{sub_title}"
-                    target_rows.append((sub_row_key, (sub_id, display_title, sub_status_label, sub_pr_badge)))
+                    target_rows.append((sub_row_key, (sub_id, sub_pr_badge, display_title, sub_status_label)))
 
             _apply_keyed_diff(self, target_rows)
 

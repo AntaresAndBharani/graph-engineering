@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import time
 import pytest
+import aiosqlite
 from orchestrator.db import StateManager
 
 
@@ -2269,6 +2270,146 @@ async def test_get_next_devtest_task_never_returns_parent_story_id(tmp_path: Pat
 
     task = await manager.get_next_devtest_task("graph-engineering")
     assert task is None
+
+
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #164: Clean Label Persistence & Migration
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_labels_unit():
+    """
+    Unit tests for sanitize_labels across all input variants.
+    """
+    from orchestrator.db import sanitize_labels
+
+    # 1. Structured dict objects
+    assert sanitize_labels({"name": "ready-for-dev"}) == "ready-for-dev"
+    assert sanitize_labels([{"name": "ready-for-dev"}, {"name": "enhancement"}]) == "ready-for-dev, enhancement"
+
+    # 2. Python dict representations (legacy SQLite strings)
+    assert sanitize_labels("{'name': 'ready-for-dev'}") == "ready-for-dev"
+    assert sanitize_labels("{'name': 'ready-for-dev'}, {'name': 'enhancement'}") == "ready-for-dev, enhancement"
+    assert sanitize_labels("{'id': 123, 'name': 'bug', 'color': 'd73a4a'}") == "bug"
+
+    # 3. JSON formatted strings
+    assert sanitize_labels('[{"name": "ready-for-dev"}]') == "ready-for-dev"
+
+    # 4. Standard clean strings and lists of strings
+    assert sanitize_labels("ready-for-dev, enhancement") == "ready-for-dev, enhancement"
+    assert sanitize_labels(["ready-for-dev", "enhancement"]) == "ready-for-dev, enhancement"
+
+    # 5. Empty / None cases
+    assert sanitize_labels("") == ""
+    assert sanitize_labels(None) == ""
+    assert sanitize_labels([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_scenario_clean_label_persistence_no_raw_dict(tmp_path: Path):
+    """
+    Scenario: Raw Python dict representations must never be persisted in SQLite
+      Given raw dict structures or dict representations in labels
+      When sync_project_sdlc_items is called
+      Then sdlc_items.labels stores clean comma-separated label names
+      And raw Python dict representations are never persisted.
+    """
+    db_file = tmp_path / "state.db"
+    manager = StateManager(db_file)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 201,
+            "title": "Item with list of dict labels",
+            "state": "OPEN",
+            "labels": [{"id": 1, "name": "ready-for-dev"}, {"id": 2, "name": "enhancement"}],
+        },
+        {
+            "issue_number": 202,
+            "title": "Item with single dict label",
+            "state": "OPEN",
+            "labels": {"name": "architect-processed"},
+        },
+        {
+            "issue_number": 203,
+            "title": "Item with python dict string repr",
+            "state": "OPEN",
+            "labels": "{'name': 'queued'}",
+        },
+    ]
+    await manager.sync_project_sdlc_items("label-test", items)
+
+    stored = await manager.get_sdlc_items("label-test")
+    item_map = {item["issue_number"]: item for item in stored}
+
+    assert item_map[201]["labels"] == "ready-for-dev, enhancement"
+    assert "{" not in item_map[201]["labels"]
+
+    assert item_map[202]["labels"] == "architect-processed"
+    assert "{" not in item_map[202]["labels"]
+
+    assert item_map[203]["labels"] == "queued"
+    assert "{" not in item_map[203]["labels"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_idempotent_sqlite_migration_cleans_legacy_dicts(tmp_path: Path):
+    """
+    Scenario: Existing rows with dict representations must be cleaned during database initialization
+      Given existing rows in sdlc_items with raw python dict representations
+      When init_db() is called
+      Then all rows with dict representations are migrated to clean comma-separated label names
+      And calling init_db() repeatedly is idempotent.
+    """
+    db_file = tmp_path / "state.db"
+    manager = StateManager(db_file)
+    await manager.init_db()
+
+    # Manually inject legacy rows with raw dict strings into sdlc_items
+    async with aiosqlite.connect(db_file) as db:
+        await db.execute(
+            """
+            INSERT INTO sdlc_items (project_name, issue_number, title, state, labels, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            ("legacy-proj", 101, "Legacy Story 1", "OPEN", "{'name': 'ready-for-dev'}", 1000.0),
+        )
+        await db.execute(
+            """
+            INSERT INTO sdlc_items (project_name, issue_number, title, state, labels, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            ("legacy-proj", 102, "Legacy Story 2", "OPEN", "{'name': 'ready-for-dev'}, {'name': 'enhancement'}", 1000.0),
+        )
+        await db.execute(
+            """
+            INSERT INTO sdlc_items (project_name, issue_number, title, state, labels, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            ("legacy-proj", 103, "Already Clean Story", "OPEN", "architect-processed", 1000.0),
+        )
+        await db.commit()
+
+    # Run migration via init_db()
+    await manager.init_db()
+
+    # Verify rows were cleaned
+    rows = await manager.get_sdlc_items("legacy-proj")
+    row_map = {r["issue_number"]: r for r in rows}
+
+    assert row_map[101]["labels"] == "ready-for-dev"
+    assert row_map[102]["labels"] == "ready-for-dev, enhancement"
+    assert row_map[103]["labels"] == "architect-processed"
+
+    # Idempotency check: run init_db() again
+    await manager.init_db()
+    rows_after = await manager.get_sdlc_items("legacy-proj")
+    row_map_after = {r["issue_number"]: r for r in rows_after}
+
+    assert row_map_after[101]["labels"] == "ready-for-dev"
+    assert row_map_after[102]["labels"] == "ready-for-dev, enhancement"
+    assert row_map_after[103]["labels"] == "architect-processed"
 
 
 

@@ -1,11 +1,78 @@
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone, timedelta
+import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Set
 import aiosqlite
+
+
+def sanitize_labels(raw: Any) -> str:
+    """
+    Normalizes labels from various formats (structured dicts, lists, JSON strings,
+    legacy python dict reprs) into a clean comma-separated string of label names.
+    Ensures raw Python dict representations are never persisted.
+    """
+    if raw is None:
+        return ""
+
+    if isinstance(raw, (list, tuple, set)):
+        items: List[str] = []
+        for elem in raw:
+            if isinstance(elem, dict):
+                val = elem.get("name")
+                if val:
+                    items.append(str(val).strip())
+            elif isinstance(elem, str):
+                cleaned = sanitize_labels(elem)
+                if cleaned:
+                    for part in cleaned.split(","):
+                        p = part.strip()
+                        if p:
+                            items.append(p)
+            elif elem is not None:
+                s = str(elem).strip()
+                if s:
+                    items.append(s)
+        return ", ".join(items)
+
+    if isinstance(raw, dict):
+        val = raw.get("name")
+        return str(val).strip() if val else ""
+
+    raw_str = str(raw).strip()
+    if not raw_str or raw_str == "-":
+        return raw_str
+
+    if "{" in raw_str and "}" in raw_str:
+        # Try JSON first
+        try:
+            parsed = json.loads(raw_str)
+            return sanitize_labels(parsed)
+        except Exception:
+            pass
+
+        # Try ast.literal_eval for python dict representations like "{'name': 'ready-for-dev'}"
+        try:
+            to_eval = raw_str if raw_str.startswith("[") else f"[{raw_str}]"
+            parsed = ast.literal_eval(to_eval)
+            return sanitize_labels(parsed)
+        except Exception:
+            pass
+
+        # Fallback regex extraction of 'name': '...' or "name": "..."
+        matches = re.findall(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", raw_str)
+        if matches:
+            return ", ".join(m.strip() for m in matches if m.strip())
+
+    return raw_str
+
+
+normalize_labels = sanitize_labels
 
 
 class StateManager:
@@ -182,6 +249,20 @@ class StateManager:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_token_usage_project_node ON token_usage_events(project_name, node_name, created_at);"
             )
+
+            # Idempotent migration: clean legacy dict representations in sdlc_items.labels
+            cursor = await db.execute(
+                "SELECT project_name, issue_number, labels FROM sdlc_items WHERE labels LIKE '%{%';"
+            )
+            rows_to_clean = await cursor.fetchall()
+            for proj, num, lbls in rows_to_clean:
+                cleaned = sanitize_labels(lbls)
+                if cleaned != lbls:
+                    await db.execute(
+                        "UPDATE sdlc_items SET labels = ? WHERE project_name = ? AND issue_number = ?;",
+                        (cleaned, proj, num),
+                    )
+
             await db.commit()
 
     async def register_daemon(self, pid: int) -> None:
@@ -921,10 +1002,7 @@ class StateManager:
                 title = str(item.get("title", ""))
                 state = str(item.get("state") or item.get("status") or "OPEN")
                 raw_labels = item.get("labels")
-                if isinstance(raw_labels, (list, tuple, set)):
-                    labels_str = ", ".join(str(lbl) for lbl in raw_labels)
-                else:
-                    labels_str = str(raw_labels) if raw_labels is not None else ""
+                labels_str = sanitize_labels(raw_labels)
                 linked_pr = item.get("linked_pr")
                 linked_pr_val = int(linked_pr) if linked_pr is not None else None
                 pr_status = item.get("pr_status")
@@ -990,8 +1068,8 @@ class StateManager:
                 issue_num = int(row["issue_number"])
                 if issue_num not in active_open_issue_ids:
                     # Clean up workflow trigger labels in labels string
-                    curr_labels = [l.strip() for l in (row["labels"] or "").split(",") if l.strip()]
-                    cleaned_labels = [l for l in curr_labels if not any(t in l.lower() for t in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued"))]
+                    curr_labels = [lbl.strip() for lbl in (row["labels"] or "").split(",") if lbl.strip()]
+                    cleaned_labels = [lbl for lbl in curr_labels if not any(t in lbl.lower() for t in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued"))]
                     await db.execute(
                         """
                         UPDATE sdlc_items
@@ -1040,10 +1118,10 @@ class StateManager:
             closed_count = 0
             for row in rows:
                 story_id = int(row["issue_number"])
-                curr_labels = [l.strip() for l in (row["labels"] or "").split(",") if l.strip()]
-                if "dev-implemented" not in [l.lower() for l in curr_labels]:
+                curr_labels = [lbl.strip() for lbl in (row["labels"] or "").split(",") if lbl.strip()]
+                if "dev-implemented" not in [lbl.lower() for lbl in curr_labels]:
                     curr_labels.append("dev-implemented")
-                cleaned_labels = [l for l in curr_labels if not any(t in l.lower() for t in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued"))]
+                cleaned_labels = [lbl for lbl in curr_labels if not any(t in lbl.lower() for t in ("ready-for-dev", "status:ready-for-dev", "queued", "status:queued"))]
                 await db.execute(
                     """
                     UPDATE sdlc_items
