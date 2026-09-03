@@ -2994,6 +2994,280 @@ def test_scenario_living_documentation_and_changelog_synchronization():
     assert "#148" in changelog
 
 
+# ==============================================================================
+# Issue #156 BDD Scenarios: Identity Transition Diffing & Direct RichLog Writes
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_scenario_direct_main_loop_writing_without_call_from_thread(tmp_path: Path, mocker):
+    """
+    Scenario: Direct main-loop writing without call_from_thread
+      Given the TUI dashboard event loop is actively running
+      When "AsyncHarnessAdapter" stream listener or log handler receives an output line
+      Then it must write directly to "log_view.write(rich.markup.escape(line))"
+      And it must not invoke "call_from_thread" while executing on the main asyncio thread.
+    """
+    import rich.markup
+    import threading
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="biq-playbook", repo="BasketIQ/biq-playbook", local_path=str(tmp_path)),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+        selected_node="architect",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        log_view = app.query_one("#log_view", RichLog)
+
+        call_from_thread_spy = mocker.spy(app, "call_from_thread")
+        log_write_spy = mocker.spy(log_view, "write")
+
+        # 1. Test harness stream listener execution on the main loop
+        raw_stream_line = "  [biq-playbook:architect] Step 1: evaluating requirements [1/3] <xml-tag>"
+        app._handle_harness_stream_line(
+            project_name="biq-playbook",
+            node_name="architect",
+            line=raw_stream_line,
+        )
+        await pilot.pause()
+
+        # Must NOT call call_from_thread on the main thread
+        call_from_thread_spy.assert_not_called()
+        # Must write directly to log_view.write with rich.markup.escape
+        expected_escaped_stream = rich.markup.escape(raw_stream_line)
+        log_write_spy.assert_called_with(expected_escaped_stream)
+
+        # 2. Test log handler record emission on the main loop
+        rec = logging.LogRecord(
+            name="orchestrator",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="[biq-playbook:architect] Formatted log with [markup] tags",
+            args=(),
+            exc_info=None,
+        )
+        setattr(rec, "project", "biq-playbook")
+        setattr(rec, "node", "architect")
+        formatted_log = "[biq-playbook:architect] Formatted log with [markup] tags"
+
+        log_write_spy.reset_mock()
+        call_from_thread_spy.reset_mock()
+
+        app._handle_log_record(rec, formatted_log)
+        await pilot.pause()
+
+        # Must NOT call call_from_thread on the main thread
+        call_from_thread_spy.assert_not_called()
+        # Must write directly to log_view.write with rich.markup.escape
+        expected_escaped_log = rich.markup.escape(formatted_log)
+        log_write_spy.assert_called_with(expected_escaped_log)
+
+        # 3. Test background worker thread execution invokes call_from_thread
+        log_write_spy.reset_mock()
+        call_from_thread_spy.reset_mock()
+
+        thread_line = "Background worker thread output line [worker]"
+        thread_executed = threading.Event()
+
+        def worker_target():
+            app._handle_harness_stream_line(
+                project_name="biq-playbook",
+                node_name="architect",
+                line=thread_line,
+            )
+            thread_executed.set()
+
+        worker_thread = threading.Thread(target=worker_target)
+        worker_thread.start()
+        for _ in range(20):
+            if thread_executed.is_set():
+                break
+            await asyncio.sleep(0.05)
+        worker_thread.join(timeout=1.0)
+        assert thread_executed.is_set()
+
+        # From another thread, call_from_thread MUST be invoked
+        assert call_from_thread_spy.call_count >= 1
+        assert call_from_thread_spy.call_args[0][0] == log_view.write
+        assert call_from_thread_spy.call_args[0][1] == rich.markup.escape(thread_line)
+
+
+@pytest.mark.asyncio
+async def test_scenario_identity_based_state_transition_on_active_job_change(tmp_path: Path, mocker):
+    """
+    Scenario: Identity-based state transition on active job change
+      Given project "biq-playbook" is currently highlighted in "#projects_table" with state "Idle"
+      When the active node state transitions to "architect" on Issue #75
+      Then "update_projects_table" must detect the transition via (project_name, active_node) identity diffing
+      And "selected_node" must automatically update to "architect" without manual navigation
+      And the log view title must update to "Live Output [biq-playbook | architect*]"
+      And "hydrate_project_logs" must be triggered with "node_name='architect'" and "issue_id=75".
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="biq-playbook",
+                repo="BasketIQ/biq-playbook",
+                local_path=str(tmp_path),
+                nodes={"architect": NodeConfig(model="claude-sonnet-5")},
+            ),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+    )
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Given project "biq-playbook" is currently highlighted in "#projects_table" with state "Idle"
+        assert app.selected_project == "biq-playbook"
+        assert app.selected_node is None
+        assert app.selected_issue_id is None
+        assert table.row_count == 1
+        assert "Idle" in str(table.get_row_at(0)[2])
+        assert str(log_view.border_title).replace(r"\[", "[") == "Live Output [biq-playbook]"
+        assert log_view.title == "Live Output [biq-playbook]"
+
+        hydrate_spy = mocker.spy(app, "hydrate_project_logs")
+
+        # When the active node state transitions to "architect" on Issue #75
+        await state_manager.acquire_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+
+        # Then "update_projects_table" must detect the transition via (project_name, active_node) identity diffing
+        await app.update_projects_table()
+        await pilot.pause()
+
+        # And "selected_node" must automatically update to "architect" without manual navigation
+        assert app.selected_node == "architect"
+        assert app.selected_issue_id == 75
+        assert app.issue_id == 75
+
+        # And the log view title must update to "Live Output [biq-playbook | architect*]"
+        assert str(log_view.border_title).replace(r"\[", "[") == "Live Output [biq-playbook | architect*]"
+        assert log_view.title == "Live Output [biq-playbook | architect*]"
+
+        # And "hydrate_project_logs" must be triggered with "node_name='architect'" and "issue_id=75"
+        hydrate_spy.assert_called_with("biq-playbook", node_name="architect", issue_id=75)
+
+        # And cursor is positioned on the active node row
+        row_0 = table.get_row_at(0)
+        assert "architect" in str(row_0[2]).lower()
+        assert "Issue #75" in str(row_0[5])
+
+
+@pytest.mark.asyncio
+async def test_scenario_identity_transition_sequential_lifecycle_and_idle_recovery(tmp_path: Path, mocker):
+    """
+    Scenario: Multi-step identity transition lifecycle: Idle -> Architect (#75) -> DevTest (#76) -> Idle.
+    Asserts identity diffing correctly updates node and issue_id and recovers cleanly when going Idle.
+    """
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="biq-playbook",
+                repo="BasketIQ/biq-playbook",
+                local_path=str(tmp_path),
+                nodes={
+                    "architect": NodeConfig(model="claude-sonnet-5"),
+                    "devtest": NodeConfig(model="gemini-3.8-flash-high"),
+                },
+            ),
+        ]
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="biq-playbook",
+    )
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        hydrate_spy = mocker.spy(app, "hydrate_project_logs")
+
+        # 1. Idle -> Architect on Issue #75
+        await state_manager.acquire_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node == "architect"
+        assert app.selected_issue_id == 75
+        assert "architect*" in str(log_view.border_title)
+        hydrate_spy.assert_called_with("biq-playbook", node_name="architect", issue_id=75)
+
+        # 2. Architect finishes -> DevTest starts on Issue #76
+        hydrate_spy.reset_mock()
+        await state_manager.release_lock(issue_id=75, repo="BasketIQ/biq-playbook", node_type="architect")
+        await state_manager.acquire_lock(issue_id=76, repo="BasketIQ/biq-playbook", node_type="devtest")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node == "devtest"
+        assert app.selected_issue_id == 76
+        assert "devtest*" in str(log_view.border_title)
+        hydrate_spy.assert_called_with("biq-playbook", node_name="devtest", issue_id=76)
+
+        # 3. DevTest finishes -> Project becomes Idle
+        hydrate_spy.reset_mock()
+        await state_manager.release_lock(issue_id=76, repo="BasketIQ/biq-playbook", node_type="devtest")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node is None
+        assert app.selected_issue_id is None
+        assert str(log_view.border_title).replace(r"\[", "[") == "Live Output [biq-playbook]"
+        assert log_view.title == "Live Output [biq-playbook]"
+        hydrate_spy.assert_called_with("biq-playbook", node_name=None, issue_id=None)
+
+        # 4. Next tick with identical Idle state does NOT re-trigger hydrate_project_logs
+        hydrate_spy.reset_mock()
+        await app.update_projects_table()
+        await pilot.pause()
+        hydrate_spy.assert_not_called()
+
+
+def test_scenario_issue_id_plumbing_attributes():
+    """
+    Scenario: issue_id plumbing and property accessors on DashboardApp.
+    """
+    app = DashboardApp(selected_project="biq-playbook", selected_issue_id=123)
+    assert app.selected_issue_id == 123
+    assert app.issue_id == 123
+
+    app.issue_id = 456
+    assert app.selected_issue_id == 456
+    assert app.issue_id == 456
+
+    app2 = DashboardApp(selected_project="biq-playbook", issue_id=789)
+    assert app2.selected_issue_id == 789
+    assert app2.issue_id == 789
+
+
+
 
 
 
