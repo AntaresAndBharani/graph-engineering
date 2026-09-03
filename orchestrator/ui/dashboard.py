@@ -4,8 +4,11 @@ import asyncio
 import datetime
 import logging
 from pathlib import Path
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+import rich.markup
+from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -98,8 +101,10 @@ class DashboardApp(App):
         buffer_manager: Optional[ProjectLogBufferManager] = None,
         selected_project: Optional[str] = None,
         selected_node: Optional[str] = None,
+        selected_issue_id: Optional[int] = None,
         config_holder: Optional[ConfigHolder] = None,
         config_path: Optional[str | Path] = None,
+        issue_id: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -130,6 +135,10 @@ class DashboardApp(App):
         )
         self.selected_project = selected_project
         self.selected_node = selected_node
+        self.selected_issue_id: Optional[int] = selected_issue_id if selected_issue_id is not None else issue_id
+        self._active_node_identity: Optional[Tuple[Optional[str], Optional[str]]] = (
+            (selected_project, selected_node) if selected_project else None
+        )
         self._last_bottom_pane_fingerprint: Optional[str] = None
         self._last_reload_at_epoch: Optional[float] = None
         self.is_draining: bool = False
@@ -137,6 +146,14 @@ class DashboardApp(App):
         self.auto_scroll: bool = True
         self.title = "Graph Orchestrator - TUI Dashboard"
         self._update_sub_title()
+
+    @property
+    def issue_id(self) -> Optional[int]:
+        return self.selected_issue_id
+
+    @issue_id.setter
+    def issue_id(self, value: Optional[int]) -> None:
+        self.selected_issue_id = value
 
     def compose(self) -> ComposeResult:
         """Compose the TUI layout with Header, ConfigStatusBanner, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
@@ -181,12 +198,16 @@ class DashboardApp(App):
         await self.update_projects_table()
 
         if self.selected_project:
-            await self.hydrate_project_logs(self.selected_project, node_name=self.selected_node)
+            await self.hydrate_project_logs(
+                self.selected_project,
+                node_name=self.selected_node,
+                issue_id=self.selected_issue_id,
+            )
         elif self.log_handler:
             log_view = self.query_one(RichLog)
             for rec in self.log_handler.records:
                 formatted = self.log_handler.format(rec)
-                log_view.write(formatted)
+                log_view.write(rich.markup.escape(formatted))
 
         # Set non-blocking 2.0s refresh interval
         self.set_interval(2.0, self.update_projects_table)
@@ -195,6 +216,7 @@ class DashboardApp(App):
         self,
         project_name: Optional[str],
         node_name: Optional[str] = None,
+        issue_id: Optional[int] = None,
     ) -> None:
         """
         Clears the RichLog pane and populates it with scoped logs from ProjectLogBufferManager.
@@ -205,22 +227,46 @@ class DashboardApp(App):
         except Exception:
             return
 
+        if issue_id is not None:
+            try:
+                self.selected_issue_id = int(issue_id)
+            except (ValueError, TypeError):
+                self.selected_issue_id = issue_id
+        elif project_name != self.selected_project or node_name != getattr(self, "selected_node", None):
+            self.selected_issue_id = None
+
         if project_name:
             if node_name:
-                log_view.border_title = Text(f"Live Output [{project_name} | {node_name}*]")
+                title_text = f"Live Output [{project_name} | {node_name}*]"
+                log_view.border_title = Text(title_text)
+                try:
+                    log_view.title = title_text
+                except Exception:
+                    pass
             else:
-                log_view.border_title = Text(f"Live Output [{project_name}]")
+                title_text = f"Live Output [{project_name}]"
+                log_view.border_title = Text(title_text)
+                try:
+                    log_view.title = title_text
+                except Exception:
+                    pass
         else:
             log_view.border_title = Text("Live Output")
+            try:
+                log_view.title = "Live Output"
+            except Exception:
+                pass
 
         log_dir = self.config.settings.resolved_log_dir if (self.config and self.config.settings) else None
 
-        lines = self.buffer_manager.get_project_logs(
+        query_result = self.buffer_manager.get_project_logs(
             project_name=project_name,
             log_dir=log_dir,
             max_lines=100,
             node_name=node_name,
         )
+        lines = query_result.lines if hasattr(query_result, "lines") else query_result
+
         if not lines and self.log_handler and self.log_handler.records:
             lines = [
                 self.log_handler.format(rec)
@@ -237,7 +283,10 @@ class DashboardApp(App):
 
         log_view.clear()
         for line in lines:
-            log_view.write(line)
+            if isinstance(line, str):
+                log_view.write(rich.markup.escape(line))
+            else:
+                log_view.write(line)
 
     def _handle_log_record(self, record: logging.LogRecord, formatted: str) -> None:
         """Callback invoked by TextualLogHandler on new log emissions."""
@@ -249,14 +298,14 @@ class DashboardApp(App):
             return
 
         try:
-            log_view = self.query_one(RichLog)
-            self.call_from_thread(log_view.write, formatted)
+            log_view = self.query_one("#log_view", RichLog)
+            escaped = rich.markup.escape(formatted)
+            if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
+                self.call_from_thread(log_view.write, escaped)
+            else:
+                log_view.write(escaped)
         except Exception:
-            try:
-                log_view = self.query_one(RichLog)
-                log_view.write(formatted)
-            except Exception:
-                pass
+            pass
 
     def _handle_harness_stream_line(
         self,
@@ -287,14 +336,14 @@ class DashboardApp(App):
             return
 
         try:
-            log_view = self.query_one(RichLog)
-            self.call_from_thread(log_view.write, line)
+            log_view = self.query_one("#log_view", RichLog)
+            escaped = rich.markup.escape(line)
+            if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
+                self.call_from_thread(log_view.write, escaped)
+            else:
+                log_view.write(escaped)
         except Exception:
-            try:
-                log_view = self.query_one(RichLog)
-                log_view.write(line)
-            except Exception:
-                pass
+            pass
 
     async def _rebind_config(
         self,
@@ -472,6 +521,64 @@ class DashboardApp(App):
 
         _apply_keyed_diff(table, target_rows)
 
+        # Determine highlighted / selected project
+        current_proj_name = self.selected_project
+        if not current_proj_name and table.row_count > 0:
+            cursor_idx = table.cursor_row if table.cursor_row is not None else 0
+            if 0 <= cursor_idx < len(target_rows):
+                current_proj_name = target_rows[cursor_idx][0].split("::", 1)[0]
+                self.selected_project = current_proj_name
+
+        # Identity-based state transition diffing
+        if current_proj_name:
+            p = next((proj for proj in self.config.projects if proj.name == current_proj_name), None)
+            if p:
+                p_active_jobs = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "RUNNING"]
+                p_active_jobs.sort(key=lambda j: str(j.get("node_type", "")))
+
+                if p_active_jobs:
+                    # If current selected_node is one of running jobs, preserve it; otherwise pick first active job
+                    matching_node_job = next(
+                        (j for j in p_active_jobs if j.get("node_type") == getattr(self, "selected_node", None)),
+                        None,
+                    )
+                    if matching_node_job:
+                        active_node = matching_node_job.get("node_type")
+                        raw_issue = matching_node_job.get("issue_id")
+                    else:
+                        active_node = p_active_jobs[0].get("node_type")
+                        raw_issue = p_active_jobs[0].get("issue_id")
+                    try:
+                        active_issue_id = int(raw_issue) if raw_issue is not None else None
+                    except (ValueError, TypeError):
+                        active_issue_id = raw_issue
+                else:
+                    active_node = None
+                    active_issue_id = None
+
+                current_identity = (current_proj_name, active_node)
+                prev_identity = getattr(self, "_active_node_identity", None)
+
+                if prev_identity is None:
+                    self._active_node_identity = current_identity
+                    if active_node is not None:
+                        self.selected_node = active_node
+                        self.selected_issue_id = active_issue_id
+                        await self.hydrate_project_logs(
+                            current_proj_name,
+                            node_name=active_node,
+                            issue_id=active_issue_id,
+                        )
+                elif current_identity != prev_identity:
+                    self._active_node_identity = current_identity
+                    self.selected_node = active_node
+                    self.selected_issue_id = active_issue_id
+                    await self.hydrate_project_logs(
+                        current_proj_name,
+                        node_name=active_node,
+                        issue_id=active_issue_id,
+                    )
+
         # Preserve cursor within valid bounds / selected project & node
         if table.row_count > 0:
             target_cursor_index = None
@@ -572,7 +679,25 @@ class DashboardApp(App):
             if project_name != self.selected_project or node_name != getattr(self, "selected_node", None):
                 self.selected_project = project_name
                 self.selected_node = node_name
-                await self.hydrate_project_logs(project_name, node_name=node_name)
+                self._active_node_identity = (project_name, node_name)
+                issue_id = None
+                if self.state_manager and node_name:
+                    try:
+                        active_jobs = await self.state_manager.get_active_jobs()
+                        p = next((proj for proj in self.config.projects if proj.name == project_name), None)
+                        if p:
+                            matching = [
+                                j for j in active_jobs
+                                if j.get("repo") == p.repo
+                                and j.get("node_type") == node_name
+                                and j.get("status") == "RUNNING"
+                            ]
+                            if matching:
+                                issue_id = matching[0].get("issue_id")
+                    except Exception:
+                        pass
+                self.selected_issue_id = issue_id
+                await self.hydrate_project_logs(project_name, node_name=node_name, issue_id=issue_id)
                 await self._update_bottom_panes(project_name, force=True)
 
     @on(DataTable.RowSelected, "#sdlc_widget")
@@ -602,7 +727,11 @@ class DashboardApp(App):
             except Exception:
                 pass
         elif pane_id == "tab_logs":
-            await self.hydrate_project_logs(self.selected_project, node_name=self.selected_node)
+            await self.hydrate_project_logs(
+                self.selected_project,
+                node_name=self.selected_node,
+                issue_id=getattr(self, "selected_issue_id", None),
+            )
         elif pane_id == "tab_alerts":
             try:
                 alerts_widget = self.query_one(AnomalyAlertsWidget)
