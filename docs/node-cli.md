@@ -55,13 +55,46 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - **Per-Node Cold-Start Disk Log Fallback**: When in-memory deques are empty upon daemon restart or cold start, `ProjectLogBufferManager.tail_latest_project_logs` uses pure-Python recursive disk tailing (`pathlib.Path.rglob`) to load the last 100 lines from the latest execution log file under `~/.config/orchestrator/logs/<project>/<node>/*.log` (scoped directly to the requested node directory), providing immediate historical context.
    - **Persistent Append-Only Stream**: Historical log entries persist indefinitely across 2.0s table refresh ticks without calling `clear()`.
    - **Interactive Auto-Scroll & Clear Controls**: Pressing `Space` toggles auto-scrolling (`[Auto-Scroll: ON/OFF]`) allowing the operator to freeze scroll position to inspect historical traces, while `Ctrl+L` manually clears the buffer on demand.
-6. **Native Dual-Level Async Concurrency**:
+6. **Real-Time Active Node Log Streaming & Zero-Refresh Observability**:
+   - **Zero-Refresh Streaming Behavior**: When an active AI execution node runs in the background, live log lines emitted by the AI harness stream into the "Logs" tab in real-time without requiring the operator to press `R` or refresh manually.
+   - **Automatic Node Scope Inference & Identity Transition**: When background workers acquire SQLite task locks (e.g. `architect` locking Issue #75, or `devtest` locking Issue #76), `update_projects_table` detects active job state changes via `(project_name, active_node)` identity diffing on the 2.0s table refresh loop. The active node and issue ID (`selected_node`, `selected_issue_id`) are updated automatically without cursor movement or manual selection, updating the log pane border title to `Live Output [<project> | <node>*]` and triggering project log hydration.
+   - **Disambiguated Placeholders & Clean Retirement**:
+     - *Missing Execution Logs*: When a node is selected or actively running but no execution log file exists yet, the log view renders: `No execution logs found yet for node '{node_name}'`.
+     - *0-Byte Active Startup File*: When a newly spawned harness initializes and creates a 0-byte log file on disk, the view renders: `⚡ Initializing {node_name} harness on Issue #{issue_id}... Awaiting output.`.
+     - *Clean Retirement*: Upon receiving the first live output byte (via harness stream callback or incremental disk polling), the placeholder cleanly retires and is replaced by live execution output.
+   - **Seamless Offset Handoff Protocol**: On initial log hydration of an active log file, `DashboardApp` captures `_last_tail_file = target_file` and `_last_tail_offset = file_size`. During 2.0s incremental polling (`_poll_active_log_file`), reads start strictly from byte `_last_tail_offset`, completely preventing duplicate lines or dropped output.
+   - **Direct Main-Loop Writing**: Streaming lines are written directly to `log_view.write(rich.markup.escape(line))` when executing on the main asyncio thread, eliminating `call_from_thread` `RuntimeError` thread exceptions while retaining thread-safe dispatch when called from worker threads.
+   - **Strict Node Scope Isolation**: Enforces strict isolation across disk and in-memory buffers; querying logs for `architect` will never return `devtest` logs or untagged in-memory lines, nor fall back to unfiltered project files.
+   - **Graceful Log Rotation Recovery**: If an actively tailed log file is unlinked or rotated (e.g. via `rotate_logs`), or truncated in-place, `_poll_active_log_file` catches `FileNotFoundError` or size truncation, resets tracked file and offset to `None` and `0`, and cleanly re-discovers the active log file on the subsequent tick.
+7. **Native Dual-Level Async Concurrency**:
    - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
    - **Level 1 (Inter-Project Concurrency)**: Per-project worker loops execute concurrently in parallel worker tasks via `asyncio.gather()` with zero cross-thread SQLite collisions.
    - **Level 2 (Intra-Project Concurrency)**: Within each project cycle (`run_project_cycle`), Architect (producer) and DevTest (consumer) execute concurrently via `asyncio.gather(architect_cycle, devtest_cycle)` in isolated Git worktrees (`.graph/worktrees/`) with failure isolation, falling back gracefully to serial execution on `local_path` when worktrees are disabled.
-7. **Graceful Teardown & Resource Cleanup**:
+8. **Graceful Teardown & Resource Cleanup**:
    - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
    - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.
+
+---
+
+### 🔴 Real-Time Active Node Log Streaming & Observability Specification
+
+The dashboard provides zero-refresh, real-time observability into autonomous AI agents executing across registered repositories.
+
+#### Architectural Safeguards (Consensus Architecture S-1 to S-18)
+1. **Typed Query Result (`LogQueryResult`)**: Both `tail_latest_project_logs` and `get_project_logs` in `orchestrator.logging` return a typed `LogQueryResult(lines: List[str], target_file: Optional[Path], file_size: int)` container supporting backwards-compatible tuple and iterable unpacking.
+2. **Identity Diffing State Transition**: During 2.0s table refresh ticks (`update_projects_table`), the dashboard compares current `(selected_project, selected_node)` identity against the active job status extracted from SQLite locks. When a node transitions (e.g. `Idle -> architect` on Issue #75, or `architect -> devtest` on Issue #76), the dashboard updates `selected_node`, `selected_issue_id`, and `border_title` dynamically.
+3. **Disambiguated Status Placeholders**:
+   - `No execution logs found yet for node '{node_name}'`: Displayed when no disk logs or in-memory lines match the requested node scope.
+   - `⚡ Initializing {node_name} harness on Issue #{issue_id}... Awaiting output.`: Displayed when a 0-byte log file is detected on disk during harness startup.
+   - The placeholder cleanly retires as soon as the first byte is emitted by the harness.
+4. **Seamless Offset Handoff Protocol**:
+   - `hydrate_project_logs` seeds `_last_tail_file` with the active log file path and `_last_tail_offset` with the current byte length.
+   - On each subsequent 2.0s tick, `_poll_active_log_file` checks `target_file.stat().st_size`. If new bytes have arrived, it seeks directly to `_last_tail_offset` and reads only the delta, updating `_last_tail_offset = target_file.stat().st_size`. This completely prevents duplicate lines.
+5. **Direct Main-Loop Writing & Escape**:
+   - When output is received on the main event loop thread (`threading.get_ident() == self._thread_id`), lines are written directly via `log_view.write(rich.markup.escape(line))`, avoiding `call_from_thread`. When received from background worker threads, `call_from_thread` is invoked safely.
+6. **Graceful Log Rotation Recovery**:
+   - If an actively tailed file is unlinked or rotated (e.g. by `rotate_logs`), `_poll_active_log_file` catches `FileNotFoundError`, resets `_last_tail_file = None` and `_last_tail_offset = 0`, and re-discovers the active file on the next tick.
+   - If a file is truncated in-place (`current_size < _last_tail_offset`), it resets the offset to 0 and re-tails cleanly.
 
 ---
 
