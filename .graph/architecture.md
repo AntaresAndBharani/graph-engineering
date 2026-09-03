@@ -376,8 +376,8 @@ To minimize GitHub CLI rate limit consumption and round-trip latency, `poller.py
    - AI CLI subprocess output contains rich terminal ANSI escape codes. All stdout streams written to disk or parsed for structured JSON must pass through `strip_ansi()` to avoid corruption and log bloat.
 5. **No Orphaned Subprocesses**:
    - When a harness execution times out or is cancelled, `_kill_process_tree()` must recursively terminate the parent process and all child processes using `psutil`.
-6. **Idempotent Label Provisioning**:
-   - Label synchronization via `sync_repository_labels` must use `gh label create --force` to prevent duplicate or conflicting label definitions.
+6. **Smart Single-Pass Label Provisioning & Purge Guard**:
+   - Label synchronization via `sync_repository_labels` inspects existing repository labels in a single `gh label list --json name,color,description --limit 200` query, normalizes colors with `color.lstrip('#').casefold()`, and issues `gh label create --force` only when a managed label is missing or differs in color/description. Legacy label deletion passes run at most once per repository, guarded by `legacy_purge_done:{repo}` in `daemon_control`. During daemon startup, label synchronization executes non-blockingly in the background while project workers synchronize their first cycle via `asyncio.Event` barriers.
 7. **Non-Blocking SQLite Access**:
    - Always configure SQLite with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` to prevent database locks across asynchronous coroutines.
 8. **Disabled Node Resource Isolation**:

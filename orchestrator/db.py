@@ -383,6 +383,28 @@ class StateManager:
             rows = await cursor.fetchall()
             return {r[0]: r[1] for r in rows}
 
+    async def get_daemon_control_value(self, key: str) -> Optional[str]:
+        """Returns the value for a key in daemon_control, or None if not found."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = ?;", (key,))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def set_daemon_control_value(self, key: str, value: str) -> None:
+        """Sets a key-value pair in daemon_control."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;",
+                (key, value, now),
+            )
+            await db.commit()
+
     async def acquire_lock(
         self,
         issue_id: str | int,
