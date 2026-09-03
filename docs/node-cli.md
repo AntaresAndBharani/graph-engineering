@@ -18,28 +18,36 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
 
 ```text
 ┌──────────────────────────────────────── Graph Orchestrator ────────────────────────────────────────┐
-│ Project Name    Repository                    Active Node   Status   Last Updated   Locks/Anomalies│
-│ alpha           AntaresAndBharani/alpha       DevTest       Active   14:52:10       Issue #27      │
-│ crosstraining   AntaresAndBharani/crosstrain  Idle          Active   14:52:10       None           │
-│ zebra           AntaresAndBharani/zebra       Idle          Paused   14:52:10       None           │
+│ Config: ~/.orchestrator/config.yaml | Last Reload: 14:52:10 (CLI IPC) | Daemon PID: 18532 [SUCCESS]│
+├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Project Name    Repository                    Active Node   Status   Last Updated   Locks/Anom.  Agent Model     │
+│ alpha           AntaresAndBharani/alpha       DevTest       Active   14:52:10       Issue #27    claude-sonnet-5 │
+│ crosstraining   AntaresAndBharani/crosstrain  Idle          Active   14:52:10       None         —               │
+│ zebra           AntaresAndBharani/zebra       Idle          Paused   14:52:10       None         —               │
 ├──────────────────────────────────────────────────┬─────────────────────────────────────────────────┤
-│ Active SDLC Items (alpha)                        │ [ Logs ]  Alerts (24h)                          │
+│ Active SDLC Items (alpha)                        │ [ Logs ]  Quota Limits  Alerts (24h)            │
 │ ID    Title                   Status   PR        │ 14:52:08 [INFO] Daemon started                  │
 │ #27   feat(ui): dashboard     dev      #32       │ 14:52:10 [INFO] [alpha] DevTest: Starting TDD   │
-└──────────────────────────────────────────────────┴───── Q: Quit  R: Refresh  Space: Toggle Auto-Scroll  Ctrl+L: Clear Logs ┘
+└──────────────────────────────────────────────────┴───── Q: Quit  R: Refresh  Space: Auto-Scroll ┘
 ```
 
 ### Key UI Capabilities:
-1. **Alphabetically Sorted Projects DataTable (Top Pane)**:
-   - Displays real-time status across all configured repositories: `[Project Name | Repository | Active Node | Status | Last Updated | Locks/Anomalies]`.
+1. **ConfigStatusBanner Widget (Top Pane)**:
+   - Positioned directly above `#projects_table` with `height: 3`.
+   - Displays the canonical resolved config file path, last reload local timestamp, trigger source (e.g. `CLI IPC` vs `Daemon Startup`), and reload status (`SUCCESS`/`FAILED`).
+   - Prevents layout overflow by styling `#projects_table` with `height: 1fr`.
+   - Dynamically rehydrated upon reload via asynchronous `DashboardApp._rebind_config`.
+2. **Alphabetically Sorted Projects DataTable (Top Pane)**:
+   - Displays real-time status across all configured repositories with an explicit 7th column: `[Project Name | Repository | Active Node | Status | Last Updated | Locks/Anomalies | Agent Model]`.
    - Projects are automatically sorted in alphabetical order.
    - Refreshed asynchronously every 2 seconds via `self.set_interval(2.0, ...)` without blocking the UI event loop.
-2. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
+   - Dedicated 7th column **Agent Model** renders pure harness-agnostic specifications via `format_node_agent_spec(model, effort)` (e.g. `claude-sonnet-5 (medium)` or `gemini-3.8-flash-high`), rendering `—` for idle or unassigned project rows.
+3. **Multi-Pane Bottom Split (50/50 Horizontal Layout)**:
    - **Bottom-Left (`SDLCProgressWidget`)**: Renders active SDLC items (Issues, Subtasks, PRs) for the selected project directly from SQLite.
    - **Bottom-Right (`TabbedContent`)**: Hosts switchable tabs between the filtered daemon log stream (`RichLog`), quota limits (`HarnessQuotaWidget`), and recent 24h anomaly/retry events (`AnomalyAlertsWidget`).
-3. **Reactive Project Selection**:
+4. **Reactive Project Selection**:
    - Highlighting any project row in the top DataTable (via Up/Down arrow keys or mouse) triggers `@on(DataTable.RowHighlighted)`, immediately and reactively re-querying SQLite and updating both the SDLC progress pane and the 24h anomaly alerts tab.
-4. **Project-Scoped Log Hydration & Bounded Stream (`ProjectLogBufferManager` & `RichLog`)**:
+5. **Project-Scoped Log Hydration & Bounded Stream (`ProjectLogBufferManager` & `RichLog`)**:
    - Captures core root `orchestrator` daemon events via `TextualLogHandler` and live agent subprocess outputs.
    - Backed by `ProjectLogBufferManager` maintaining a global bounded buffer (`GLOBAL_LOG_BUFFER: deque(maxlen=1000)`) and project-scoped buffers (`PROJECT_BUFFERS: dict[str, deque[tuple[Optional[str], str]](maxlen=500)]`) storing `(node_name, line)` tuples to support independent node filtering and prevent memory growth or UI freezes.
    - Automatically drops verbose per-node agent harness traces (which are isolated in per-node log files under `~/.config/orchestrator/logs/`).
@@ -47,11 +55,11 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
    - **Per-Node Cold-Start Disk Log Fallback**: When in-memory deques are empty upon daemon restart or cold start, `ProjectLogBufferManager.tail_latest_project_logs` uses pure-Python recursive disk tailing (`pathlib.Path.rglob`) to load the last 100 lines from the latest execution log file under `~/.config/orchestrator/logs/<project>/<node>/*.log` (scoped directly to the requested node directory), providing immediate historical context.
    - **Persistent Append-Only Stream**: Historical log entries persist indefinitely across 2.0s table refresh ticks without calling `clear()`.
    - **Interactive Auto-Scroll & Clear Controls**: Pressing `Space` toggles auto-scrolling (`[Auto-Scroll: ON/OFF]`) allowing the operator to freeze scroll position to inspect historical traces, while `Ctrl+L` manually clears the buffer on demand.
-5. **Native Dual-Level Async Concurrency**:
+6. **Native Dual-Level Async Concurrency**:
    - Runs natively inside the existing Python `asyncio` event loop using `app.run_async()`.
    - **Level 1 (Inter-Project Concurrency)**: Per-project worker loops execute concurrently in parallel worker tasks via `asyncio.gather()` with zero cross-thread SQLite collisions.
    - **Level 2 (Intra-Project Concurrency)**: Within each project cycle (`run_project_cycle`), Architect (producer) and DevTest (consumer) execute concurrently via `asyncio.gather(architect_cycle, devtest_cycle)` in isolated Git worktrees (`.graph/worktrees/`) with failure isolation, falling back gracefully to serial execution on `local_path` when worktrees are disabled.
-6. **Graceful Teardown & Resource Cleanup**:
+7. **Graceful Teardown & Resource Cleanup**:
    - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
    - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.
 
@@ -76,6 +84,11 @@ orchestrator watch [OPTIONS]
 - When standard output is not an interactive terminal (`sys.stdout.isatty() is False`), or when `--no-dashboard` / `--headless` is specified, the Textual TUI does not initialize.
 - Headless execution runs the standard asynchronous polling loop emitting formatted logs directly to `stdout`.
 - The presentation UI module `orchestrator.ui.dashboard` is loaded lazily and is never imported in headless mode.
+
+**Instant Non-Blocking Startup & Background Label Synchronization**:
+- Decouples repository workflow label synchronization from daemon startup by executing `sync_all_projects_labels` as an unawaited background task (`asyncio.create_task`).
+- Enables the Textual TUI dashboard to launch and become interactive within 1.0 second without blocking on remote GitHub API calls.
+- Protects worker cycles via a per-project `asyncio.Event` synchronization barrier (with a 60-second timeout fallback), ensuring repository labels are provisioned before each project worker executes its first cycle.
 
 ---
 
@@ -112,7 +125,15 @@ Initializes SQLite database and provisions/synchronizes all managed workflow lab
 ```bash
 orchestrator init [-p PROJECT] [-c CONFIG]
 orchestrator labels [-p PROJECT] [-c CONFIG]
+orchestrator labels sync [-p PROJECT] [-c CONFIG] [--no-purge]
 ```
+
+**Smart Single-Pass Label Synchronization & Purge Guard**:
+- **Single-Pass Inspection**: Queries `gh label list --json name,color,description --limit 200` in a single API round-trip per repository.
+- **Color Normalization**: Normalizes hex colors via `color.lstrip('#').casefold()` to prevent false-positive drift between uppercase and lowercase codes.
+- **One-Shot Purge Guard**: Permanently skips obsolete label deletion passes once `legacy_purge_done:{repo}` is recorded in SQLite `daemon_control`.
+- **Targeted Creation**: Issues `gh label create --force` only when a managed label is missing or its color/description differs, reporting `True` for verified-already-correct labels with zero redundant calls.
+- **Keyword-Only State Parameter**: Declares `*, state_manager: Optional[StateManager] = None` keyword-only to guarantee compilation safety across existing callers.
 
 ---
 
@@ -135,12 +156,25 @@ orchestrator stop
 
 ---
 
-### `orchestrator reload`
+### `orchestrator config reload` / `orchestrator reload`
 Signals the running daemon to dynamically hot-reload configuration and in-memory Python modules without restarting the process.
 
 ```bash
-orchestrator reload
+orchestrator config reload [-c CONFIG]
+orchestrator reload [-c CONFIG]
 ```
+
+**Centralized Reload Architecture & Synchronous Acknowledgement**:
+- **Single-Owner Reload Watcher**: A dedicated 1.0s `_daemon_reload_watcher` task in `orchestrator/cli.py` is the sole consumer of `reload_requested` signals, completely eliminating worker reload race conditions.
+- **Shared Mutable `ConfigHolder`**: Reloaded configuration is published atomically to active project worker loops and UI components via `ConfigHolder` (`orchestrator/reloader.py`).
+- **Synchronous CLI Acknowledgement**: When an active daemon PID is detected (`psutil.pid_exists`), `orchestrator config reload` polls SQLite `daemon_control` for up to 2.0s until `last_reload_at_epoch > pre_epoch`, displaying confirmed reload timestamp, PID, and active project count.
+- **Short-Circuit Signal Queuing**: If no active daemon is running (or the PID is dead), the CLI queues the reload signal immediately without waiting 2.0s.
+- **Reactive 4-Holder Rebind**: On reload, the watcher invokes `DashboardApp._rebind_config`, asynchronously updating:
+  1. `DashboardApp.config` (`self.config`)
+  2. `QuotaManager.config`
+  3. `QuotaManager.quota_settings`
+  4. `HarnessQuotaWidget` (immediately triggering `update_quotas` to render updated limits in the Quota tab)
+  5. `ConfigStatusBanner` (rendering resolved path, local timestamp, and trigger source).
 
 ---
 

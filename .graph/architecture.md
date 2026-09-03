@@ -158,8 +158,8 @@ graph TD
 
 4. **Presentation & CLI Layer (`orchestrator/cli.py`, `orchestrator/ui/dashboard.py`, `orchestrator/ui/widgets.py`)**:
    - Pure UI adapter handling command-line arguments, options (`--dashboard/--no-dashboard`, `--headless`), terminal dashboards (`DashboardApp`), and signal handling.
-   - Encapsulates modular Textual widgets (`SDLCProgressWidget`, `AnomalyAlertsWidget`, `HarnessQuotaWidget`) as read-only consumers of the SQLite Blackboard and `QuotaManager` via Dependency Injection.
-   - Commands: `run`, `watch` (with interactive Textual TUI dashboard and headless fallback), `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `reload`, `artifact`, `artifacts`, `supervisor`.
+   - Encapsulates modular Textual widgets (`ConfigStatusBanner`, `SDLCProgressWidget`, `AnomalyAlertsWidget`, `HarnessQuotaWidget`) as read-only consumers of the SQLite Blackboard, `ConfigHolder`, and `QuotaManager` via Dependency Injection.
+   - Commands: `run`, `watch` (with interactive Textual TUI dashboard and headless fallback), `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `config reload`, `reload`, `artifact`, `artifacts`, `supervisor`.
    - Coordinates parallel workers across projects (Level 1 Inter-Project Concurrency) and executes Architect (producer) and DevTest (consumer) concurrently per project via `asyncio.gather` (Level 2 Intra-Project Concurrency) with complete failure isolation and non-destructive serial fallback, while handling graceful daemon shutdown, live reloading, and non-blocking TUI observability.
 
 ---
@@ -319,15 +319,21 @@ stateDiagram-v2
     Recovered --> [*]
 ```
 
-### 4. Dynamic Hot Reloading Runtime (`SourceWatcher` & `hot_reload_runtime`)
-The daemon monitors both `config.yaml` and internal Python source files (`orchestrator/**/*.py`) for file modification events. When changes are detected, `hot_reload_runtime()` topologically reloads modules in `sys.modules` without terminating running worker loops.
+### 4. Dynamic Hot Reloading Runtime (`SourceWatcher`, `_daemon_reload_watcher`, `ConfigHolder` & `_rebind_config`)
+The daemon provides dynamic in-memory configuration and module hot-reloading with zero worker restart downtime:
+- **Centralized Single-Owner Watcher (`_daemon_reload_watcher`)**: A dedicated 1.0s background watcher task in `orchestrator/cli.py` serves as the sole consumer of `reload_requested` signals in SQLite `daemon_control`. This completely eliminates worker reload races.
+- **Shared Thread-Safe `ConfigHolder` (`orchestrator/reloader.py`)**: The active configuration is held within a thread/async-safe `ConfigHolder` instance. Project worker loops read from this holder on each cycle without calling `hot_reload_runtime`.
+- **Topological Module & Schema Reload (`hot_reload_runtime`)**: Topologically reloads modified modules in `sys.modules` and parses fresh configuration.
+- **Reactive 4-Holder Rebind (`_rebind_config`)**: Upon successful reload, `_rebind_config` asynchronously updates `DashboardApp.config`, `QuotaManager.config`, `QuotaManager.quota_settings`, and awaits `HarnessQuotaWidget.update_quotas`, while updating `ConfigStatusBanner` with the resolved config path, local timestamp, and reload trigger (e.g. `CLI IPC`).
+- **Fail-Safe Config Retention**: If a reload encounters malformed syntax or schema validation errors, `last_reload_status='FAILED'` is recorded in `daemon_control`, the previous valid configuration is retained in `ConfigHolder`, and `reload_requested` is cleared to prevent infinite loops.
 
 ```mermaid
 flowchart LR
-    FileModified["File Modification Detected (mtime check)"] --> Reloader["hot_reload_runtime()"]
-    Reloader --> TopoReload["Topological importlib.reload() across sys.modules"]
-    TopoReload --> FreshConfig["fresh_load_config()"]
-    FreshConfig --> ActiveWorkers["Active Daemon Workers continue with Updated Code"]
+    ReloadSignal["Reload Signal (CLI IPC / File MTime)"] --> Watcher["_daemon_reload_watcher (1.0s loop)"]
+    Watcher --> Reloader["hot_reload_runtime()"]
+    Reloader --> ConfigHolderUpdate["Atomic ConfigHolder.update()"]
+    ConfigHolderUpdate --> RebindUI["_rebind_config() across 4 Holders\n(Dashboard, QuotaManager, Settings, QuotaWidget)"]
+    ConfigHolderUpdate --> ActiveWorkers["Active Daemon Workers continue with Updated Config"]
 ```
 
 ### 5. Autonomous Git Merge Conflict Resolution Pattern
@@ -382,6 +388,10 @@ To minimize GitHub CLI rate limit consumption and round-trip latency, `poller.py
    - Always configure SQLite with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` to prevent database locks across asynchronous coroutines.
 8. **Disabled Node Resource Isolation**:
    - When a node is disabled in `config.yaml` (`enabled: false`), the orchestrator cycle must completely bypass its execution, worktree allocation, and memory buffer initialization.
+9. **Pure Harness-Agnostic Agent Representation**:
+   - Model and reasoning effort formatting must use `format_node_agent_spec(model, effort)` with zero harness-specific branching or hardcoded harness strings, rendering `<model> (<effort>)` when effort is specified, `<model>` when effort is omitted, and `—` for idle rows. The dedicated 7th column `Agent Model` is rendered across startup status tables, `orchestrator list`, and TUI `projects_table`.
+10. **Centralized Reload Ownership & Multi-Worker Race Elimination**:
+   - The reload signal (`reload_requested`) must be consumed solely by the dedicated `_daemon_reload_watcher` task. Worker loops must never call `hot_reload_runtime` or clear reload flags, ensuring zero worker race conditions. Configuration state is shared via the thread/async-safe `ConfigHolder`.
 
 ### Anti-Patterns to Avoid
 
