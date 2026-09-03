@@ -463,6 +463,25 @@ class QuotaManager:
     def quota(self) -> QuotaSettings:
         return self.quota_settings
 
+    def update_config(self, config: GlobalConfig | QuotaSettings) -> None:
+        """Dynamically updates held GlobalConfig and QuotaSettings."""
+        if hasattr(config, "quota") and hasattr(config, "projects"):
+            self.config = config
+            self.quota_settings = config.quota
+        elif hasattr(config, "harnesses") and hasattr(config, "buffer_minutes"):
+            self.config = GlobalConfig(quota=config)
+            self.quota_settings = config
+        elif isinstance(config, GlobalConfig):
+            self.config = config
+            self.quota_settings = config.quota
+        elif isinstance(config, QuotaSettings):
+            self.config = GlobalConfig(quota=config)
+            self.quota_settings = config
+        else:
+            raise TypeError(
+                f"Invalid config type provided to QuotaManager: expected GlobalConfig or QuotaSettings, got {type(config).__name__}"
+            )
+
     def resolve_harness_for_node(self, project: ProjectConfig, node_name: str) -> str:
         """
         Resolves harness for the given node using ProjectConfig.nodes or NodeConfig default.

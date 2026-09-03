@@ -743,15 +743,23 @@ async def _watch_daemon_tui(
 
     quota_manager = QuotaManager(config, state_manager)
     app_instance = DashboardApp(
-        config=config,
+        config=config_holder,
         state_manager=state_manager,
         log_handler=textual_handler,
         quota_manager=quota_manager,
+        config_holder=config_holder,
+        config_path=pinned_config_path,
     )
 
     # Dedicated reload watcher task
     watcher_task = asyncio.create_task(
-        _daemon_reload_watcher(config_holder, state_manager, pinned_config_path, interval_seconds=1.0)
+        _daemon_reload_watcher(
+            config_holder,
+            state_manager,
+            pinned_config_path,
+            interval_seconds=1.0,
+            on_reload=app_instance._rebind_config,
+        )
     )
 
     if not enabled_projects:
