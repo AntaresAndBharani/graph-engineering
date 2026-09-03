@@ -50,6 +50,24 @@ async def test_daemon_registration_and_stop_lifecycle(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_pid_registration_and_unregistration(tmp_path: Path):
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    # Initially None
+    assert await state_manager.get_lifecycle_pid() is None
+
+    # Register lifecycle PID
+    await state_manager.register_lifecycle(54321)
+    assert await state_manager.get_lifecycle_pid() == 54321
+
+    # Unregister lifecycle PID
+    await state_manager.unregister_lifecycle()
+    assert await state_manager.get_lifecycle_pid() is None
+
+
+@pytest.mark.asyncio
 async def test_run_project_cycle_aborts_when_stop_requested(tmp_path: Path):
     db_file = tmp_path / "state.db"
     state_manager = StateManager(db_file)

@@ -306,6 +306,43 @@ class StateManager:
             )
             await db.commit()
 
+    async def register_lifecycle(self, pid: int) -> None:
+        """Registers the active lifecycle runner PID without overwriting main daemon control."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "INSERT INTO daemon_control (key, value, updated_at) VALUES ('lifecycle_pid', ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;",
+                (str(pid), now),
+            )
+            await db.commit()
+
+    async def unregister_lifecycle(self) -> None:
+        """Unregisters the lifecycle runner PID upon completion or exit."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                "DELETE FROM daemon_control WHERE key = 'lifecycle_pid';"
+            )
+            await db.commit()
+
+    async def get_lifecycle_pid(self) -> Optional[int]:
+        """Retrieves the active lifecycle runner PID if currently registered."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute("SELECT value FROM daemon_control WHERE key = 'lifecycle_pid';")
+            row = await cursor.fetchone()
+            if row and row[0]:
+                try:
+                    return int(row[0])
+                except (ValueError, TypeError):
+                    return None
+            return None
+
     async def request_stop(self) -> Optional[int]:
         """
         Signals a safe stop to all running workers.
