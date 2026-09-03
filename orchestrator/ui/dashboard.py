@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from textual import on
@@ -19,27 +20,33 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler, matches_node_scope
 from orchestrator.quota import QuotaManager
+from orchestrator.reloader import ConfigHolder
 from orchestrator.ui.widgets import (
     AnomalyAlertsWidget,
+    ConfigStatusBanner,
     HarnessQuotaWidget,
     SDLCProgressWidget,
     _apply_keyed_diff,
+    format_node_agent_spec,
 )
 
 
 class DashboardApp(App):
     """
     Read-only Async Textual TUI Observability Dashboard for graph-orchestrator watch.
-    Displays a live alphabetically-sorted projects status table and multi-pane bottom split
-    with SDLCProgressWidget and TabbedContent hosting RichLog, HarnessQuotaWidget, and AnomalyAlertsWidget.
+    Displays a live alphabetically-sorted projects status table with 7th column Agent Model,
+    ConfigStatusBanner, and multi-pane bottom split with SDLCProgressWidget and TabbedContent.
     """
 
     CSS = """
     Screen {
         layout: vertical;
     }
+    ConfigStatusBanner, #config_status_banner {
+        height: 3;
+    }
     #projects_table {
-        height: 40%;
+        height: 1fr;
         border: solid green;
     }
     #bottom_container {
@@ -79,21 +86,40 @@ class DashboardApp(App):
         "Status",
         "Last Updated",
         "Locks/Anomalies",
+        "Agent Model",
     ]
 
     def __init__(
         self,
-        config: Optional[GlobalConfig] = None,
+        config: Optional[GlobalConfig | ConfigHolder] = None,
         state_manager: Optional[StateManager] = None,
         log_handler: Optional[TextualLogHandler] = None,
         quota_manager: Optional[QuotaManager] = None,
         buffer_manager: Optional[ProjectLogBufferManager] = None,
         selected_project: Optional[str] = None,
         selected_node: Optional[str] = None,
+        config_holder: Optional[ConfigHolder] = None,
+        config_path: Optional[str | Path] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.config = config or GlobalConfig()
+        if isinstance(config, ConfigHolder):
+            self.config_holder: Optional[ConfigHolder] = config
+            self.config: GlobalConfig = config.config
+        else:
+            self.config_holder = config_holder
+            self.config = config or GlobalConfig()
+
+        self.config_path: Optional[Path] = (
+            Path(config_path).resolve() if config_path else (
+                Path(self.config.resolved_path).resolve() if getattr(self.config, "resolved_path", None) else (
+                    Path(self.config_holder.config.resolved_path).resolve() if self.config_holder and getattr(self.config_holder.config, "resolved_path", None) else None
+                )
+            )
+        )
+        if self.config_path and not getattr(self.config, "resolved_path", None):
+            self.config.resolved_path = self.config_path
+
         self.state_manager = state_manager
         self.log_handler = log_handler
         self.quota_manager = quota_manager
@@ -105,6 +131,7 @@ class DashboardApp(App):
         self.selected_project = selected_project
         self.selected_node = selected_node
         self._last_bottom_pane_fingerprint: Optional[str] = None
+        self._last_reload_at_epoch: Optional[float] = None
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
         self.auto_scroll: bool = True
@@ -112,8 +139,14 @@ class DashboardApp(App):
         self._update_sub_title()
 
     def compose(self) -> ComposeResult:
-        """Compose the TUI layout with Header, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
+        """Compose the TUI layout with Header, ConfigStatusBanner, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
         yield Header(show_clock=True)
+        yield ConfigStatusBanner(
+            id="config_status_banner",
+            config=self.config,
+            state_manager=self.state_manager,
+            config_path=self.config_path,
+        )
         yield DataTable(id="projects_table")
         with Horizontal(id="bottom_container"):
             yield SDLCProgressWidget(id="sdlc_widget", state_manager=self.state_manager)
@@ -263,6 +296,69 @@ class DashboardApp(App):
             except Exception:
                 pass
 
+    async def _rebind_config(
+        self,
+        new_config: Optional[GlobalConfig] = None,
+        trigger: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        config_path: Optional[str | Path] = None,
+    ) -> None:
+        """
+        Asynchronously reactively re-binds all 4 configuration holders:
+        1. DashboardApp.config (self.config)
+        2. QuotaManager.config
+        3. QuotaManager.quota_settings
+        4. HarnessQuotaWidget (and calls update_quotas)
+        Also updates ConfigStatusBanner and refreshes #projects_table immediately.
+        """
+        if new_config is None:
+            if self.config_holder is not None:
+                new_config = self.config_holder.config
+            elif self.config_path is not None:
+                from orchestrator.config import load_config
+                new_config = load_config(self.config_path)
+            else:
+                new_config = self.config
+
+        if new_config is not None:
+            if self.config_holder is not None and self.config_holder.config is not new_config:
+                self.config_holder.update(new_config)
+            self.config = new_config
+
+            if self.quota_manager is not None:
+                self.quota_manager.config = new_config
+                self.quota_manager.quota_settings = new_config.quota
+
+            # 4th holder: HarnessQuotaWidget
+            try:
+                quota_widget = self.query_one(HarnessQuotaWidget)
+                quota_widget.config = new_config
+                await quota_widget.update_quotas(
+                    config=new_config,
+                    state_manager=self.state_manager,
+                    quota_manager=self.quota_manager,
+                )
+            except Exception:
+                pass
+
+            # Update ConfigStatusBanner
+            try:
+                banner = self.query_one(ConfigStatusBanner)
+                await banner.update_status(
+                    config=new_config,
+                    trigger=trigger,
+                    timestamp=timestamp,
+                    config_path=config_path or self.config_path,
+                )
+            except Exception:
+                pass
+
+            # Update projects table
+            try:
+                await self.update_projects_table()
+            except Exception:
+                pass
+
     async def update_projects_table(self) -> None:
         """
         Queries state_manager / in-memory config and refreshes DataTable rows in-place
@@ -272,6 +368,27 @@ class DashboardApp(App):
             table = self.query_one("#projects_table", DataTable)
         except Exception:
             return
+
+        # Check if config was updated via ConfigHolder or StateManager
+        if self.config_holder and self.config_holder.config is not self.config:
+            await self._rebind_config(self.config_holder.config)
+        elif self.state_manager:
+            try:
+                info = await self.state_manager.get_daemon_info()
+                epoch_str = info.get("last_reload_at_epoch")
+                if epoch_str:
+                    epoch = float(epoch_str)
+                    if self._last_reload_at_epoch is None:
+                        self._last_reload_at_epoch = epoch
+                    elif epoch > self._last_reload_at_epoch:
+                        self._last_reload_at_epoch = epoch
+                        await self._rebind_config(
+                            trigger=info.get("last_reload_trigger"),
+                            timestamp=info.get("last_reload_timestamp"),
+                            config_path=info.get("last_reload_config_path"),
+                        )
+            except Exception:
+                pass
 
         paused_projects = set()
         active_jobs: List[Dict[str, Any]] = []
@@ -306,6 +423,17 @@ class DashboardApp(App):
                     display_name = p.name if idx == 0 else "  └─"
                     active_node = f"[bold cyan]{node_type}[/bold cyan]"
                     locks_info = f"Issue #{job.get('issue_id')}"
+
+                    # Determine agent model for active node
+                    node_key = str(node_type).lower()
+                    node_cfg = p.nodes.get(node_key)
+                    if not node_cfg:
+                        for base_node in ("architect", "devtest", "reviewer", "supervisor", "bau"):
+                            if node_key.startswith(base_node):
+                                node_cfg = p.nodes.get(base_node)
+                                break
+                    agent_model = format_node_agent_spec(node_cfg.model, node_cfg.effort) if node_cfg else "—"
+
                     target_rows.append(
                         (
                             row_key,
@@ -316,6 +444,7 @@ class DashboardApp(App):
                                 status,
                                 now_str,
                                 locks_info,
+                                agent_model,
                             ),
                         )
                     )
@@ -336,6 +465,7 @@ class DashboardApp(App):
                             status,
                             now_str,
                             locks_info,
+                            "—",
                         ),
                     )
                 )

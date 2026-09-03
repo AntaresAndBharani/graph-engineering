@@ -10,6 +10,7 @@ from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent
 from orchestrator.config import (
     GlobalConfig,
     HarnessQuotaConfig,
+    NodeConfig,
     ProjectConfig,
     QuotaSettings,
     SettingsConfig,
@@ -18,11 +19,14 @@ from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import ProjectLogBufferManager, TextualLogHandler
 from orchestrator.quota import QuotaManager
+from orchestrator.reloader import ConfigHolder
 from orchestrator.ui.dashboard import DashboardApp
 from orchestrator.ui.widgets import (
     AnomalyAlertsWidget,
+    ConfigStatusBanner,
     HarnessQuotaWidget,
     SDLCProgressWidget,
+    format_node_agent_spec,
 )
 
 
@@ -171,6 +175,7 @@ async def test_dashboard_table_columns(tmp_path: Path):
             "Status",
             "Last Updated",
             "Locks/Anomalies",
+            "Agent Model",
         ]
         assert column_labels == expected_columns
         assert app.TABLE_COLUMNS == expected_columns
@@ -2469,6 +2474,285 @@ async def test_dashboard_compound_node_log_streaming_and_prefix_matching(tmp_pat
 
         # Border title should show wildcard
         assert "architect*" in str(log_view.border_title)
+
+
+@pytest.mark.asyncio
+async def test_scenario_tui_dashboard_reactively_rebinds_all_4_config_holders_upon_reload(tmp_path: Path):
+    """
+    Scenario: TUI Dashboard reactively re-binds all 4 config holders upon reload
+      Given the Textual TUI dashboard is active with an initial configuration snapshot
+      When the daemon completes a configuration reload that modifies token limits or project models
+      Then "DashboardApp._rebind_config" must update "self.config", "quota_manager.config", and "quota_manager.quota_settings"
+      And "HarnessQuotaWidget.update_quotas" must immediately render the new token limit in the Quota tab
+      And the "ConfigStatusBanner" must display the canonical config path, local timestamp, and trigger
+      And the "projects_table" must immediately reflect the updated models.
+    """
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("version: 2\n", encoding="utf-8")
+
+    initial_project = ProjectConfig(
+        name="test-project",
+        repo="org/test-project",
+        local_path=str(tmp_path),
+        nodes={
+            "devtest": NodeConfig(model="gemini-3.8-flash-high"),
+        },
+    )
+    initial_config = GlobalConfig(
+        projects=[initial_project],
+        quota=QuotaSettings(
+            harnesses={
+                "antigravity": HarnessQuotaConfig(
+                    window_hours=1.0,
+                    window_token_limit=2_000_000,
+                    avg_tokens_per_hour=400_000,
+                ),
+            }
+        ),
+        resolved_path=config_file,
+    )
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.record_reload_complete(
+        status="SUCCESS",
+        projects_count=1,
+        config_path=config_file,
+        trigger="Daemon Startup",
+    )
+
+    # Acquire lock for devtest to simulate active running node
+    await state_manager.acquire_lock(issue_id=147, repo="org/test-project", node_type="devtest")
+
+    quota_manager = QuotaManager(initial_config, state_manager)
+    config_holder = ConfigHolder(initial_config)
+
+    app = DashboardApp(
+        config=config_holder,
+        state_manager=state_manager,
+        quota_manager=quota_manager,
+        config_holder=config_holder,
+        config_path=config_file,
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Initial checks
+        banner = app.query_one(ConfigStatusBanner)
+        assert str(config_file.resolve()) in banner.canonical_config_path
+        assert "Daemon Startup" in banner.last_reload_trigger
+
+        table = app.query_one("#projects_table", DataTable)
+        assert table.row_count == 1
+        row = table.get_row_at(0)
+        # Column 6 (7th column) is Agent Model
+        assert row[6] == "gemini-3.8-flash-high"
+
+        # Quota widget initial check
+        quota_widget = app.query_one(HarnessQuotaWidget)
+        assert "2.0M" in str(quota_widget.get_row("antigravity")[1])
+
+        # WHEN: Daemon completes a configuration reload that modifies token limits and project models
+        updated_project = ProjectConfig(
+            name="test-project",
+            repo="org/test-project",
+            local_path=str(tmp_path),
+            nodes={
+                "devtest": NodeConfig(model="claude-opus-4", effort="high"),
+            },
+        )
+        updated_config = GlobalConfig(
+            projects=[updated_project],
+            quota=QuotaSettings(
+                harnesses={
+                    "antigravity": HarnessQuotaConfig(
+                        window_hours=1.0,
+                        window_token_limit=8_000_000,
+                        avg_tokens_per_hour=400_000,
+                    ),
+                }
+            ),
+            resolved_path=config_file,
+        )
+
+        # Trigger rebind via _rebind_config
+        await app._rebind_config(
+            new_config=updated_config,
+            trigger="CLI IPC",
+            timestamp="2026-09-03 16:30:00",
+            config_path=config_file,
+        )
+        await pilot.pause()
+
+        # THEN 1: DashboardApp._rebind_config must update self.config, quota_manager.config, and quota_manager.quota_settings
+        assert app.config is updated_config
+        assert quota_manager.config is updated_config
+        assert quota_manager.quota_settings is updated_config.quota
+
+        # THEN 2: HarnessQuotaWidget.update_quotas must immediately render the new token limit in the Quota tab
+        assert quota_widget.config is updated_config
+        assert "8.0M" in str(quota_widget.get_row("antigravity")[1])
+
+        # THEN 3: ConfigStatusBanner must display canonical config path, local timestamp, and trigger
+        assert str(config_file.resolve()) in banner.canonical_config_path
+        assert banner.last_reload_timestamp == "2026-09-03 16:30:00"
+        assert banner.last_reload_trigger == "CLI IPC"
+        assert "CLI IPC" in banner.renderable.plain
+        assert "2026-09-03 16:30:00" in banner.renderable.plain
+
+        # THEN 4: projects_table must immediately reflect the updated models
+        updated_row = table.get_row_at(0)
+        assert updated_row[6] == "claude-opus-4 (high)"
+
+
+@pytest.mark.asyncio
+async def test_scenario_config_status_banner_rendering_and_layout_protection(tmp_path: Path):
+    """
+    Scenario: ConfigStatusBanner rendering and layout protection
+      Given the Textual TUI dashboard
+      When rendered in interactive mode
+      Then the "ConfigStatusBanner" widget must display above "#projects_table" with height 3
+      And "#projects_table" height must be styled as "1fr" to prevent layout overflow
+      And it must render the resolved config path, last reload local time, and trigger source.
+    """
+    config_file = tmp_path / "custom_config.yaml"
+    config_file.write_text("version: 2\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[ProjectConfig(name="p1", repo="org/p1", local_path=str(tmp_path))],
+        resolved_path=config_file,
+    )
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.record_reload_complete(
+        status="SUCCESS",
+        projects_count=1,
+        config_path=config_file,
+        trigger="File Watcher",
+        epoch=1725370000.0,
+    )
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        config_path=config_file,
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        banner = app.query_one(ConfigStatusBanner)
+        table = app.query_one("#projects_table", DataTable)
+
+        # 1. Displays above #projects_table
+        children = list(app.screen.children)
+        assert children.index(banner) < children.index(table)
+
+        # 2. Banner height must be 3
+        assert banner.styles.height.value == 3
+
+        # 3. #projects_table height must be styled as 1fr
+        assert str(table.styles.height) == "1fr"
+
+        # 4. Render resolved config path, last reload local time, and trigger source
+        assert str(config_file.resolve()) in banner.renderable.plain
+        assert "File Watcher" in banner.renderable.plain
+        assert banner.last_reload_trigger == "File Watcher"
+        assert banner.canonical_config_path == str(config_file.resolve())
+        assert banner.last_reload_timestamp != "-"
+
+
+@pytest.mark.asyncio
+async def test_scenario_7th_column_agent_model_in_tui_projects_table(tmp_path: Path):
+    """
+    Scenario: 7th Column Agent Model in TUI projects table
+      Given the projects table in DashboardApp
+      When rendered with active or idle projects
+      Then the table must contain a 7th column titled "Agent Model"
+      And running nodes must display the formatted agent specification via "format_node_agent_spec"
+      And idle project rows must display "—".
+    """
+    p_active = ProjectConfig(
+        name="active-proj",
+        repo="org/active-proj",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(model="claude-sonnet-5", effort="medium"),
+            "devtest": NodeConfig(model="gemini-3.8-flash-high"),
+        },
+    )
+    p_idle = ProjectConfig(
+        name="idle-proj",
+        repo="org/idle-proj",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(model="claude-sonnet-5"),
+        },
+    )
+    config = GlobalConfig(projects=[p_active, p_idle])
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Active lock on p_active
+    await state_manager.acquire_lock(issue_id=101, repo="org/active-proj", node_type="architect")
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        table = app.query_one("#projects_table", DataTable)
+
+        # Assert 7th column title is "Agent Model"
+        col_labels = [str(col.label) for col in table.columns.values()]
+        assert len(col_labels) == 7
+        assert col_labels[6] == "Agent Model"
+
+        # Row 0: active-proj (running architect)
+        row_active = table.get_row("active-proj::architect")
+        expected_spec = format_node_agent_spec("claude-sonnet-5", "medium")
+        assert expected_spec == "claude-sonnet-5 (medium)"
+        assert row_active[6] == expected_spec
+
+        # Row 1: idle-proj (idle)
+        row_idle = table.get_row("idle-proj::Idle")
+        assert row_idle[6] == "—"
+
+
+@pytest.mark.asyncio
+async def test_scenario_dashboard_app_config_holder_and_static_config_support(tmp_path: Path):
+    """Asserts DashboardApp supports both ConfigHolder and static GlobalConfig fallback."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("version: 2\n", encoding="utf-8")
+
+    initial_config = GlobalConfig(
+        projects=[ProjectConfig(name="p1", repo="org/p1", local_path=str(tmp_path))],
+        resolved_path=config_file,
+    )
+
+    # 1. With ConfigHolder
+    holder = ConfigHolder(initial_config)
+    app_with_holder = DashboardApp(config=holder)
+    assert app_with_holder.config_holder is holder
+    assert app_with_holder.config is initial_config
+
+    new_cfg = GlobalConfig(
+        projects=[ProjectConfig(name="p2", repo="org/p2", local_path=str(tmp_path))],
+        resolved_path=config_file,
+    )
+    await app_with_holder._rebind_config(new_cfg)
+    assert app_with_holder.config is new_cfg
+    assert holder.config is new_cfg
+
+    # 2. With static GlobalConfig
+    app_static = DashboardApp(config=initial_config)
+    assert app_static.config_holder is None
+    assert app_static.config is initial_config
+    await app_static._rebind_config(new_cfg)
+    assert app_static.config is new_cfg
 
 
 

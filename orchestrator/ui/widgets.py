@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import datetime
 import math
+from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from textual.widgets import DataTable
+from rich.text import Text
+from textual.widgets import DataTable, Static
 from textual.widgets.data_table import (
     CellDoesNotExist,
     ColumnDoesNotExist,
@@ -16,6 +18,160 @@ from textual.widgets.data_table import (
 from orchestrator.config import GlobalConfig
 from orchestrator.db import StateManager
 from orchestrator.quota import QuotaManager
+
+
+def format_node_agent_spec(
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> str:
+    """
+    Pure, harness-agnostic formatter for node agent model and optional reasoning effort.
+    Returns '<model> (<effort>)' when effort is non-empty, '<model>' when effort is omitted,
+    or '—' (em-dash) when model is None or empty (idle/unassigned).
+    Zero harness-specific branching or hardcoded harness names.
+    """
+    if not model or not model.strip():
+        return "—"
+    clean_model = model.strip()
+    if effort and effort.strip():
+        return f"{clean_model} ({effort.strip()})"
+    return clean_model
+
+
+class ConfigStatusBanner(Static):
+    """
+    Read-only Static banner widget displaying the canonical configuration file path,
+    last reload local timestamp, and trigger source above #projects_table.
+    """
+
+    DEFAULT_CSS = """
+    ConfigStatusBanner {
+        height: 3;
+    }
+    """
+
+    def __init__(
+        self,
+        config: Optional[GlobalConfig] = None,
+        state_manager: Optional[StateManager] = None,
+        config_path: Optional[str | Path] = None,
+        id: Optional[str] = "config_status_banner",
+        **kwargs,
+    ) -> None:
+        super().__init__(id=id, **kwargs)
+        self.config = config
+        self.state_manager = state_manager
+        self.config_path = config_path
+        self.canonical_config_path: str = "-"
+        self.last_reload_timestamp: str = "-"
+        self.last_reload_trigger: str = "-"
+        self.last_reload_status: str = "SUCCESS"
+
+    @property
+    def resolved_config_path(self) -> str:
+        return self.canonical_config_path
+
+    @property
+    def timestamp(self) -> str:
+        return self.last_reload_timestamp
+
+    @property
+    def trigger(self) -> str:
+        return self.last_reload_trigger
+
+    @property
+    def trigger_source(self) -> str:
+        return self.last_reload_trigger
+
+    @property
+    def renderable(self) -> Any:
+        if hasattr(self, "_renderable") and self._renderable is not None:
+            return self._renderable
+        return self.render()
+
+    @property
+    def text(self) -> str:
+        r = self.renderable
+        return r.plain if hasattr(r, "plain") else str(r)
+
+    async def on_mount(self) -> None:
+        """Initializes banner content on widget mount."""
+        await self.refresh_status()
+
+    async def update_status(
+        self,
+        config: Optional[GlobalConfig] = None,
+        trigger: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        config_path: Optional[str | Path] = None,
+    ) -> None:
+        """Asynchronously updates the status banner with fresh configuration and reload telemetry."""
+        await self.refresh_status(config=config, trigger=trigger, timestamp=timestamp, config_path=config_path)
+
+    async def refresh_status(
+        self,
+        config: Optional[GlobalConfig] = None,
+        trigger: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        config_path: Optional[str | Path] = None,
+    ) -> None:
+        """Queries StateManager or in-memory config to refresh path, timestamp, and trigger."""
+        if config is not None:
+            self.config = config
+        if config_path is not None:
+            self.config_path = config_path
+
+        resolved_p = None
+        if self.config and getattr(self.config, "resolved_path", None):
+            resolved_p = str(Path(self.config.resolved_path).resolve())
+        elif self.config_path:
+            resolved_p = str(Path(self.config_path).resolve())
+
+        trig = trigger
+        ts = timestamp
+        status = "SUCCESS"
+
+        if self.state_manager:
+            try:
+                info = await self.state_manager.get_daemon_info()
+                if not trig and "last_reload_trigger" in info:
+                    trig = info["last_reload_trigger"]
+                if not ts and "last_reload_timestamp" in info:
+                    ts = info["last_reload_timestamp"]
+                if not resolved_p and "last_reload_config_path" in info:
+                    resolved_p = str(Path(info["last_reload_config_path"]).resolve())
+                if "last_reload_status" in info:
+                    status = info["last_reload_status"]
+            except Exception:
+                pass
+
+        if not resolved_p:
+            from orchestrator.config import find_config_file
+            try:
+                found = find_config_file(self.config_path)
+                resolved_p = str(found.resolve()) if found else "~/.orchestrator/config.yaml"
+            except Exception:
+                resolved_p = str(self.config_path or "~/.orchestrator/config.yaml")
+
+        if not ts:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if not trig:
+            trig = "Daemon Startup"
+
+        self.canonical_config_path = str(resolved_p)
+        self.last_reload_timestamp = str(ts)
+        self.last_reload_trigger = str(trig)
+        self.last_reload_status = status
+
+        status_color = "green" if status == "SUCCESS" else "red"
+        markup = (
+            f"[bold cyan]Config:[/bold cyan] {self.canonical_config_path}  │  "
+            f"[bold cyan]Last Reload:[/bold cyan] {self.last_reload_timestamp}  │  "
+            f"[bold cyan]Trigger:[/bold cyan] [{status_color}]{self.last_reload_trigger}[/{status_color}]"
+        )
+        self.update(Text.from_markup(markup))
+
 
 
 def _apply_keyed_diff(
