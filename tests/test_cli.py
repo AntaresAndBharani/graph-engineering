@@ -854,6 +854,98 @@ projects:
     assert "—" in result.stdout
 
 
+def test_cli_labels_passes_state_manager(tmp_path: Path, monkeypatch):
+    """
+    Verify orchestrator labels command provides state_manager to sync_repository_labels.
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "{posix_path}"
+    enabled: true
+        """,
+        encoding="utf-8",
+    )
+
+    passed_kwargs = {}
+
+    async def mock_sync(repo, labels, purge_legacy=True, *, state_manager=None):
+        passed_kwargs["repo"] = repo
+        passed_kwargs["state_manager"] = state_manager
+        return {lbl.name: True for lbl in labels}
+
+    monkeypatch.setattr("orchestrator.cli.sync_repository_labels", mock_sync)
+
+    result = runner.invoke(app, ["labels", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert passed_kwargs.get("repo") == "org/alpha"
+    assert isinstance(passed_kwargs.get("state_manager"), StateManager)
+
+
+@pytest.mark.asyncio
+async def test_cli_watch_headless_nonblocking_startup(tmp_path: Path, monkeypatch):
+    """
+    Verify orchestrator watch in headless mode launches background sync task
+    and wires sync_events to project worker loops.
+    """
+    from orchestrator.cli import _watch_daemon_headless
+
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+  poll_interval_seconds: 5
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "{posix_path}"
+    enabled: true
+        """,
+        encoding="utf-8",
+    )
+
+    sync_started = asyncio.Event()
+    worker_started = asyncio.Event()
+    received_sync_event = []
+
+    async def mock_sync_all(projects, labels, *, state_manager=None, concurrency=4, sync_events=None):
+        sync_started.set()
+        # Simulate non-blocking work
+        await asyncio.sleep(0.05)
+        if sync_events and "alpha" in sync_events:
+            sync_events["alpha"].set()
+        return {"org/alpha": {lbl.name: True for lbl in labels}}
+
+    async def mock_worker_loop(project, config, state_mgr, interval, config_path=None, sync_event=None):
+        received_sync_event.append(sync_event)
+        worker_started.set()
+        # Request daemon stop so watch loop finishes
+        await state_mgr.request_stop()
+
+    monkeypatch.setattr("orchestrator.cli.sync_all_projects_labels", mock_sync_all)
+    monkeypatch.setattr("orchestrator.cli._project_worker_loop", mock_worker_loop)
+
+    await _watch_daemon_headless(interval_override=5, config_path=config_file)
+
+    assert sync_started.is_set()
+    assert worker_started.is_set()
+    assert len(received_sync_event) == 1
+    assert isinstance(received_sync_event[0], asyncio.Event)
+
+
+
 
 
 

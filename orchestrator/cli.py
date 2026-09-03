@@ -498,14 +498,24 @@ async def _project_worker_loop(
     state_manager: StateManager,
     interval: int,
     config_path: Optional[Path] = None,
+    sync_event: Optional[asyncio.Event] = None,
 ) -> None:
     """
     Independent worker loop for a single project.
     Runs sequentially within this project.
+    Waits on sync_event (timeout 60s) before executing its first cycle if provided.
     If work is performed in a pass, immediately starts the next pass (with a 1s debounce).
     Reads the active configuration from the shared ConfigHolder on every iteration.
     Only sleeps for `interval` when all nodes in this project are idle.
     """
+    if sync_event is not None and not sync_event.is_set():
+        try:
+            await asyncio.wait_for(sync_event.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            console.print(f"  [yellow]⚠ [{project.name}]: Label sync timed out after 60s; proceeding with first cycle.[/yellow]")
+        except asyncio.CancelledError:
+            return
+
     while True:
         try:
             if await state_manager.is_stop_requested():
@@ -625,10 +635,6 @@ async def _watch_daemon_headless(
 
     render_node_status_table(config, console_out=console)
 
-    # Startup label synchronization
-    console.print("[dim]Synchronizing repository workflow labels...[/dim]")
-    await sync_all_projects_labels(config.projects, config.managed_labels)
-
     if not enabled_projects:
         console.print("[yellow]No enabled projects found in configuration.[/yellow]")
         await state_manager.unregister_daemon()
@@ -639,9 +645,39 @@ async def _watch_daemon_headless(
         _daemon_reload_watcher(config_holder, state_manager, pinned_config_path, interval_seconds=1.0)
     )
 
+    # Per-project sync barrier events
+    sync_events = {p.name: asyncio.Event() for p in enabled_projects}
+
+    async def _background_sync() -> None:
+        try:
+            await sync_all_projects_labels(
+                config.projects,
+                config.managed_labels,
+                state_manager=state_manager,
+                sync_events=sync_events,
+            )
+        except Exception as e:
+            _logger.error("Background label sync error: %s", e)
+        finally:
+            for ev in sync_events.values():
+                if not ev.is_set():
+                    ev.set()
+
+    console.print("[dim]Synchronizing repository workflow labels in background...[/dim]")
+    sync_task = asyncio.create_task(_background_sync())
+
     # Spawn concurrent worker tasks for each project
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config_holder, state_manager, interval, config_path=pinned_config_path))
+        asyncio.create_task(
+            _project_worker_loop(
+                p,
+                config_holder,
+                state_manager,
+                interval,
+                config_path=pinned_config_path,
+                sync_event=sync_events.get(p.name),
+            )
+        )
         for p in enabled_projects
     ]
 
@@ -651,8 +687,10 @@ async def _watch_daemon_headless(
         for w in workers:
             w.cancel()
         watcher_task.cancel()
+        sync_task.cancel()
         console.print("[yellow]Daemon stopped by user.[/yellow]")
     finally:
+        sync_task.cancel()
         watcher_task.cancel()
         AsyncHarnessAdapter.terminate_all_active()
         await state_manager.unregister_daemon()
@@ -703,9 +741,6 @@ async def _watch_daemon_tui(
 
     render_node_status_table(config, console_out=console)
 
-    # Startup label synchronization
-    await sync_all_projects_labels(config.projects, config.managed_labels)
-
     quota_manager = QuotaManager(config, state_manager)
     app_instance = DashboardApp(
         config=config,
@@ -728,8 +763,37 @@ async def _watch_daemon_tui(
             await state_manager.unregister_daemon()
         return
 
+    # Per-project sync barrier events
+    sync_events = {p.name: asyncio.Event() for p in enabled_projects}
+
+    async def _background_sync() -> None:
+        try:
+            await sync_all_projects_labels(
+                config.projects,
+                config.managed_labels,
+                state_manager=state_manager,
+                sync_events=sync_events,
+            )
+        except Exception as e:
+            _logger.error("Background label sync error: %s", e)
+        finally:
+            for ev in sync_events.values():
+                if not ev.is_set():
+                    ev.set()
+
+    sync_task = asyncio.create_task(_background_sync())
+
     workers = [
-        asyncio.create_task(_project_worker_loop(p, config_holder, state_manager, interval, config_path=pinned_config_path))
+        asyncio.create_task(
+            _project_worker_loop(
+                p,
+                config_holder,
+                state_manager,
+                interval,
+                config_path=pinned_config_path,
+                sync_event=sync_events.get(p.name),
+            )
+        )
         for p in enabled_projects
     ]
     tui_task = asyncio.create_task(app_instance.run_async())
@@ -743,9 +807,13 @@ async def _watch_daemon_tui(
         for w in workers:
             w.cancel()
         watcher_task.cancel()
+        sync_task.cancel()
         tui_task.cancel()
     finally:
+        sync_task.cancel()
         watcher_task.cancel()
+        for w in workers:
+            w.cancel()
         await app_instance.teardown()
         AsyncHarnessAdapter.terminate_all_active()
         await state_manager.unregister_daemon()
@@ -865,7 +933,10 @@ async def _run_init(project_name: Optional[str], config_path: Optional[Path]) ->
     if targets:
         console.print("[dim]Provisioning managed taxonomy labels on GitHub...[/dim]")
         for project in targets:
-            results = await sync_repository_labels(project.repo, config.managed_labels)
+            try:
+                results = await sync_repository_labels(project.repo, config.managed_labels, state_manager=state_manager)
+            except TypeError:
+                results = await sync_repository_labels(project.repo, config.managed_labels)
             success_count = sum(1 for s in results.values() if s)
             total_count = len(config.managed_labels)
             if success_count == total_count:
@@ -916,9 +987,15 @@ async def _run_labels(project_name: Optional[str], config_path: Optional[Path]) 
     table.add_column("Color", style="dim")
     table.add_column("Status", style="bold")
 
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
     for project in targets:
         with console.status(f"[cyan]Syncing labels for {project.repo}...[/cyan]"):
-            results = await sync_repository_labels(project.repo, config.managed_labels)
+            try:
+                results = await sync_repository_labels(project.repo, config.managed_labels, state_manager=state_manager)
+            except TypeError:
+                results = await sync_repository_labels(project.repo, config.managed_labels)
         for label in config.managed_labels:
             synced = results.get(label.name, False)
             status = "[green]SYNCED[/green]" if synced else "[red]FAILED[/red]"
@@ -1012,8 +1089,13 @@ async def _run_doctor(sync_labels: bool, config_path: Optional[Path]) -> None:
 
     # 5. Label Synchronization (if requested)
     if sync_labels and config.projects:
+        state_manager = StateManager(config.settings.resolved_db_path)
+        await state_manager.init_db()
         for p in [proj for proj in config.projects if proj.enabled]:
-            results = await sync_repository_labels(p.repo, config.managed_labels)
+            try:
+                results = await sync_repository_labels(p.repo, config.managed_labels, state_manager=state_manager)
+            except TypeError:
+                results = await sync_repository_labels(p.repo, config.managed_labels)
             synced = sum(1 for s in results.values() if s)
             total = len(config.managed_labels)
             if synced == total:
