@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from orchestrator.cli import app, run_project_cycle
 from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
 from orchestrator.db import StateManager
+from orchestrator.logging import strip_ansi
 
 runner = CliRunner()
 
@@ -948,10 +949,11 @@ projects:
 def test_cli_start_help():
     result = runner.invoke(app, ["start", "--help"])
     assert result.exit_code == 0
-    assert "Executes a dedicated project node lifecycle" in result.stdout
-    assert "project_name" in result.stdout.lower()
-    assert "--node" in result.stdout
-    assert "--max-passes" in result.stdout
+    clean_stdout = strip_ansi(result.stdout)
+    assert "Executes a dedicated project node lifecycle" in clean_stdout
+    assert "project_name" in clean_stdout.lower()
+    assert "--node" in clean_stdout
+    assert "--max-passes" in clean_stdout
 
 
 def test_cli_start_invalid_node(tmp_path):
