@@ -267,6 +267,74 @@ async def _remediate_refactor_pr(
     return True, f"DevTest node remediated PR #{pr_number} and updated branch '{branch_name}' (awaiting CI completion)."
 
 
+def _is_task_closed_or_merged(c: dict[str, Any]) -> bool:
+    """Checks if a task dictionary represents a closed, merged, or completed issue."""
+    state = str(c.get("state", "")).strip().upper()
+    if state in ("CLOSED", "MERGED", "DONE", "STATUS:CLOSED", "STATUS:MERGED", "STATUS:DONE"):
+        return True
+    labels = [lbl_item.get("name") if isinstance(lbl_item, dict) else str(lbl_item) for lbl_item in c.get("labels", [])]
+    if any(lbl.lower() in ("closed", "merged", "status:closed", "status:merged") for lbl in labels):
+        return True
+    return False
+
+
+def _is_task_blocked(c: dict[str, Any]) -> bool:
+    """Checks if a task dictionary represents a blocked or failed issue."""
+    state = str(c.get("state", "")).strip().upper()
+    if any(b in state for b in ("BLOCKED", "ORCHESTRATION-FAILED", "ORCHESTRATION_FAILED", "ORCHESTRATION:FAILED")):
+        return True
+    labels = [lbl_item.get("name") if isinstance(lbl_item, dict) else str(lbl_item) for lbl_item in c.get("labels", [])]
+    if any(lbl.lower() in ("blocked", "status:blocked", "orchestration-failed", "status:orchestration-failed") for lbl in labels):
+        return True
+    return False
+
+
+def _advance_sequential_subtask(
+    children: list[dict[str, Any]],
+    queued_label: str = "queued",
+    unchecked_ids: Optional[list[int] | set[int]] = None,
+    exclude_ids: Optional[set[int] | list[int] | int] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    Selects the lowest-ID open uncompleted child subtask to promote,
+    strictly excluding merged, closed, and blocked tasks and selecting min(number).
+    """
+    if not children:
+        return None
+
+    if isinstance(exclude_ids, int):
+        excluded = {exclude_ids}
+    elif exclude_ids:
+        excluded = set(exclude_ids)
+    else:
+        excluded = set()
+
+    unchecked_set = set(unchecked_ids) if unchecked_ids is not None else None
+
+    eligible: list[dict[str, Any]] = []
+    for c in children:
+        cid = c.get("number")
+        if cid is None or cid in excluded:
+            continue
+        if _is_task_closed_or_merged(c) or _is_task_blocked(c):
+            continue
+
+        c_labels = [lbl_item.get("name") if isinstance(lbl_item, dict) else str(lbl_item) for lbl_item in c.get("labels", [])]
+        is_queued = any(
+            lbl in c_labels
+            for lbl in (queued_label, f"status:{queued_label}", "queued", "status:queued", "status:pending-review")
+        )
+        is_unchecked = (unchecked_set is not None and cid in unchecked_set)
+
+        if is_queued or is_unchecked or (unchecked_set is None and not is_queued and str(c.get("state", "")).upper() == "OPEN"):
+            eligible.append(c)
+
+    if not eligible:
+        return None
+
+    return min(eligible, key=lambda x: x.get("number", 0))
+
+
 async def _advance_parent_and_unlock_next_subtask(
     project: ProjectConfig,
     state_manager: StateManager,
@@ -448,17 +516,14 @@ async def _advance_parent_and_unlock_next_subtask(
     output_label = node_cfg.label_output or "dev-implemented"
     queued_label = node_cfg.queued_label or "queued"
 
-    # Check for remaining open subtasks (queued or ready-for-dev in ascendant order)
-    queued_children = []
-    for c in children:
-        c_state = str(c.get("state", "")).upper()
-        if c_state != "CLOSED":
-            c_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in c.get("labels", [])]
-            if any(lbl in c_labels for lbl in (queued_label, f"status:{queued_label}", "queued", "status:queued", "status:pending-review")) or c.get("number") in unchecked_ids:
-                queued_children.append(c)
+    next_child = _advance_sequential_subtask(
+        children=children,
+        queued_label=queued_label,
+        unchecked_ids=unchecked_ids,
+        exclude_ids={subtask_id},
+    )
 
-    if queued_children:
-        next_child = queued_children[0]
+    if next_child:
         next_id = next_child["number"]
         curr_labels = [l.get("name") if isinstance(l, dict) else str(l) for l in next_child.get("labels", [])]
         is_prefixed = any(l.startswith("status:") for l in curr_labels)
@@ -1064,6 +1129,45 @@ async def run_devtest_node(
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 
+    # Duplicate PR prevention guard in Phase 3
+    sdlc_items = await state_manager.get_sdlc_items(project.name)
+    item_lookup = {item["issue_number"]: item for item in sdlc_items}
+    existing_item = item_lookup.get(issue_id, {})
+    existing_pr = existing_item.get("linked_pr")
+
+    if not existing_pr and open_prs:
+        for pr in open_prs:
+            pr_branch = pr.get("headRefName", "")
+            pr_body = pr.get("body", "")
+            if (
+                f"issue-{issue_id}" in pr_branch
+                or re.search(rf"(?:Fixes|Closes|Resolves)\s*#{issue_id}\b", pr_body, re.IGNORECASE)
+            ):
+                existing_pr = pr.get("number")
+                break
+
+    if existing_pr:
+        _logger.info(
+            "[%s:devtest] Subtask #%d already has open PR #%s (or linked_pr in sdlc_items). Waiting for Phase 2 CI verification.",
+            project.name,
+            issue_id,
+            existing_pr,
+        )
+        console.print(
+            f"  [bold cyan][{project.name}:devtest][/bold cyan] [bold yellow]⏸ Subtask #{issue_id} already has open PR #{existing_pr} (linked_pr). Waiting for Phase 2 CI verification.[/bold yellow]"
+        )
+        if not existing_item.get("linked_pr"):
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": issue_id,
+                    "title": issue_title,
+                    "state": "IN_PROGRESS",
+                    "linked_pr": int(existing_pr),
+                }],
+            )
+        return False, f"Subtask #{issue_id} already has open PR #{existing_pr} (linked_pr). Waiting for Phase 2 CI verification."
+
     # Ensure issue is active with trigger label on GitHub if it was queued
     curr_labels = [
         l.get("name", "") if isinstance(l, dict) else str(l)
@@ -1095,13 +1199,8 @@ async def run_devtest_node(
 
     # Resolve parent story ID if this subtask is under an active locked story
     parent_id = None
-    try:
-        sdlc_items = await state_manager.get_sdlc_items(project.name)
-        item_lookup = {item["issue_number"]: item for item in sdlc_items}
-        if issue_id in item_lookup and item_lookup[issue_id].get("parent_issue_id"):
-            parent_id = item_lookup[issue_id]["parent_issue_id"]
-    except Exception:
-        pass
+    if issue_id in item_lookup and item_lookup[issue_id].get("parent_issue_id"):
+        parent_id = item_lookup[issue_id]["parent_issue_id"]
 
     if parent_id is None:
         body_text = target_issue.get("body", "")

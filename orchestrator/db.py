@@ -1482,7 +1482,7 @@ class StateManager:
                     WHERE project_name = ?
                       AND parent_issue_id = ?
                       AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
-                    ORDER BY sequence_order ASC, issue_number ASC
+                    ORDER BY issue_number ASC
                     LIMIT 1;
                     """,
                     (project_name, active_story_id),
@@ -1527,6 +1527,7 @@ class StateManager:
                     return None
 
             # 2. Fallback 1: Standalone tasks (parent_issue_id IS NULL and not a STORY/EPIC, with no child subtasks)
+            # Widen to LIMIT 10 and iterate skipping blocked or in-progress items
             standalone_cursor = await db.execute(
                 """
                 SELECT issue_number, state, labels, sequence_order
@@ -1540,20 +1541,18 @@ class StateManager:
                         AND child.parent_issue_id = sdlc_items.issue_number
                   )
                   AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
-                  AND (labels LIKE '%ready-for-dev%' OR labels LIKE '%status:ready-for-dev%' OR UPPER(state) IN ('READY-FOR-DEV', 'STATUS:READY-FOR-DEV'))
                 ORDER BY sequence_order ASC, issue_number ASC
-                LIMIT 1;
+                LIMIT 10;
                 """,
                 (project_name,),
             )
-            standalone_row = await standalone_cursor.fetchone()
-            if standalone_row:
+            standalone_rows = await standalone_cursor.fetchall()
+            for standalone_row in standalone_rows:
                 s_id = int(standalone_row["issue_number"])
                 s_state = standalone_row["state"]
                 s_labels = standalone_row["labels"]
                 if not _is_blocked(s_state, s_labels) and not _is_in_progress(s_state, s_labels):
                     return s_id
-                return None
 
             # 3. Fallback 2: Oldest planned story promotion
             planned_cursor = await db.execute(
@@ -1588,7 +1587,7 @@ class StateManager:
                     WHERE project_name = ?
                       AND parent_issue_id = ?
                       AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE')
-                    ORDER BY sequence_order ASC, issue_number ASC
+                    ORDER BY issue_number ASC
                     LIMIT 1;
                     """,
                     (project_name, planned_story_id),
