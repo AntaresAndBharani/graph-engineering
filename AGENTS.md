@@ -34,6 +34,15 @@ When the user prefixes their instruction with `/cross-review`, `/claude-review`,
 4. **Early Exit on Consensus:** If Claude issues `VERDICT: AGREED`, mark the plan as approved and present the consensus plan to the operator.
 5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution immediately, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and surface a structured Dispute Matrix to the user highlighting the contested points, risks, and trade-offs for final human decision.
 
+## Antigravity Architect Review Protocol (`/agy-architect-review`, `/agy-review`, `/gemini-architect-review`)
+When the user prefixes their instruction with `/agy-architect-review`, `/agy-review`, or asks for an architectural cross-review via Antigravity (`agy`):
+1. **Single Communication Medium:** All exchanges happen strictly via `docs/draft-requisites/implementation-plan.md`. Never use temporary buffers.
+2. **Headless Antigravity (Gemini 3.8 Flash High) Execution:** Invoke `agy` CLI (`--model gemini-3.8-flash-high --dangerously-skip-permissions -p`) or run `.agents/skills/agy-architect-review/scripts/agy_cross_review.py`. Across rounds 2 and 3, use `-c` for session continuity and prompt caching. Effort is embedded in model name and never passed separately.
+3. **Hard 3-Round Cap:** Debate for a maximum of 3 iterations (`## 🔍 Review Iteration N` and `## 🏛️ Gemini Architect Review Iteration N`).
+4. **Early Exit on Consensus:** If Gemini Architect issues `VERDICT: AGREED`, mark the plan as approved.
+5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and present the Dispute Matrix to the operator.
+
+
 
 
 
