@@ -22,11 +22,15 @@ async def test_db_lock_lifecycle(tmp_path: Path):
     dup = await manager.acquire_lock("100", "my-org/repo", "architect", ttl_minutes=30)
     assert dup is False
 
-    # 3. Different node type -> Can acquire
+    # 3. Cross-node lock attempt (devtest while architect holds lock on same issue) -> Must fail
     dev_lock = await manager.acquire_lock("100", "my-org/repo", "devtest", ttl_minutes=30)
-    assert dev_lock is True
+    assert dev_lock is False
 
-    # 4. Release Lock
+    # Different issue ID for devtest -> Can acquire
+    dev_lock_diff = await manager.acquire_lock("101", "my-org/repo", "devtest", ttl_minutes=30)
+    assert dev_lock_diff is True
+
+    # 4. Release Lock on issue 100
     await manager.release_lock("100", "my-org/repo", "architect")
 
     # 5. Re-acquire after release -> Should succeed
@@ -2501,6 +2505,94 @@ async def test_get_next_devtest_task_standalone_fallback_skips_blocked_and_in_pr
     )
     selected_after_progress = await manager.get_next_devtest_task("graph-engineering")
     assert selected_after_progress == 201
+
+
+@pytest.mark.asyncio
+async def test_acquire_lock_cross_node_mutual_exclusion(tmp_path: Path):
+    """
+    Verifies cross-node mutual exclusion: Architect and DevTest cannot
+    hold active locks on the same issue simultaneously.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 1. Architect acquires lock on issue 501
+    acquired_arch = await manager.acquire_lock(
+        issue_id=501,
+        repo="org/repo",
+        node_type="architect",
+        ttl_minutes=30,
+    )
+    assert acquired_arch is True
+
+    # 2. DevTest attempts to acquire lock on issue 501 -> MUST be denied
+    acquired_dev = await manager.acquire_lock(
+        issue_id=501,
+        repo="org/repo",
+        node_type="devtest",
+        ttl_minutes=30,
+    )
+    assert acquired_dev is False
+
+    # 3. Release Architect lock
+    await manager.release_lock(issue_id=501, repo="org/repo", node_type="architect")
+
+    # 4. Now DevTest can acquire lock on issue 501
+    acquired_dev_now = await manager.acquire_lock(
+        issue_id=501,
+        repo="org/repo",
+        node_type="devtest",
+        ttl_minutes=30,
+    )
+    assert acquired_dev_now is True
+
+    # 5. Architect attempts to acquire lock while DevTest is running -> MUST be denied
+    acquired_arch_denied = await manager.acquire_lock(
+        issue_id=501,
+        repo="org/repo",
+        node_type="architect",
+        ttl_minutes=30,
+    )
+    assert acquired_arch_denied is False
+
+
+@pytest.mark.asyncio
+async def test_get_next_devtest_task_standalone_fallback_ignores_needs_triage_and_stories(tmp_path: Path):
+    """
+    Verifies that Fallback 1 never returns issues with [Story] titles or needs-triage labels,
+    preventing DevTest from executing parent stories before Architect decomposition.
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    items = [
+        {
+            "issue_number": 501,
+            "title": "[Story]: Athlete Body Weight Tracker & Progress Correlation",
+            "item_type": "SUBTASK",  # Even if misclassified as SUBTASK
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["needs-triage", "ready-for-dev"],
+            "sequence_order": 1,
+        },
+        {
+            "issue_number": 502,
+            "title": "Fix navbar padding glitch",
+            "item_type": "TASK",
+            "parent_issue_id": None,
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "sequence_order": 2,
+        },
+    ]
+    await manager.sync_project_sdlc_items("crosstrainingapp", items)
+
+    # DevTest must skip #501 and select #502
+    selected = await manager.get_next_devtest_task("crosstrainingapp")
+    assert selected == 502
+
 
 
 

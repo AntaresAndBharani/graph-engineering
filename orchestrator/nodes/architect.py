@@ -286,23 +286,43 @@ def build_triage_prompt(
     if project.context_files:
         context_note = f"Read the project context files in your workspace: {', '.join(project.context_files)}."
 
+    is_story = any(s in issue_title.lower() for s in ("story", "epic"))
+    if is_story:
+        case_routing = (
+            f"2. CLASSIFY AND ROUTE THE ISSUE ACCORDING TO ITS NATURE:\n"
+            f"   - **Case 1: ALREADY IMPLEMENTED ON MAIN**: If this issue's acceptance criteria are already satisfied in the codebase, close it immediately:\n"
+            f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
+            f"   - **Case 2: FULL USER STORY / COMPLEX FEATURE (MANDATORY FOR STORIES)**:\n"
+            f"     This issue is explicitly designated as a User Story / Epic ('{issue_title}'). Case 2 (Standalone Task) is STRICTLY PROHIBITED. You MUST decompose it into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
+            f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`\n"
+            f"     - CRITICAL LABELING INVARIANT: Assign ONLY the label '{queued_label}' to each newly created subtask. Do NOT use issue templates (--template) and NEVER apply legacy or prefixed labels such as 'type:subtask', 'status:ready', 'status:definition', 'type:user-story', or 'status:*'.\n"
+            f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
+            f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
+            f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
+            f"     - CRITICAL SAFETY: NEVER apply '{output_label}' to this parent issue. Stories must be decomposed into queued subtasks, never directly labeled '{output_label}'.\n"
+        )
+    else:
+        case_routing = (
+            f"2. CLASSIFY AND ROUTE THE ISSUE ACCORDING TO ITS NATURE (3 CASES ONLY):\n"
+            f"   - **Case 1: ALREADY IMPLEMENTED ON MAIN**: If this issue's acceptance criteria are already satisfied in the codebase, close it immediately:\n"
+            f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
+            f"   - **Case 2: STANDALONE TASK / SMALL BUG** (Small, self-contained, does not require subtask breakdown): Route directly to development by labeling it '{output_label}' and removing '{trigger}':\n"
+            f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{output_label}'`\n"
+            f"     `gh issue comment {issue_id} --repo '{project.repo}' --body '🤖 **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
+            f"   - **Case 3: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
+            f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`\n"
+            f"     - CRITICAL LABELING INVARIANT: Assign ONLY the label '{queued_label}' to each newly created subtask. Do NOT use issue templates (--template) and NEVER apply legacy or prefixed labels such as 'type:subtask', 'status:ready', 'status:definition', 'type:user-story', or 'status:*'.\n"
+            f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
+            f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
+            f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
+        )
+
     prompt = (
         f"You are the Principal Architect operating autonomously in non-interactive batch mode.\n"
         f"Perform Triage, Classification, and Architectural Decomposition for GitHub Issue #{issue_id} ('{issue_title}'). {context_note}\n\n"
         f"CRITICAL OPERATIONAL RULES:\n"
         f"1. You are fully autonomous. Do NOT ask questions in chat or wait for human confirmation. Perform all required actions immediately using GitHub CLI (`gh`).\n"
-        f"2. CLASSIFY AND ROUTE THE ISSUE ACCORDING TO ITS NATURE (3 CASES ONLY):\n"
-        f"   - **Case 1: ALREADY IMPLEMENTED ON MAIN**: If this issue's acceptance criteria are already satisfied in the codebase, close it immediately:\n"
-        f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
-        f"   - **Case 2: STANDALONE TASK / SMALL BUG** (Small, self-contained, does not require subtask breakdown): Route directly to development by labeling it '{output_label}' and removing '{trigger}':\n"
-        f"     `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{output_label}'`\n"
-        f"     `gh issue comment {issue_id} --repo '{project.repo}' --body 'ðŸ¤– **Architect Triage**: Classified as a standalone technical task. Labeled {output_label} for DevTest implementation.'`\n"
-        f"   - **Case 3: FULL USER STORY / COMPLEX FEATURE**: Decompose into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
-        f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`\n"
-        f"     - CRITICAL LABELING INVARIANT: Assign ONLY the label '{queued_label}' to each newly created subtask. Do NOT use issue templates (--template) and NEVER apply legacy or prefixed labels such as 'type:subtask', 'status:ready', 'status:definition', 'type:user-story', or 'status:*'.\n"
-        f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
-        f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
-        f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
+        f"{case_routing}"
     )
     return prompt
 
@@ -362,12 +382,16 @@ async def _triage_story(
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
 
+    is_story = any(s in issue_title.lower() for s in ("story", "epic"))
+    item_type = "STORY" if is_story else "TASK"
+
     # Sync issue into SDLC Blackboard memory
     await state_manager.sync_project_sdlc_items(
         project.name,
         [{
             "issue_number": issue_id,
             "title": issue_title,
+            "item_type": item_type,
             "state": "OPEN",
             "labels": [trigger],
         }],
