@@ -542,6 +542,23 @@ class StateManager:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA busy_timeout=5000;")
 
+            # Cross-node mutual exclusion: prevent architect and devtest from running concurrently on the same issue
+            cross_node = "architect" if node_type == "devtest" else ("devtest" if node_type == "architect" else None)
+            if cross_node:
+                cursor_cross = await db.execute(
+                    """
+                    SELECT status, expires_at
+                    FROM active_jobs
+                    WHERE issue_id = ? AND repo = ? AND node_type = ?
+                    """,
+                    (issue_str, repo, cross_node),
+                )
+                cross_row = await cursor_cross.fetchone()
+                if cross_row:
+                    cross_status, cross_expires = cross_row
+                    if cross_status == "RUNNING" and cross_expires > now:
+                        return False
+
             # Check existing lock
             cursor = await db.execute(
                 """
@@ -1572,12 +1589,16 @@ class StateManager:
                 WHERE project_name = ?
                   AND parent_issue_id IS NULL
                   AND (item_type IS NULL OR UPPER(item_type) NOT IN ('STORY', 'EPIC'))
+                  AND UPPER(title) NOT LIKE '%[STORY]%'
+                  AND UPPER(title) NOT LIKE '%[EPIC]%'
+                  AND UPPER(title) NOT LIKE '%STORY:%'
                   AND NOT EXISTS (
                       SELECT 1 FROM sdlc_items child
                       WHERE child.project_name = sdlc_items.project_name
                         AND child.parent_issue_id = sdlc_items.issue_number
                   )
-                  AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED')
+                  AND UPPER(state) NOT IN ('CLOSED', 'MERGED', 'DONE', 'STATUS:CLOSED', 'STATUS:MERGED', 'STATUS:DONE', 'PLANNED', 'STATUS:PLANNED', 'NEEDS-TRIAGE', 'STATUS:NEEDS-TRIAGE')
+                  AND (labels NOT LIKE '%needs-triage%' AND labels NOT LIKE '%status:needs-triage%')
                 ORDER BY sequence_order ASC, issue_number ASC
                 LIMIT 10;
                 """,
