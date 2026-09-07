@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-cross_review.py - Cross-Review Orchestration Script between Gemini and Claude (Opus High).
+cross_review.py - Cross-Review Orchestration Script between Gemini and Claude.
+Supports claude CLI (Opus/Sonnet) and agy CLI (Claude Sonnet 4.6 Thinking).
 Enforces up to 3 iterative debate rounds exclusively mediated via
 docs/draft-requisites/implementation-plan.md.
 """
@@ -13,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Tuple
 
@@ -42,45 +44,82 @@ def find_plan_file(custom_path: str | None = None) -> Path:
 
 def count_iterations(plan_content: str) -> Tuple[int, int]:
     """
-    Returns (gemini_iterations_count, claude_iterations_count).
+    Returns (gemini_iterations_count, claude_iterations_count) for the active/latest implementation plan.
     """
-    gemini_rounds = len(re.findall(r"^##\s*(?:🔍|🚀)\s*(?:Boost\s*)?Review Iteration\s+(\d+)", plan_content, re.MULTILINE))
-    claude_rounds = len(re.findall(r"^##\s*🏛️\s*Claude(?:\s+Opus)?\s+Review Iteration\s+(\d+)", plan_content, re.MULTILINE))
+    sections = re.split(r"^#\s*📋\s*Implementation Plan", plan_content, flags=re.MULTILINE)
+    active_section = sections[-1] if sections else plan_content
+
+    gemini_rounds = len(re.findall(r"^##\s*(?:🔍|🚀)\s*(?:Boost\s*)?Review Iteration\s+(\d+)", active_section, re.MULTILINE))
+    claude_rounds = len(re.findall(r"^##\s*🏛️\s*Claude(?:\s+(?:Opus|Sonnet))?\s+Review Iteration\s+(\d+)", active_section, re.MULTILINE))
     return gemini_rounds, claude_rounds
 
 
-def build_claude_prompt(round_num: int, plan_rel_path: str) -> str:
-    return (
-        f"You are the Principal Architect conducting Round {round_num} of an unsparing, hyper-critical "
-        f"Architectural Review of the implementation plan at '{plan_rel_path}'.\n\n"
-        f"CRITICAL OPERATIONAL RULES:\n"
-        f"1. GROUND TRUTH VERIFICATION: Read '{plan_rel_path}' completely. Then use your Read/Grep/Bash tools "
-        f"to inspect the actual codebase files mentioned in the plan. Verify schemas, method signatures, "
-        f"classes, and configuration in the live workspace.\n"
-        f"2. UNCOMPROMISING ARCHITECTURAL SCRUTINY: Identify all drawbacks, scalability bottlenecks, "
-        f"data integrity risks, concurrency/lock contentions, edge cases, breaking changes, and backward-compatibility hazards.\n"
-        f"3. APPEND REVIEW ITERATION: Using your Edit or Write tool, append a new section at the end of '{plan_rel_path}' "
-        f"titled exactly:\n\n"
-        f"## 🏛️ Claude Opus Review Iteration {round_num}\n\n"
-        f"Structure your appended section with:\n"
-        f"- ### ⚖️ Critical Architecture & Drawbacks Critique\n"
-        f"- ### 🚨 Unresolved Concerns & Edge Case Vulnerabilities\n"
-        f"- ### 🛠️ Mandatory Architectural Safeguards & Required Changes\n"
-        f"- ### 🏁 Verdict\n"
-        f"Must end with either: `VERDICT: AGREED` (only if 100% sound with zero reservations) or `VERDICT: DISAGREED`.\n\n"
-        f"4. OUTPUT SUMMARY: Once '{plan_rel_path}' is updated, output a concise 3-5 bullet point summary to stdout "
-        f"clearly stating whether you AGREED or DISAGREED, and list any outstanding blocking objections."
-    )
-
-
-def invoke_claude(prompt: str, model: str = "opus", effort: str = "medium") -> Tuple[int, str, str]:
-    cmd = [
-        "claude",
-        "-p", prompt,
-        "--model", model,
-        "--effort", effort,
-        "--dangerously-skip-permissions",
+def build_claude_prompt(round_num: int, plan_path: Path, model_title: str = "Claude") -> str:
+    abs_path = plan_path.resolve().as_posix()
+    lines = [
+        f"You are the Principal Architect conducting Round {round_num} of an unsparing, hyper-critical Architectural Review of the active implementation plan in '{abs_path}'.",
+        "",
+        "CRITICAL OPERATIONAL RULES:",
+        f"1. EXACT TARGET FILE: The target file is strictly '{abs_path}'. Open and read '{abs_path}' directly, focusing on the latest, active implementation plan section at the bottom of the document.",
+        "2. GROUND TRUTH CODEBASE INSPECTION: Inspect the relevant codebase files mentioned in the plan using view_file or grep_search to verify classes, methods, and schemas.",
+        "3. UNCOMPROMISING ARCHITECTURAL SCRUTINY: Scrutinize the proposal for all drawbacks, race conditions, edge cases (e.g. 0-byte log files, Textual DataTable event suppression, Rich markup errors), and backward-compatibility hazards.",
+        f"4. APPEND REVIEW ITERATION: Using your Edit or Write tool, append a new section at the very end of '{abs_path}' titled exactly:",
+        "",
+        f"## 🏛️ {model_title} Review Iteration {round_num}",
+        "",
+        "Structure your appended section with:",
+        "- ### ⚖️ Critical Architecture & Drawbacks Critique",
+        "- ### 🚨 Unresolved Concerns & Edge Case Vulnerabilities",
+        "- ### 🛠️ Mandatory Architectural Safeguards & Required Changes",
+        "- ### 🏁 Verdict",
+        "Must end with either: `VERDICT: AGREED` (only if 100% sound with zero reservations) or `VERDICT: DISAGREED`.",
+        "",
+        f"5. OUTPUT SUMMARY: Once '{abs_path}' is updated, output a concise 3-5 bullet point summary to stdout clearly stating whether you AGREED or DISAGREED, and list any outstanding blocking objections."
     ]
+    return "\n".join(lines)
+
+
+def get_session_file(plan_path: Path) -> Path:
+    return plan_path.parent / ".claude_cross_review_session"
+
+
+def invoke_claude(
+    prompt: str,
+    harness: str = "claude",
+    model: str = "sonnet",
+    effort: str = "medium",
+    session_id: str | None = None,
+    is_resume: bool = False,
+) -> Tuple[int, str, str]:
+    if harness == "agy":
+        resolved_model = model
+        if model in ("sonnet", "claude-sonnet", "claude-sonnet-4-6", "claude-sonnet-5"):
+            resolved_model = "claude-sonnet-4-6"
+        elif model in ("opus", "claude-opus", "claude-opus-4-6-thinking"):
+            resolved_model = "claude-opus-4-6-thinking"
+
+        cmd = ["agy"]
+        if is_resume:
+            cmd.append("-c")
+        cmd.extend([
+            "-p", prompt,
+            "--model", resolved_model,
+            "--dangerously-skip-permissions",
+            "--print-timeout", "10m0s",
+        ])
+        if resolved_model not in ("claude-sonnet-4-6", "claude-opus-4-6-thinking") and effort:
+            cmd.extend(["--effort", effort])
+    else:
+        cmd = ["claude", "-p", prompt]
+        if is_resume and session_id:
+            cmd.extend(["-r", session_id])
+        elif session_id:
+            cmd.extend(["--session-id", session_id])
+            cmd.extend(["--model", model, "--effort", effort])
+        else:
+            cmd.extend(["--model", model, "--effort", effort])
+
+        cmd.append("--dangerously-skip-permissions")
 
     env = os.environ.copy()
     env["GH_PROMPT_DISABLED"] = "1"
@@ -91,6 +130,7 @@ def invoke_claude(prompt: str, model: str = "opus", effort: str = "medium") -> T
         capture_output=True,
         text=True,
         env=env,
+        stdin=subprocess.DEVNULL,
         encoding="utf-8",
         errors="replace",
     )
@@ -98,11 +138,8 @@ def invoke_claude(prompt: str, model: str = "opus", effort: str = "medium") -> T
 
 
 def parse_claude_verdict(plan_content: str, claude_stdout: str, round_num: int) -> str:
-    """
-    Determines if Claude agreed or disagreed.
-    """
     round_match = re.search(
-        rf"##\s*🏛️\s*Claude(?:\s+Opus)?\s+Review Iteration\s+{round_num}(.*?)(?:##|\Z)",
+        rf"##\s*🏛️\s*Claude(?:\s+(?:Opus|Sonnet))?\s+Review Iteration\s+{round_num}(.*?)(?:##|\Z)",
         plan_content,
         re.DOTALL
     )
@@ -122,12 +159,9 @@ def parse_claude_verdict(plan_content: str, claude_stdout: str, round_num: int) 
 
 
 def extract_disagreement_points(plan_content: str, round_num: int) -> list[str]:
-    """
-    Extracts bullet points or concerns under Claude's review iteration.
-    """
     points = []
     round_match = re.search(
-        rf"##\s*🏛️\s*Claude(?:\s+Opus)?\s+Review Iteration\s+{round_num}(.*?)(?:##|\Z)",
+        rf"##\s*🏛️\s*Claude(?:\s+(?:Opus|Sonnet))?\s+Review Iteration\s+{round_num}(.*?)(?:##|\Z)",
         plan_content,
         re.DOTALL
     )
@@ -145,10 +179,11 @@ def extract_disagreement_points(plan_content: str, round_num: int) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cross-Review between Gemini and Claude (Opus Medium)")
+    parser = argparse.ArgumentParser(description="Cross-Review between Gemini and Claude")
     parser.add_argument("--plan", type=str, default=None, help="Path to implementation-plan.md")
-    parser.add_argument("--model", type=str, default="opus", help="Claude model alias or full name")
-    parser.add_argument("--effort", type=str, default="medium", help="Reasoning effort (low, medium, high, max)")
+    parser.add_argument("--harness", type=str, choices=["claude", "agy"], default="claude", help="CLI harness (claude or agy)")
+    parser.add_argument("--model", type=str, default="sonnet", help="Claude model alias or full name (default: sonnet)")
+    parser.add_argument("--effort", type=str, default="medium", help="Reasoning effort (low, medium, high, max; default: medium)")
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum number of debate rounds")
     parser.add_argument("--check-status", action="store_true", help="Only check status and round count")
 
@@ -186,13 +221,29 @@ def main() -> None:
         }, indent=2))
         sys.exit(2)
 
-    try:
-        rel_path = plan_path.relative_to(Path.cwd()).as_posix()
-    except ValueError:
-        rel_path = str(plan_path)
+    session_file = get_session_file(plan_path)
+    session_id: str | None = None
+    is_resume = False
 
-    prompt = build_claude_prompt(next_claude_round, rel_path)
-    code, stdout, stderr = invoke_claude(prompt, model=args.model, effort=args.effort)
+    if next_claude_round > 1 and session_file.exists():
+        saved_id = session_file.read_text(encoding="utf-8").strip()
+        if saved_id:
+            session_id = saved_id
+            is_resume = True
+    elif next_claude_round == 1 or not session_file.exists():
+        session_id = str(uuid.uuid4())
+        session_file.write_text(session_id, encoding="utf-8")
+
+    model_title = "Claude Sonnet" if "sonnet" in args.model.lower() else "Claude Opus"
+    prompt = build_claude_prompt(next_claude_round, plan_path, model_title=model_title)
+    code, stdout, stderr = invoke_claude(
+        prompt,
+        harness=args.harness,
+        model=args.model,
+        effort=args.effort,
+        session_id=session_id,
+        is_resume=is_resume,
+    )
 
     # Re-read plan after Claude execution
     updated_plan_content = plan_path.read_text(encoding="utf-8", errors="replace")
@@ -200,7 +251,7 @@ def main() -> None:
 
     # If Claude printed its section but forgot to write it to the file, append it
     if new_claude_rounds < next_claude_round:
-        verdict_search = re.search(rf"(##\s*🏛️\s*Claude(?:\s+Opus)?\s+Review Iteration\s+{next_claude_round}.*)", stdout, re.DOTALL)
+        verdict_search = re.search(rf"(##\s*🏛️\s*Claude(?:\s+(?:Opus|Sonnet))?\s+Review Iteration\s+{next_claude_round}.*)", stdout, re.DOTALL)
         if verdict_search:
             appended_content = updated_plan_content + "\n\n" + verdict_search.group(1).strip() + "\n"
             plan_path.write_text(appended_content, encoding="utf-8")
@@ -224,6 +275,14 @@ def main() -> None:
 
     if verdict != "AGREED" and next_claude_round >= args.max_rounds:
         result["status"] = "cap_reached"
+
+    # Clean up session file upon consensus or when cap is reached
+    if verdict == "AGREED" or result["status"] == "cap_reached":
+        if session_file.exists():
+            try:
+                session_file.unlink()
+            except OSError:
+                pass
 
     print(json.dumps(result, indent=2))
     if result["status"] == "cap_reached":
