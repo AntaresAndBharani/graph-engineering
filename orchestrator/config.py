@@ -64,7 +64,7 @@ class NodeConfig(OrchestratorBaseModel):
 
 
 class TechDebtConfig(OrchestratorBaseModel):
-    enabled: bool = True
+    enabled: bool = False
     interval_seconds: int = 14400
     harness: str = "claude"
     model: Optional[str] = "sonnet"
@@ -117,6 +117,7 @@ class ProjectConfig(OrchestratorBaseModel):
     enabled: bool = True
     context_files: List[str] = Field(default_factory=lambda: list(DEFAULT_CONTEXT_FILES))
     nodes: Dict[str, NodeConfig] = Field(default_factory=dict)
+    tech_debt: TechDebtConfig = Field(default_factory=TechDebtConfig)
     max_planned_stories: int = 2
     worktrees_enabled: bool = True
     worktree_dir: Optional[Path] = None
@@ -136,10 +137,16 @@ class ProjectConfig(OrchestratorBaseModel):
     def is_node_enabled(self, node_name: str) -> bool:
         """
         Returns True if the project is enabled and the specified node is enabled.
-        If node is not explicitly specified in project.nodes, defaults to True if project is enabled.
+        If node is not explicitly specified in project.nodes:
+        - For 'tech_debt', respects self.tech_debt.enabled.
+        - For other nodes, defaults to True if project is enabled.
         """
         if not self.enabled:
             return False
+        if node_name == "tech_debt":
+            if "tech_debt" in self.nodes:
+                return bool(self.nodes["tech_debt"].enabled)
+            return bool(self.tech_debt.enabled)
         node = self.nodes.get(node_name)
         if node is None:
             return True
@@ -365,6 +372,7 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
 
 
 # Rebuild Pydantic models to ensure forward reference resolution across reload cycles
+TechDebtConfig.model_rebuild()
 WindowLimitConfig.model_rebuild()
 HarnessQuotaConfig.model_rebuild()
 QuotaSettings.model_rebuild()

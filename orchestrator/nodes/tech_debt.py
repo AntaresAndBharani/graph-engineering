@@ -252,10 +252,13 @@ async def run_tech_debt_node(
     Executes the Technical Debt Node.
     Runs exclusively on full development quiescence.
     """
+    td_cfg = getattr(project, "tech_debt", None)
     node_cfg = project.nodes.get("tech_debt") or NodeConfig(
-        harness="claude",
-        model="sonnet",
-        effort="low",
+        enabled=td_cfg.enabled if td_cfg else False,
+        harness=td_cfg.harness if td_cfg and td_cfg.harness else "claude",
+        model=td_cfg.model if td_cfg else "sonnet",
+        effort=td_cfg.effort if td_cfg else "low",
+        interval_seconds=td_cfg.interval_seconds if td_cfg else 14400,
     )
 
     if not project.is_node_enabled("tech_debt"):
