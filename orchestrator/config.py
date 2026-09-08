@@ -60,6 +60,15 @@ class NodeConfig(OrchestratorBaseModel):
     conflict_model: Optional[str] = None
     conflict_effort: Optional[str] = None
     lookahead_backoff_seconds: int = Field(default=1200, ge=0)
+    interval_seconds: Optional[int] = None
+
+
+class TechDebtConfig(OrchestratorBaseModel):
+    enabled: bool = True
+    interval_seconds: int = 14400
+    harness: str = "claude"
+    model: Optional[str] = "sonnet"
+    effort: Optional[str] = "low"
 
 
 def resolve_path(v: str | Path) -> Path:
@@ -141,6 +150,7 @@ class SettingsConfig(OrchestratorBaseModel):
     poll_interval_seconds: int = 300
     supervisor_interval_seconds: int = 3600
     bau_interval_seconds: int = 86400  # 1 day / 24 hours interval for BAU maintenance
+    tech_debt_interval_seconds: int = 14400  # 4 hours interval for technical debt audit sweep
     max_concurrent_jobs: int = 4
     db_path: str = "~/.config/orchestrator/state.db"
     log_dir: str = "~/.config/orchestrator/logs"

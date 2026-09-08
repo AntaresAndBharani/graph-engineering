@@ -25,6 +25,7 @@ from orchestrator.nodes.architect import run_architect_node
 from orchestrator.nodes.bau import run_bau_node
 from orchestrator.nodes.devtest import run_devtest_node
 from orchestrator.nodes.reviewer import run_reviewer_node
+from orchestrator.nodes.tech_debt import run_tech_debt_node
 from orchestrator.nodes.supervisor import (
     POEvaluationResult,
     evaluate_supervisor_issue,
@@ -100,7 +101,7 @@ def run_command(
         None,
         "--node",
         "-n",
-        help="Run only a specific node (supervisor, architect, devtest).",
+        help="Run only a specific node (supervisor, architect, devtest, reviewer, bau, tech_debt).",
     ),
     config_path: Optional[Path] = typer.Option(
         None,
@@ -285,8 +286,9 @@ def render_node_status_table(config: GlobalConfig, console_out: Optional[Console
         "reviewer": "claude",
         "supervisor": "antigravity",
         "bau": "antigravity",
+        "tech_debt": "claude",
     }
-    nodes_order = ["architect", "devtest", "reviewer", "supervisor", "bau"]
+    nodes_order = ["architect", "devtest", "reviewer", "supervisor", "bau", "tech_debt"]
 
     for project in config.projects:
         worktrees_on = getattr(project, "worktrees_enabled", True)
@@ -310,6 +312,8 @@ def render_node_status_table(config: GlobalConfig, console_out: Optional[Console
                 concurrency_str = "Serial (Gatekeeper)"
             elif node_name == "bau":
                 concurrency_str = "Serial (Maintenance)"
+            elif node_name == "tech_debt":
+                concurrency_str = "Worktree (Audit)" if worktrees_on else "Serial (Audit)"
             else:
                 concurrency_str = "Serial"
 
@@ -510,6 +514,24 @@ async def run_project_cycle(
         except Exception as e:
             _logger.error("[%s:bau] Unhandled exception in bau cycle: %s", project.name, e, exc_info=True)
             console.print(f"  {prefix} [bold red]BAU Error:[/bold red] {e}")
+
+    # 6. Technical Debt Node (Quiescence-gated quality audit on main)
+    if (node_name is None or node_name in ("tech_debt", "tech-debt")) and project.is_node_enabled("tech_debt"):
+        if await state_manager.is_stop_requested():
+            return pipeline_work_done
+        # When running standard cycle (node_name is None), only dispatch tech_debt if no active development work ran
+        if node_name is not None or not pipeline_work_done:
+            force_tech_debt = node_name in ("tech_debt", "tech-debt")
+            try:
+                ran, msg = await run_tech_debt_node(project, config, state_manager, force=force_tech_debt)
+                if ran:
+                    pipeline_work_done = True
+                    console.print(f"  {prefix} [bold green]TechDebt:[/bold green] {msg}")
+                elif not silent_idle:
+                    console.print(f"  {prefix} [dim]TechDebt: {msg}[/dim]")
+            except Exception as e:
+                _logger.error("[%s:tech_debt] Unhandled exception in tech_debt cycle: %s", project.name, e, exc_info=True)
+                console.print(f"  {prefix} [bold red]TechDebt Error:[/bold red] {e}")
 
     return pipeline_work_done
 

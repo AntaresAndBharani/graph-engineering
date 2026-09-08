@@ -1051,37 +1051,6 @@ class StateManager:
     # Blackboard Pattern: Tech Debt Audits
     # =========================================================================
 
-    async def record_tech_debt_audit(
-        self,
-        project_name: str,
-        commit_sha: str,
-        status: str,
-        issue_number: Optional[int] = None,
-        details: Optional[str] = None,
-    ) -> None:
-        """
-        Records or updates a tech debt audit record in the Blackboard database.
-        Idempotent operation (INSERT ... ON CONFLICT(project_name) DO UPDATE).
-        """
-        now = time.time()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA journal_mode=WAL;")
-            await db.execute("PRAGMA busy_timeout=5000;")
-            await db.execute(
-                """
-                INSERT INTO tech_debt_audits (project_name, commit_sha, audited_at, status, issue_number, details)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_name) DO UPDATE SET
-                    commit_sha = excluded.commit_sha,
-                    audited_at = excluded.audited_at,
-                    status = excluded.status,
-                    issue_number = excluded.issue_number,
-                    details = excluded.details
-                """,
-                (project_name, commit_sha, now, status, issue_number, details),
-            )
-            await db.commit()
-
     async def get_last_tech_debt_audit(self, project_name: str) -> Optional[Dict[str, Any]]:
         """
         Retrieves the last tech debt audit record for the specified project.
@@ -1101,6 +1070,37 @@ class StateManager:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    async def record_tech_debt_audit(
+        self,
+        project_name: str,
+        commit_sha: str,
+        status: str,
+        issue_number: Optional[int] = None,
+        details: Optional[str] = None,
+        audited_at: Optional[float] = None,
+    ) -> None:
+        """
+        Records or updates a tech debt audit record in the Blackboard database.
+        Idempotent operation (INSERT ... ON CONFLICT(project_name) DO UPDATE).
+        """
+        now = time.time() if audited_at is None else float(audited_at)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO tech_debt_audits (project_name, commit_sha, audited_at, status, issue_number, details)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_name) DO UPDATE SET
+                    commit_sha = excluded.commit_sha,
+                    audited_at = excluded.audited_at,
+                    status = excluded.status,
+                    issue_number = excluded.issue_number,
+                    details = excluded.details
+                """,
+                (project_name, commit_sha, now, status, issue_number, details),
+            )
+            await db.commit()
     # =========================================================================
     # SDLC Items & Anomaly Memory Layer (Zero-HTTP UI Architecture)
     # =========================================================================
