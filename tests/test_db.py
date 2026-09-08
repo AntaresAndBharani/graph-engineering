@@ -2594,6 +2594,71 @@ async def test_get_next_devtest_task_standalone_fallback_ignores_needs_triage_an
     assert selected == 502
 
 
+@pytest.mark.asyncio
+async def test_tech_debt_audits_blackboard_lifecycle(tmp_path: Path):
+    """
+    Verifies SQLite blackboard schema and helper methods for tech debt audits (Issue #175).
+    Covers Gherkin scenarios:
+    1. Record and retrieve tech debt audit status
+    2. Update audit with created issue number
+    3. Idempotent table migration in init_db()
+    """
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # Initially None
+    assert await manager.get_last_tech_debt_audit("crosstrainingapp") is None
+
+    # Scenario 1: Record and retrieve tech debt audit status
+    t_before = time.time()
+    await manager.record_tech_debt_audit(
+        project_name="crosstrainingapp",
+        commit_sha="abc1234",
+        status="clean",
+        issue_number=None,
+        details="No tech debt found",
+    )
+    t_after = time.time()
+
+    audit = await manager.get_last_tech_debt_audit("crosstrainingapp")
+    assert audit is not None
+    assert audit["project_name"] == "crosstrainingapp"
+    assert audit["commit_sha"] == "abc1234"
+    assert audit["status"] == "clean"
+    assert audit["issue_number"] is None
+    assert audit["details"] == "No tech debt found"
+    assert t_before <= audit["audited_at"] <= t_after
+
+    # Scenario 2: Update audit with created issue number
+    t_update_before = time.time()
+    await manager.record_tech_debt_audit(
+        project_name="crosstrainingapp",
+        commit_sha="abc1234",
+        status="issue_created",
+        issue_number=180,
+        details="Discovered TODOs logged to #180",
+    )
+    t_update_after = time.time()
+
+    audit_updated = await manager.get_last_tech_debt_audit("crosstrainingapp")
+    assert audit_updated is not None
+    assert audit_updated["project_name"] == "crosstrainingapp"
+    assert audit_updated["commit_sha"] == "abc1234"
+    assert audit_updated["status"] == "issue_created"
+    assert audit_updated["issue_number"] == 180
+    assert audit_updated["details"] == "Discovered TODOs logged to #180"
+    assert t_update_before <= audit_updated["audited_at"] <= t_update_after
+
+    # Scenario 3: Idempotent table migration in init_db()
+    await manager.init_db()
+    audit_after_reinit = await manager.get_last_tech_debt_audit("crosstrainingapp")
+    assert audit_after_reinit is not None
+    assert audit_after_reinit["status"] == "issue_created"
+    assert audit_after_reinit["issue_number"] == 180
+
+
+
 
 
 
