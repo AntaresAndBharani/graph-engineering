@@ -272,6 +272,7 @@ def build_triage_prompt(
     project: ProjectConfig,
     issue_id: int,
     issue_title: str,
+    issue_body: str = "",
     trigger: str = "needs-triage",
     output_label: str = "ready-for-dev",
     processed_label: str = "architect-processed",
@@ -286,20 +287,32 @@ def build_triage_prompt(
     if project.context_files:
         context_note = f"Read the project context files in your workspace: {', '.join(project.context_files)}."
 
-    is_story = any(s in issue_title.lower() for s in ("story", "epic"))
+    title_lower = issue_title.lower()
+    body_lower = issue_body.lower() if issue_body else ""
+
+    # Detect if issue represents a story or complex specification requiring decomposition
+    has_story_keyword = any(s in title_lower for s in ("story", "epic"))
+    has_complex_spec = bool(
+        re.search(r"scenario\s*:", body_lower)
+        or re.search(r"component\s*impact\s*table", body_lower)
+        or re.search(r"acceptance\s*criteria", body_lower)
+        or re.search(r"##\s*subtasks", body_lower)
+    )
+    is_story = has_story_keyword or has_complex_spec
+
     if is_story:
         case_routing = (
             f"2. CLASSIFY AND ROUTE THE ISSUE ACCORDING TO ITS NATURE:\n"
             f"   - **Case 1: ALREADY IMPLEMENTED ON MAIN**: If this issue's acceptance criteria are already satisfied in the codebase, close it immediately:\n"
             f"     `gh issue close {issue_id} --repo '{project.repo}' --comment 'Closed: Already implemented on main.'`\n"
             f"   - **Case 2: FULL USER STORY / COMPLEX FEATURE (MANDATORY FOR STORIES)**:\n"
-            f"     This issue is explicitly designated as a User Story / Epic ('{issue_title}'). Case 2 (Standalone Task) is STRICTLY PROHIBITED. You MUST decompose it into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
+            f"     This issue represents a full User Story or complex specification ('{issue_title}'). Case 2 (Standalone Task) is STRICTLY PROHIBITED (labeling directly as '{output_label}' is forbidden). You MUST decompose it into minimal, testable technical subtasks following 3-amigos and INVEST principles:\n"
             f"     - Create all Subtasks 1..N (Queued): `gh issue create --repo '{project.repo}' --title '<subtask N title>' --body '<Gherkin acceptance criteria>\\n\\nParent: #{issue_id}' --label '{queued_label}'`\n"
             f"     - CRITICAL LABELING INVARIANT: Assign ONLY the label '{queued_label}' to each newly created subtask. Do NOT use issue templates (--template) and NEVER apply legacy or prefixed labels such as 'type:subtask', 'status:ready', 'status:definition', 'type:user-story', or 'status:*'.\n"
             f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
             f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
             f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
-            f"     - CRITICAL SAFETY: NEVER apply '{output_label}' to this parent issue. Stories must be decomposed into queued subtasks, never directly labeled '{output_label}'.\n"
+            f"     - CRITICAL SAFETY: NEVER apply '{output_label}' to this parent issue. Stories and complex specs must be decomposed into queued subtasks, never directly labeled '{output_label}'.\n"
         )
     else:
         case_routing = (
@@ -315,6 +328,7 @@ def build_triage_prompt(
             f"     - Update the parent story to '{processed_label}' and remove '{trigger}':\n"
             f"       `gh issue edit {issue_id} --repo '{project.repo}' --remove-label '{trigger}' --add-label '{processed_label}'`\n"
             f"     - Post a comment on the parent issue listing all created subtask numbers in sequential order.\n"
+            f"     - CRITICAL SAFETY: NEVER apply '{output_label}' to this parent issue. Complex features must be decomposed into queued subtasks, never directly labeled '{output_label}'.\n"
         )
 
     prompt = (
@@ -381,8 +395,13 @@ async def _triage_story(
     target_issue = issues[0]
     issue_id = target_issue["number"]
     issue_title = target_issue.get("title", "")
+    issue_body = target_issue.get("body", "") or ""
 
-    is_story = any(s in issue_title.lower() for s in ("story", "epic"))
+    is_story = any(s in issue_title.lower() for s in ("story", "epic")) or bool(
+        re.search(r"scenario\s*:", issue_body, re.IGNORECASE)
+        or re.search(r"component\s*impact\s*table", issue_body, re.IGNORECASE)
+        or re.search(r"acceptance\s*criteria", issue_body, re.IGNORECASE)
+    )
     item_type = "STORY" if is_story else "TASK"
 
     # Sync issue into SDLC Blackboard memory
@@ -430,6 +449,7 @@ async def _triage_story(
         project=project,
         issue_id=issue_id,
         issue_title=issue_title,
+        issue_body=issue_body,
         trigger=trigger,
         output_label=output_label,
         processed_label=processed_label,
