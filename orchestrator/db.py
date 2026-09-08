@@ -249,17 +249,15 @@ class StateManager:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_token_usage_project_node ON token_usage_events(project_name, node_name, created_at);"
             )
-
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tech_debt_audits (
-                    project_name TEXT NOT NULL,
+                    project_name TEXT PRIMARY KEY,
                     commit_sha TEXT NOT NULL,
                     audited_at REAL NOT NULL,
                     status TEXT NOT NULL,
                     issue_number INTEGER,
-                    details TEXT,
-                    PRIMARY KEY (project_name)
+                    details TEXT
                 );
                 """
             )
@@ -1055,7 +1053,7 @@ class StateManager:
 
     async def get_last_tech_debt_audit(self, project_name: str) -> Optional[Dict[str, Any]]:
         """
-        Retrieves the most recent tech debt audit record for a project.
+        Retrieves the last tech debt audit record for the specified project.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -1082,7 +1080,8 @@ class StateManager:
         audited_at: Optional[float] = None,
     ) -> None:
         """
-        Records or updates a tech debt audit record for a project.
+        Records or updates a tech debt audit record in the Blackboard database.
+        Idempotent operation (INSERT ... ON CONFLICT(project_name) DO UPDATE).
         """
         now = time.time() if audited_at is None else float(audited_at)
         async with aiosqlite.connect(self.db_path) as db:
@@ -1102,7 +1101,6 @@ class StateManager:
                 (project_name, commit_sha, now, status, issue_number, details),
             )
             await db.commit()
-
     # =========================================================================
     # SDLC Items & Anomaly Memory Layer (Zero-HTTP UI Architecture)
     # =========================================================================
