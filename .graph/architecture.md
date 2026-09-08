@@ -12,9 +12,9 @@
 ### System Overview
 `graph-orchestrator` is a decoupled, local-first control-plane daemon engineered to coordinate autonomous multi-agent software engineering pipelines across distributed repositories. It establishes an intelligent bridge between local developer workspaces, cloud code hosting platforms (GitHub), and pluggable AI CLI execution harnesses (Antigravity, Claude Code, Devin).
 
-The default operational architecture is a **Streamlined 2-Node Parallel Engine** consisting of **Architect** (Node 1: Producer) and **3-Amigos DevTest** (Node 2: Consumer) executing concurrently within isolated Git worktrees. Additional specialized governance nodes—**Supervisor** (Node 0: Watchdog & PO-Proxy), **Reviewer Gatekeeper** (Node 3: Auto-Merge Gate), and **BAU Maintenance** (Node 4: Tech Debt Sweep)—are modular, **optional/disabled-by-default** components that can be enabled on demand.
+The default operational architecture is a **Streamlined 2-Node Parallel Engine** consisting of **Architect** (Node 1: Producer) and **3-Amigos DevTest** (Node 2: Consumer) executing concurrently within isolated Git worktrees. Additional specialized governance nodes—**Supervisor** (Node 0: Watchdog & PO-Proxy), **Reviewer Gatekeeper** (Node 3: Auto-Merge Gate), **BAU Maintenance** (Node 4: Tech Debt Sweep), and **Technical Debt & Quality Audit** (Node 5: Fail-Closed Architectural Auditor)—are modular, **optional/disabled-by-default** components that can be enabled on demand.
 
-The architecture is governed by **Zero-Token Idle Gating**: all repository inspections, issue status checks, label audits, pull request evaluations, and mergeability scans execute deterministically via local CLI tooling (GitHub CLI `gh`, Git, SQLite WAL) with zero token consumption. External AI harnesses are dispatched strictly when actionable tasks require deep reasoning, code implementation, INVEST story decomposition, or semantic conflict resolution.
+The architecture is governed by **Zero-Token Idle Gating**: all repository inspections, issue status checks, label audits, pull request evaluations, mergeability scans, and development quiescence gates execute deterministically via local CLI tooling (GitHub CLI `gh`, Git, SQLite WAL) with zero token consumption. External AI harnesses are dispatched strictly when actionable tasks require deep reasoning, code implementation, INVEST story decomposition, semantic conflict resolution, or fail-closed architectural debt auditing during complete development quiescence.
 
 ```mermaid
 flowchart TD
@@ -39,6 +39,7 @@ flowchart TD
         N0["Node 0: Supervisor\n(Watchdog, SLA Audit & PO-Proxy)\n[Optional / Disabled]"]
         N3["Node 3: Reviewer Gatekeeper\n(CI Quality Gate & Auto-Merge)\n[Optional / Disabled]"]
         N4["Node 4: BAU Maintenance\n(Tech Debt Consolidation Sweep)\n[Optional / Disabled]"]
+        N5["Node 5: Technical Debt & Quality Audit\n(Quiescence-Gated Arch Debt Auditor)\n[Optional / Disabled]"]
     end
 
     subgraph Blackboard Layer ["Decoupled Artifact Blackboard"]
@@ -57,11 +58,11 @@ flowchart TD
     Core <--> WorktreeMgr
     Core <--> QuotaMgr
     Core ==> N1 & N2
-    Core -.-> N0 & N3 & N4
-    N1 & N2 & N0 & N3 & N4 --> Adapter
-    N1 & N2 & N0 & N3 & N4 <--> GH
-    N1 & N2 & N0 & N3 <--> BB
-    N1 & N2 <--> LocalGit
+    Core -.-> N0 & N3 & N4 & N5
+    N1 & N2 & N0 & N3 & N4 & N5 --> Adapter
+    N1 & N2 & N0 & N3 & N4 & N5 <--> GH
+    N1 & N2 & N0 & N3 & N5 <--> BB
+    N1 & N2 & N5 <--> LocalGit
 ```
 
 ### Autonomous Pipeline Nodes & Topology Matrix
@@ -73,6 +74,7 @@ flowchart TD
 | **Node 0** | **Supervisor** (`supervisor.py`) | **Optional / Disabled** | Consistency watchdog, proactive PO-proxy requirement evaluation, SHA-256 hash gating, and anomaly self-healing. | Scheduled interval (default 1h) or Label `needs-po-review` | Fast PO Evaluation (`antigravity`/`gemini-3.8-flash-high`) + Zero-token audit |
 | **Node 3** | **Reviewer Gatekeeper** (`reviewer.py`) | **Optional / Disabled** | Remote CI quality gate verification (100% green required), autonomous merge conflict resolution, and squash auto-merge. | Label `architect-approved` / `needs-architect-review` | Fast Conflict Harness (`antigravity`/`gemini-3.8-flash-high`) + Deterministic `gh` |
 | **Node 4** | **BAU Maintenance** (`bau.py`) | **Optional / Disabled** | Daily 24h maintenance sweep consolidating `tech-debt` and `enhancement` tickets into structured User Stories. | Daily interval (`bau_interval_seconds`, default 24h) | Cost-effective synthesis (`antigravity`/`gemini-3.8-flash-high`) |
+| **Node 5** | **Technical Debt** (`tech_debt.py`) | **Optional / Disabled** | Fail-closed architectural technical debt and test gap auditor dispatching validated User Stories into the SDLC backlog. | Development Quiescence (0 locks, 0 active items/labels, 0 PRs) + Cooldown / New Commit SHA | Dedicated Audit Harness (`claude`/`claude-sonnet-5` effort: low) |
 
 ---
 
@@ -111,6 +113,7 @@ graph TD
         DevTestNode["DevTest Node (`orchestrator/nodes/devtest.py`)"]
         ReviewerNode["Reviewer Node (`orchestrator/nodes/reviewer.py`)"]
         BAUNode["BAU Node (`orchestrator/nodes/bau.py`)"]
+        TechDebtNode["Tech Debt Node (`orchestrator/nodes/tech_debt.py`)"]
         LifecycleRunner["Lifecycle Runner & Drain Engine (`orchestrator/cli.py`)"]
     end
 
@@ -161,6 +164,7 @@ graph TD
        - `node-supervisor` (Node 0: Watchdog & PO-Proxy): Watchdog auditing, 12-hour SLA tracking, PO-proxy Gherkin evaluation, and conflict self-healing.
        - `node-reviewer` (Node 3: Quality Gatekeeper): Dedicated remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
        - `node-bau` (Node 4: Maintenance Sweep): Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
+       - `node-tech-debt` (Node 5: Quality Audit): Fail-closed architectural technical debt and test gap auditor dispatching validated User Stories into the SDLC backlog during development quiescence.
      - **Lifecycle Drain Engine (`orchestrator start`)**:
        - Executes worker passes with `exit_when_idle=True`, evaluating `is_project_queue_drained`. Gated to prevent premature exit while feature-branch PR CI checks are running (`RUNNING`, `PENDING`, `PASS`), continuing through CI verification, auto-merge, and subsequent sequential subtasks.
 
@@ -191,7 +195,8 @@ graph-engineering/
 │   ├── node-architect.md            # Node 1 specification
 │   ├── node-devtest.md              # Node 2 specification
 │   ├── node-reviewer.md             # Node 3 specification
-│   └── node-bau.md                  # Node 4 specification
+│   ├── node-bau.md                  # Node 4 specification
+│   └── node-tech-debt.md            # Node 5 specification
 ├── orchestrator/                    # Primary Python package root
 │   ├── __init__.py                  # Package metadata and __version__
 │   ├── cli.py                       # Typer CLI application, daemon runner & lifecycle engine
@@ -214,7 +219,8 @@ graph-engineering/
 │       ├── bau.py                   # Business-as-usual tech debt consolidation node
 │       ├── devtest.py               # 3-Amigos development and testing node
 │       ├── reviewer.py              # Reviewer quality gatekeeper and auto-merge node
-│       └── supervisor.py            # Watchdog consistency supervisor node
+│       ├── supervisor.py            # Watchdog consistency supervisor node
+│       └── tech_debt.py             # Fail-closed technical debt & quality audit node
 ├── templates/                       # Reference templates and starter configurations
 │   └── config.example.yaml          # Master orchestrator configuration template (v2)
 ├── tests/                           # Comprehensive automated test suite
@@ -233,6 +239,7 @@ graph-engineering/
 │   ├── test_sequential_pipeline.py  # Story locking, ascending dispatch, and advancement tests
 │   ├── test_stop.py                 # Graceful daemon shutdown and lifecycle kill tests
 │   ├── test_supervisor_po.py        # Supervisor PO-proxy evaluation tests
+│   ├── test_tech_debt_node.py       # Tech debt node quiescence and audit tests
 │   ├── test_widgets.py              # Widget layout, column ordering, [LOCKED] badge tests
 │   ├── test_worktrees.py            # WorktreeManager lifecycle, sync, and fallback tests
 │   └── __init__.py                  # Test package root
@@ -442,6 +449,8 @@ To minimize GitHub CLI rate limit consumption and round-trip latency, `poller.py
     - In `SDLCProgressWidget`, column ordering is strictly prioritized as `["ID", "PR Status", "Title", "Status/Label"]`. Root parent story `[LOCKED]` badges are placed in Column 0 (ID). Titles are truncated at width 45 with ellipsis (`...`) to preserve visibility without horizontal viewport scrolling.
 12. **Lifecycle Completion Predicate & PR CI Gating**:
     - The `orchestrator start` lifecycle loop must not declare queue drained or terminate while feature-branch PR CI checks are running (`RUNNING`, `PENDING`, `PASS`), continuing through CI verification, auto-merge, and subsequent sequential subtasks.
+13. **Fail-Closed Quiescence Gating & Decoupled Commit SHA Auditing**:
+    - The `tech_debt` node must strictly evaluate full repository quiescence (`is_project_fully_quiescent`) across SQLite active jobs/story locks, active SDLC items, pipeline active labels, and open GitHub PRs. If GitHub CLI times out or errors, it must fail closed and halt execution with zero token consumption. Audits are decoupled by upstream commit SHA (`origin/main`) and throttled by cooldown intervals (`tech_debt_interval_seconds: 14400`), guaranteeing 0 tokens consumed when commits are already audited.
 
 ### Anti-Patterns to Avoid
 

@@ -155,6 +155,55 @@ async def test_scenario_1_strict_quiescence_fails_closed_when_gh_missing(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_scenario_1_strict_quiescence_fails_closed_when_gh_times_out(tmp_path: Path):
+    """
+    Scenario 1f: GitHub CLI timeout causes fail-closed quiescence evaluation
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+
+    mock_proc = AsyncMock()
+    mock_proc.pid = 99999
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
+
+    with patch("shutil.which", return_value="gh"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        is_quiescent, reason = await is_project_fully_quiescent(project, state_manager)
+        assert is_quiescent is False
+        assert "timed out" in reason.lower()
+        assert "fail-closed" in reason.lower()
+        mock_proc.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_scenario_1_strict_quiescence_fails_closed_when_gh_returns_error(tmp_path: Path):
+    """
+    Scenario 1g: GitHub CLI non-zero exit code causes fail-closed quiescence evaluation
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"API rate limit exceeded"))
+
+    with patch("shutil.which", return_value="gh"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        is_quiescent, reason = await is_project_fully_quiescent(project, state_manager)
+        assert is_quiescent is False
+        assert "API rate limit exceeded" in reason
+        assert "fail-closed" in reason.lower()
+
+
+@pytest.mark.asyncio
 async def test_scenario_2_zero_token_skip_on_previously_audited_commit_sha(tmp_path: Path):
     """
     Scenario 2: Zero Token Skip on Previously Audited Commit SHA

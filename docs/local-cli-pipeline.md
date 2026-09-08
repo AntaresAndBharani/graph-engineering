@@ -24,6 +24,7 @@ flowchart TD
         Poller -.->|Anomalies| N1["Node 0: Supervisor (Watchdog & PO-Proxy)"]
         Poller -.->|needs-architect-review| N4["Node 3: Reviewer (CI & Auto-Merge)"]
         Poller -.->|tech-debt / enhancement| N5["Node 4: BAU Maintenance (Daily Sweep)"]
+        Poller -.->|Quiescent & Cooldown| N6["Node 5: Tech Debt (Architectural Debt Audit)"]
     end
 
     Harness -->|Local OAuth Session| TargetRepo["Target Project Repositories\n(GitHub CLI + Local Git)"]
@@ -135,6 +136,12 @@ projects:
         enabled: false                # Optional / Disabled by default
         harness: "antigravity"
         model: "gemini-3.7-flash-low"
+      tech_debt:
+        enabled: false                # Optional / Disabled by default
+        harness: "claude"
+        model: "sonnet"
+        effort: "low"
+        interval_seconds: 14400       # 4 hours cooldown
 ```
 
 ---
