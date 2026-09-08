@@ -350,12 +350,10 @@ async def check_repository_anomalies(
     state_manager: StateManager,
 ) -> List[Dict[str, Any]]:
     """
-    Deterministically scans for methodology, label status, and SLA anomalies without LLM tokens.
+    Deterministically scans for methodology and label status anomalies without LLM tokens.
     Returns a list of anomaly descriptors.
     """
     anomalies: List[Dict[str, Any]] = []
-    now = time.time()
-    sla_threshold_seconds = 12 * 3600  # 12 hours SLA threshold
 
     # 1. Check open PRs with merge conflicts
     prs = await poller.fetch_open_prs(project.repo)
@@ -380,7 +378,7 @@ async def check_repository_anomalies(
                 "details": f"Job for Issue #{job.get('issue_id')} ({job.get('node_type')}) failed: {job.get('error_message')}",
             })
 
-    # 3. Check All Open Issues (Label Status Audit & 12-Hour SLA)
+    # 3. Check All Open Issues (Label Status Audit)
     open_issues = await poller.fetch_all_open_issues(project.repo, limit=100)
     for issue in open_issues:
         issue_num = issue.get("number")
@@ -388,7 +386,6 @@ async def check_repository_anomalies(
         labels_list = [l.get("name") for l in issue.get("labels", []) if isinstance(l, dict)]
         labels_set = set(labels_list)
 
-        is_maintenance = bool(labels_set.intersection({"tech-debt", "enhancement"}))
         has_managed_label = bool(labels_set.intersection(MANAGED_WORKFLOW_LABELS))
 
         # 3a. Issue Status Validation: Unclassified / Missing Managed Label
@@ -399,22 +396,6 @@ async def check_repository_anomalies(
                 "title": issue_title,
                 "details": f"Issue #{issue_num} has no managed workflow label. Needs triage.",
             })
-
-        # 3b. 12-Hour Stale Issue SLA Check (Excluding tech-debt & enhancement)
-        if not is_maintenance and "needs-po-review" not in labels_set:
-            created_at_str = issue.get("createdAt", "")
-            if created_at_str:
-                created_ts = parse_iso_timestamp(created_at_str)
-                age_seconds = now - created_ts
-                if age_seconds > sla_threshold_seconds:
-                    age_hours = age_seconds / 3600.0
-                    anomalies.append({
-                        "type": "STALE_ISSUE_SLA",
-                        "issue_id": issue_num,
-                        "title": issue_title,
-                        "age_hours": age_hours,
-                        "details": f"Issue #{issue_num} has been open for {age_hours:.1f}h (> 12h SLA). Escalating to PO review.",
-                    })
 
     # Sync all scanned issues and PRs into SDLC Blackboard memory
     sdlc_items: List[Dict[str, Any]] = []
@@ -541,34 +522,5 @@ async def run_supervisor_node(
                     healing_actions.append(f"Labeled Issue #{issue_id} with needs-triage.")
                 except Exception as e:
                     healing_actions.append(f"Failed to label Issue #{issue_id}: {e}")
-
-        elif anomaly_type == "STALE_ISSUE_SLA":
-            issue_id = anomaly["issue_id"]
-            age_hours = anomaly.get("age_hours", 12.0)
-            try:
-                await state_manager.record_anomaly_event(
-                    project_name=project.name,
-                    node_name="supervisor",
-                    error_type="sla_violation",
-                    error_message=f"Issue #{issue_id} open for {age_hours:.1f}h (> 12h SLA threshold).",
-                    issue_number=issue_id,
-                )
-            except Exception:
-                pass
-            if shutil.which("gh"):
-                cmd_label = ["gh", "issue", "edit", str(issue_id), "--repo", project.repo, "--add-label", "needs-po-review"]
-                cmd_comment = [
-                    "gh", "issue", "comment", str(issue_id),
-                    "--repo", project.repo,
-                    "--body", f"ðŸ¤– **Supervisor SLA Alert**: Issue #{issue_id} has been open for {age_hours:.1f} hours (> 12h SLA threshold) without completion. Flagged for PO review (`needs-po-review`).",
-                ]
-                try:
-                    p1 = await asyncio.create_subprocess_exec(*cmd_label, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    await p1.wait()
-                    p2 = await asyncio.create_subprocess_exec(*cmd_comment, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    await p2.wait()
-                    healing_actions.append(f"Escalated stale Issue #{issue_id} ({age_hours:.1f}h open) with needs-po-review.")
-                except Exception as e:
-                    healing_actions.append(f"Failed to escalate Issue #{issue_id}: {e}")
 
     return True, f"Supervisor handled {len(healing_actions)} item(s): {'; '.join(healing_actions)}"

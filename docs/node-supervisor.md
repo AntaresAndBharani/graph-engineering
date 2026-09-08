@@ -37,10 +37,7 @@ flowchart TD
     Q --> C3{"Unclassified Issues (Missing Managed Label)?"}
     C3 -->|Yes| A3["Assign 'needs-triage' for Architect review + Notify via Comment"]
     
-    Q --> C4{"Active Issues Open > 12h (Excl. tech-debt / enhancement)?"}
-    C4 -->|Yes| A4["Escalate with 'needs-po-review' + Post 12h SLA Alert"]
-    
-    C1 & C2 & C3 & C4 -->|0 Anomalies Found| Idle["Exit with 0 Tokens Consumed (Consistent State)"]
+    C1 & C2 & C3 -->|0 Anomalies Found| Idle["Exit with 0 Tokens Consumed (Consistent State)"]
 ```
 
 ---
@@ -60,12 +57,7 @@ flowchart TD
 - Validates that every open issue carries a valid managed label (`needs-triage`, `ready-for-dev`, `dev-implemented`, `architect-processed`, `needs-po-review`, `orchestration-failed`, `tech-debt`, `enhancement`, `queued`, `planned`).
 - Unclassified issues are automatically assigned **`needs-triage`** so the **Architect Node** can triage and classify them.
 
-### 4. 12-Hour Stale Issue SLA Monitoring
-- Evaluates issue age based on `createdAt`.
-- **Excludes** `tech-debt` and `enhancement` issues (which are safely queued for the daily BAU Node).
-- If an active workflow item remains open for **longer than 12 hours**, flags it with **`needs-po-review`** and posts a diagnostic warning comment.
-
-### 5. PR Merge Conflict Detection
+### 4. PR Merge Conflict Detection
 - Identifies `CONFLICTING` pull requests and attaches `needs-po-review` to prevent review node deadlock.
 
 ---

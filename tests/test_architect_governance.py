@@ -116,6 +116,58 @@ def test_build_triage_prompt_clean_3_cases():
     assert "tech-debt" not in prompt
 
 
+def test_build_triage_prompt_story_prohibits_standalone_case_2():
+    project = ProjectConfig(
+        name="test-repo",
+        repo="org/repo",
+        local_path=".",
+        context_files=[".graph/architecture.md"],
+    )
+
+    prompt = build_triage_prompt(
+        project=project,
+        issue_id=501,
+        issue_title="[Story]: Athlete Body Weight Tracker & Progress Correlation",
+        trigger="needs-triage",
+        output_label="ready-for-dev",
+        processed_label="architect-processed",
+        queued_label="queued",
+    )
+
+    assert "STANDALONE TASK / SMALL BUG" not in prompt
+    assert "Case 2 (Standalone Task) is STRICTLY PROHIBITED" in prompt
+    assert "Case 2: FULL USER STORY / COMPLEX FEATURE (MANDATORY FOR STORIES)" in prompt
+    assert "NEVER apply 'ready-for-dev' to this parent issue" in prompt
+    assert "--add-label 'architect-processed'" in prompt
+
+
+def test_build_triage_prompt_complex_spec_body_prohibits_standalone_case_2():
+    project = ProjectConfig(
+        name="test-repo",
+        repo="org/repo",
+        local_path=".",
+        context_files=[".graph/architecture.md"],
+    )
+
+    prompt = build_triage_prompt(
+        project=project,
+        issue_id=143,
+        issue_title="fix(shell): hamburger menu theme active reflection",
+        issue_body="## Proposed Solution\n\n## Acceptance Criteria (Gherkin)\n\nScenario: getSavedTheme returns club\n\n| File | Action | Description |",
+        trigger="needs-triage",
+        output_label="ready-for-dev",
+        processed_label="architect-processed",
+        queued_label="queued",
+    )
+
+    assert "STANDALONE TASK / SMALL BUG" not in prompt
+    assert "Case 2 (Standalone Task) is STRICTLY PROHIBITED" in prompt
+    assert "Case 2: FULL USER STORY / COMPLEX FEATURE (MANDATORY FOR STORIES)" in prompt
+    assert "NEVER apply 'ready-for-dev' to this parent issue" in prompt
+    assert "--add-label 'architect-processed'" in prompt
+
+
+
 @pytest.mark.asyncio
 async def test_architect_triages_issue(tmp_path: Path, monkeypatch):
     from orchestrator.nodes import architect
