@@ -250,6 +250,20 @@ class StateManager:
                 "CREATE INDEX IF NOT EXISTS idx_token_usage_project_node ON token_usage_events(project_name, node_name, created_at);"
             )
 
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tech_debt_audits (
+                    project_name TEXT NOT NULL,
+                    commit_sha TEXT NOT NULL,
+                    audited_at REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    issue_number INTEGER,
+                    details TEXT,
+                    PRIMARY KEY (project_name)
+                );
+                """
+            )
+
             # Idempotent migration: clean legacy dict representations in sdlc_items.labels
             cursor = await db.execute(
                 "SELECT project_name, issue_number, labels FROM sdlc_items WHERE labels LIKE '%{%';"
@@ -1034,6 +1048,60 @@ class StateManager:
                 )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Blackboard Pattern: Tech Debt Audits
+    # =========================================================================
+
+    async def get_last_tech_debt_audit(self, project_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the most recent tech debt audit record for a project.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                """
+                SELECT project_name, commit_sha, audited_at, status, issue_number, details
+                FROM tech_debt_audits
+                WHERE project_name = ?
+                """,
+                (project_name,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def record_tech_debt_audit(
+        self,
+        project_name: str,
+        commit_sha: str,
+        status: str,
+        issue_number: Optional[int] = None,
+        details: Optional[str] = None,
+        audited_at: Optional[float] = None,
+    ) -> None:
+        """
+        Records or updates a tech debt audit record for a project.
+        """
+        now = time.time() if audited_at is None else float(audited_at)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            await db.execute(
+                """
+                INSERT INTO tech_debt_audits (project_name, commit_sha, audited_at, status, issue_number, details)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_name) DO UPDATE SET
+                    commit_sha = excluded.commit_sha,
+                    audited_at = excluded.audited_at,
+                    status = excluded.status,
+                    issue_number = excluded.issue_number,
+                    details = excluded.details
+                """,
+                (project_name, commit_sha, now, status, issue_number, details),
+            )
+            await db.commit()
 
     # =========================================================================
     # SDLC Items & Anomaly Memory Layer (Zero-HTTP UI Architecture)
