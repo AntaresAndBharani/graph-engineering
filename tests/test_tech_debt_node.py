@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
+from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig, TechDebtConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.nodes.tech_debt import (
@@ -30,7 +30,12 @@ async def test_scenario_1_strict_quiescence_halts_on_active_story_lock(tmp_path:
     state_manager = StateManager(db_path)
     await state_manager.init_db()
 
-    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=str(tmp_path),
+        tech_debt=TechDebtConfig(enabled=True),
+    )
 
     # Hold story lock via active_jobs table
     await state_manager.acquire_lock(
@@ -164,7 +169,12 @@ async def test_scenario_2_zero_token_skip_on_previously_audited_commit_sha(tmp_p
     state_manager = StateManager(db_path)
     await state_manager.init_db()
 
-    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=str(tmp_path),
+        tech_debt=TechDebtConfig(enabled=True),
+    )
     config = GlobalConfig()
 
     sha = "abcdef1234567890abcdef1234567890abcdef12"
@@ -204,7 +214,12 @@ async def test_scenario_3_cooldown_interval_throttling(tmp_path: Path):
     state_manager = StateManager(db_path)
     await state_manager.init_db()
 
-    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=str(tmp_path),
+        tech_debt=TechDebtConfig(enabled=True),
+    )
     config = GlobalConfig()
 
     old_sha = "old_commit_sha_11111111111111111111111111"
@@ -252,7 +267,12 @@ async def test_scenario_4_successful_audit_surfacing_high_impact_debt(tmp_path: 
     state_manager = StateManager(db_path)
     await state_manager.init_db()
 
-    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=str(tmp_path),
+        tech_debt=TechDebtConfig(enabled=True),
+    )
     config = GlobalConfig()
     config.settings.log_dir = str(tmp_path / "logs")
 
@@ -346,7 +366,12 @@ async def test_scenario_5_clean_codebase_zero_issue_idempotency(tmp_path: Path):
     state_manager = StateManager(db_path)
     await state_manager.init_db()
 
-    project = ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path))
+    project = ProjectConfig(
+        name="crosstrainingapp",
+        repo="AntaresAndBharani/crosstrainingapp",
+        local_path=str(tmp_path),
+        tech_debt=TechDebtConfig(enabled=True),
+    )
     config = GlobalConfig()
     config.settings.log_dir = str(tmp_path / "logs")
 

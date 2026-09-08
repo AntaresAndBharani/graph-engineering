@@ -10,6 +10,7 @@ from orchestrator.config import (
     ProjectConfig,
     QuotaSettings,
     SettingsConfig,
+    TechDebtConfig,
     WindowLimitConfig,
     load_config,
 )
@@ -682,6 +683,104 @@ def test_example_config_template_disables_dormant_nodes():
     assert proj.nodes["reviewer"].enabled is False
     assert proj.nodes["supervisor"].enabled is False
     assert proj.nodes["bau"].enabled is False
+
+
+def test_tech_debt_config_defaults():
+    """
+    Scenario: TechDebt configuration parsing and defaults
+      Given a YAML project configuration without explicit "tech_debt" section
+      When "load_config" is called
+      Then "project.tech_debt.enabled" is False
+      And "project.tech_debt.interval_seconds" defaults to 14,400.
+    """
+    cfg = TechDebtConfig()
+    assert cfg.enabled is False
+    assert cfg.interval_seconds == 14400
+    assert cfg.harness == "claude"
+    assert cfg.model == "sonnet"
+    assert cfg.effort == "low"
+
+    proj = ProjectConfig(
+        name="test-proj",
+        repo="org/repo",
+        local_path=".",
+    )
+    assert proj.tech_debt.enabled is False
+    assert proj.tech_debt.interval_seconds == 14400
+    assert proj.is_node_enabled("tech_debt") is False
+
+    # Explicitly enabled via tech_debt field
+    proj_enabled = ProjectConfig(
+        name="test-proj",
+        repo="org/repo",
+        local_path=".",
+        tech_debt=TechDebtConfig(enabled=True),
+    )
+    assert proj_enabled.tech_debt.enabled is True
+    assert proj_enabled.is_node_enabled("tech_debt") is True
+
+    # Overridden via nodes dictionary
+    proj_nodes_override = ProjectConfig(
+        name="test-proj",
+        repo="org/repo",
+        local_path=".",
+        nodes={"tech_debt": NodeConfig(enabled=True)},
+    )
+    assert proj_nodes_override.is_node_enabled("tech_debt") is True
+
+
+def test_tech_debt_config_parsing_from_yaml(tmp_path: Path):
+    """
+    Asserts load_config correctly parses YAML project without tech_debt (defaulting to False/14400)
+    and with explicit tech_debt section.
+    """
+    # 1. Without explicit tech_debt section
+    cfg_file = tmp_path / "config_no_td.yaml"
+    cfg_file.write_text(
+        """
+version: 2
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "."
+        """,
+        encoding="utf-8",
+    )
+    config = load_config(cfg_file)
+    assert len(config.projects) == 1
+    proj = config.projects[0]
+    assert proj.tech_debt.enabled is False
+    assert proj.tech_debt.interval_seconds == 14400
+    assert proj.is_node_enabled("tech_debt") is False
+
+    # 2. With explicit tech_debt section
+    cfg_file_td = tmp_path / "config_with_td.yaml"
+    cfg_file_td.write_text(
+        """
+version: 2
+projects:
+  - name: "beta"
+    repo: "org/beta"
+    local_path: "."
+    tech_debt:
+      enabled: true
+      interval_seconds: 7200
+      harness: "antigravity"
+      model: "gemini-3.8-flash-high"
+      effort: "medium"
+        """,
+        encoding="utf-8",
+    )
+    config_td = load_config(cfg_file_td)
+    assert len(config_td.projects) == 1
+    proj_td = config_td.projects[0]
+    assert proj_td.tech_debt.enabled is True
+    assert proj_td.tech_debt.interval_seconds == 7200
+    assert proj_td.tech_debt.harness == "antigravity"
+    assert proj_td.tech_debt.model == "gemini-3.8-flash-high"
+    assert proj_td.tech_debt.effort == "medium"
+    assert proj_td.is_node_enabled("tech_debt") is True
+
 
 
 

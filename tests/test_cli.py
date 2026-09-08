@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 import pytest
 from typer.testing import CliRunner
-from orchestrator.cli import app, run_project_cycle
-from orchestrator.config import GlobalConfig, ProjectConfig, NodeConfig
+from orchestrator.cli import app, render_node_status_table, run_project_cycle
+from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig, TechDebtConfig
 from orchestrator.db import StateManager
 from orchestrator.logging import strip_ansi
 
@@ -1732,6 +1733,139 @@ projects:
     assert result.exit_code == 0
     assert processed_order == [1, 2], f"Expected subtasks to be processed in ascending order [1, 2], got {processed_order}"
     assert "Queue fully drained. Lifecycle complete" in result.stdout
+
+
+def test_cli_run_node_tech_debt_option(tmp_path: Path, monkeypatch):
+    """
+    Scenario: CLI registration and single node dispatch
+      Given the CLI application
+      When "orchestrator run --node tech_debt" is invoked
+      Then the CLI accepts the option without argument errors
+      And registers the "tech_debt" node in the project status table.
+    """
+    config_file = tmp_path / "config.yaml"
+    posix_path = tmp_path.as_posix()
+    config_file.write_text(
+        f"""
+version: 2
+settings:
+  db_path: "{posix_path}/state.db"
+  log_dir: "{posix_path}/logs"
+projects:
+  - name: "alpha"
+    repo: "org/alpha"
+    local_path: "{posix_path}"
+    tech_debt:
+      enabled: true
+      harness: "claude"
+      model: "sonnet"
+      effort: "low"
+        """,
+        encoding="utf-8",
+    )
+
+    tech_debt_ran = False
+
+    async def mock_run_tech_debt(project, config, state_manager, force=False):
+        nonlocal tech_debt_ran
+        tech_debt_ran = True
+        assert force is True
+        return True, "Mock audit completed."
+
+    monkeypatch.setattr("orchestrator.cli.run_tech_debt_node", mock_run_tech_debt)
+    monkeypatch.setattr("orchestrator.poller.poll_project_sdlc_items", lambda p, s: asyncio.sleep(0))
+
+    result = runner.invoke(app, ["run", "--node", "tech_debt", "--config", str(config_file)])
+    assert result.exit_code == 0
+    assert "Invalid value for '--node'" not in result.stdout
+    assert "TechDebt: Mock audit completed." in result.stdout
+    assert tech_debt_ran is True
+
+
+def test_render_node_status_table_tech_debt():
+    """
+    Verifies render_node_status_table includes 'tech_debt' row with proper enabled/disabled status
+    and harness/model specs from both project.nodes and project.tech_debt fallback.
+    """
+    from io import StringIO
+    from rich.console import Console
+
+    # 1. Disabled by default
+    proj1 = ProjectConfig(name="proj1", repo="org/proj1", local_path=".")
+    config = GlobalConfig(projects=[proj1])
+    buf1 = StringIO()
+    c1 = Console(file=buf1, force_terminal=False, color_system=None, width=140)
+    table1 = render_node_status_table(config, console_out=c1)
+    out1 = buf1.getvalue()
+    assert "tech_debt" in table1.columns[2]._cells
+    assert "tech_debt" in out1
+    assert "DISABLED" in out1
+
+    # 2. Enabled via tech_debt field
+    proj2 = ProjectConfig(
+        name="proj2",
+        repo="org/proj2",
+        local_path=".",
+        tech_debt=TechDebtConfig(enabled=True, harness="antigravity", model="gemini-3.8-flash-high", effort="medium"),
+    )
+    config2 = GlobalConfig(projects=[proj2])
+    buf2 = StringIO()
+    c2 = Console(file=buf2, force_terminal=False, color_system=None, width=140)
+    table2 = render_node_status_table(config2, console_out=c2)
+    out2 = buf2.getvalue()
+    assert "tech_debt" in table2.columns[2]._cells
+    assert "tech_debt" in out2
+    assert "ENABLED" in out2
+    assert "antigravity" in out2
+    assert "gemini-3.8-flash-high (medium)" in out2
+
+
+@pytest.mark.asyncio
+async def test_tech_debt_cycle_dispatch_architect_idle_gating(tmp_path: Path, monkeypatch):
+    """
+    Verifies that in run_project_cycle, tech_debt is only dispatched when Architect is confirmed idle
+    (i.e. did not run work in the cycle).
+    """
+    posix_path = tmp_path.as_posix()
+    project = ProjectConfig(
+        name="alpha",
+        repo="org/alpha",
+        local_path=posix_path,
+        tech_debt=TechDebtConfig(enabled=True),
+    )
+    config = GlobalConfig(projects=[project])
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    monkeypatch.setattr("orchestrator.poller.poll_project_sdlc_items", lambda p, s: asyncio.sleep(0))
+    monkeypatch.setattr("orchestrator.cli.run_supervisor_node", AsyncMock(return_value=(False, "idle")))
+    monkeypatch.setattr("orchestrator.cli.run_devtest_node", AsyncMock(return_value=(False, "idle")))
+    monkeypatch.setattr("orchestrator.cli.run_reviewer_node", AsyncMock(return_value=(False, "idle")))
+    monkeypatch.setattr("orchestrator.cli.run_bau_node", AsyncMock(return_value=(False, "idle")))
+
+    tech_debt_dispatched = False
+
+    async def mock_td(p, c, sm, force=False):
+        nonlocal tech_debt_dispatched
+        tech_debt_dispatched = True
+        return True, "Audit completed."
+
+    monkeypatch.setattr("orchestrator.cli.run_tech_debt_node", mock_td)
+
+    # Case 1: Architect runs work -> tech_debt MUST NOT run
+    monkeypatch.setattr("orchestrator.cli.run_architect_node", AsyncMock(return_value=(True, "Decomposed story")))
+    tech_debt_dispatched = False
+    ran = await run_project_cycle(project, config, state_manager, node_name=None)
+    assert ran is True
+    assert tech_debt_dispatched is False
+
+    # Case 2: Architect is confirmed idle -> tech_debt runs
+    monkeypatch.setattr("orchestrator.cli.run_architect_node", AsyncMock(return_value=(False, "Idle")))
+    tech_debt_dispatched = False
+    ran = await run_project_cycle(project, config, state_manager, node_name=None)
+    assert ran is True
+    assert tech_debt_dispatched is True
+
 
 
 

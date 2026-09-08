@@ -297,12 +297,18 @@ def render_node_status_table(config: GlobalConfig, console_out: Optional[Console
             is_enabled = project.is_node_enabled(node_name)
             status_str = "[bold green]ENABLED[/bold green]" if is_enabled else "[dim red]DISABLED[/dim red]"
 
-            harness_str = (node_cfg.harness if node_cfg and node_cfg.harness else default_harnesses.get(node_name, "claude"))
-
-            if is_enabled and node_cfg:
-                agent_model_str = format_node_agent_spec(node_cfg.model, node_cfg.effort)
+            if node_name == "tech_debt" and not node_cfg and hasattr(project, "tech_debt"):
+                harness_str = project.tech_debt.harness or default_harnesses.get("tech_debt", "claude")
+                if is_enabled:
+                    agent_model_str = format_node_agent_spec(project.tech_debt.model, project.tech_debt.effort)
+                else:
+                    agent_model_str = "—"
             else:
-                agent_model_str = "—"
+                harness_str = (node_cfg.harness if node_cfg and node_cfg.harness else default_harnesses.get(node_name, "claude"))
+                if is_enabled and node_cfg:
+                    agent_model_str = format_node_agent_spec(node_cfg.model, node_cfg.effort)
+                else:
+                    agent_model_str = "—"
 
             if node_name in ("architect", "devtest"):
                 concurrency_str = "Worktree (Concurrent)" if worktrees_on else "Serial (Primary)"
@@ -355,6 +361,7 @@ async def run_project_cycle(
         return False
 
     pipeline_work_done = False
+    arch_ran = False
     prefix = f"[{project.name}]"
 
     # 0. Zero-Token Polling Sweep: Background sync of SDLC items memory layer
@@ -386,6 +393,7 @@ async def run_project_cycle(
             try:
                 ran, msg = await run_architect_node(project, config, state_manager)
                 if ran:
+                    arch_ran = True
                     pipeline_work_done = True
                     console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
                 elif not silent_idle:
@@ -440,8 +448,9 @@ async def run_project_cycle(
                 _logger.error("[%s:architect] Unhandled exception in architect cycle: %s", project.name, arch_res, exc_info=True)
                 console.print(f"  {prefix} [bold red]Architect Error:[/bold red] {arch_res}")
             else:
-                arch_ran, arch_msg = arch_res
-                if arch_ran:
+                arch_ran_res, arch_msg = arch_res
+                if arch_ran_res:
+                    arch_ran = True
                     pipeline_work_done = True
                     console.print(f"  {prefix} [bold green]Architect:[/bold green] {arch_msg}")
                 elif not silent_idle and not arch_msg.startswith("Error:"):
@@ -464,6 +473,7 @@ async def run_project_cycle(
                 try:
                     ran, msg = await run_architect_node(project, config, state_manager)
                     if ran:
+                        arch_ran = True
                         pipeline_work_done = True
                         console.print(f"  {prefix} [bold green]Architect:[/bold green] {msg}")
                     elif not silent_idle:
@@ -516,11 +526,12 @@ async def run_project_cycle(
             console.print(f"  {prefix} [bold red]BAU Error:[/bold red] {e}")
 
     # 6. Technical Debt Node (Quiescence-gated quality audit on main)
+    # Ensure it only runs when Architect is confirmed idle (not arch_ran and no active development)
     if (node_name is None or node_name in ("tech_debt", "tech-debt")) and project.is_node_enabled("tech_debt"):
         if await state_manager.is_stop_requested():
             return pipeline_work_done
-        # When running standard cycle (node_name is None), only dispatch tech_debt if no active development work ran
-        if node_name is not None or not pipeline_work_done:
+        # Only dispatch if architect is confirmed idle and (targeted tech_debt dispatch or no pipeline work ran)
+        if not arch_ran and (node_name is not None or not pipeline_work_done):
             force_tech_debt = node_name in ("tech_debt", "tech-debt")
             try:
                 ran, msg = await run_tech_debt_node(project, config, state_manager, force=force_tech_debt)
