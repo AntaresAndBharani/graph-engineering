@@ -8,8 +8,128 @@ import shutil
 from typing import Any, Dict, List, Optional
 
 from orchestrator.config import ProjectConfig, resolve_path
+import psutil
 
 _logger = logging.getLogger(__name__)
+
+
+def _kill_process_tree(process: Optional[asyncio.subprocess.Process]) -> None:
+    """Recursively terminates a process and all its child processes to avoid zombies or locked files."""
+    if not process or process.returncode is not None:
+        return
+
+    try:
+        parent = psutil.Process(process.pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        parent.kill()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+async def run_git_command(
+    args: List[str],
+    cwd: Path | str,
+    timeout: float = 30.0,
+) -> tuple[int, str, str]:
+    """
+    Executes a git command with timeout and process-tree termination hardening.
+    On asyncio.TimeoutError, explicitly kills the process tree via `proc.kill()`
+    and awaits `proc.wait()` to prevent orphaned processes holding index locks on Windows.
+    Returns (returncode, stdout, stderr).
+    """
+    if not shutil.which("git"):
+        return -1, "", "git binary not found in PATH"
+
+    resolved_cwd = str(resolve_path(cwd))
+    cmd = ["git"] + list(args)
+    proc: Optional[asyncio.subprocess.Process] = None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=resolved_cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout_str = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
+        stderr_str = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
+        returncode = proc.returncode if proc.returncode is not None else 0
+        return returncode, stdout_str, stderr_str
+
+    except asyncio.TimeoutError:
+        err_msg = f"Git command timed out after {timeout}s: {' '.join(cmd)}"
+        _logger.warning("[worktree] %s", err_msg)
+        if proc:
+            _kill_process_tree(proc)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+        return -1, "", err_msg
+
+    except Exception as e:
+        err_msg = f"Git command execution failed: {e}"
+        _logger.debug("[worktree] %s", err_msg)
+        if proc:
+            _kill_process_tree(proc)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+        return -1, "", err_msg
+
+
+async def checkout_detached_upstream(
+    cwd: Path | str,
+    branch: str = "main",
+    timeout: float = 30.0,
+) -> bool:
+    """
+    Synchronizes an ephemeral worktree directory with upstream using detached HEAD checkout:
+    1. git fetch origin <branch>
+    2. git checkout --detach origin/<branch>
+    3. git reset --hard origin/<branch>
+    Avoids branch collision errors (e.g. 'fatal: <branch> is already checked out').
+    """
+    target = resolve_path(cwd)
+    if not target.exists():
+        return False
+
+    code_fetch, _, err_fetch = await run_git_command(["fetch", "origin", branch], cwd=target, timeout=timeout)
+    if code_fetch != 0:
+        _logger.debug("checkout_detached_upstream fetch failed for '%s': %s", target, err_fetch)
+        return False
+
+    code_co, _, err_co = await run_git_command(["checkout", "--detach", f"origin/{branch}"], cwd=target, timeout=timeout)
+    if code_co != 0:
+        _logger.debug("checkout_detached_upstream checkout --detach failed for '%s': %s", target, err_co)
+        return False
+
+    code_reset, _, err_reset = await run_git_command(["reset", "--hard", f"origin/{branch}"], cwd=target, timeout=timeout)
+    if code_reset != 0:
+        _logger.debug("checkout_detached_upstream reset --hard failed for '%s': %s", target, err_reset)
+        return False
+
+    return True
 
 
 def parse_worktree_porcelain(output: str) -> List[Dict[str, Any]]:
@@ -130,23 +250,13 @@ async def sync_worktree(
 
     try:
         # Best-effort fetch origin
-        proc_fetch = await asyncio.create_subprocess_exec(
-            "git", "fetch", "origin", default_branch,
-            cwd=str(target),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc_fetch.communicate()
+        code_fetch, _, _ = await run_git_command(["fetch", "origin", default_branch], cwd=target)
+        if code_fetch != 0:
+            return False
 
         # Best-effort reset or checkout
-        proc_reset = await asyncio.create_subprocess_exec(
-            "git", "reset", "--hard", f"origin/{default_branch}",
-            cwd=str(target),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        res_code = await proc_reset.wait()
-        return res_code == 0
+        code_reset, _, _ = await run_git_command(["reset", "--hard", f"origin/{default_branch}"], cwd=target)
+        return code_reset == 0
     except Exception as e:
         _logger.debug("Non-fatal error syncing worktree at '%s': %s", target, e)
         return False
@@ -406,6 +516,10 @@ class WorktreeManager:
     @classmethod
     async def sync_worktree(cls, worktree_path: Path | str, default_branch: str = "main") -> bool:
         return await sync_worktree(worktree_path, default_branch=default_branch)
+
+    @classmethod
+    async def checkout_detached_upstream(cls, cwd: Path | str, branch: str = "main", timeout: float = 30.0) -> bool:
+        return await checkout_detached_upstream(cwd, branch=branch, timeout=timeout)
 
     @classmethod
     async def ensure_worktree(

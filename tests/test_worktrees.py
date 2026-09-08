@@ -1,13 +1,18 @@
 from pathlib import Path
+import asyncio
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from orchestrator.config import ProjectConfig
+from orchestrator.config import ProjectConfig, GlobalConfig
+from orchestrator.db import StateManager
+from orchestrator.cli import run_project_cycle
 from orchestrator.worktree import (
     WorktreeManager,
+    checkout_detached_upstream,
     ensure_worktree,
     parse_worktree_porcelain,
     prune_worktrees,
+    run_git_command,
 )
 
 
@@ -396,12 +401,6 @@ async def test_real_git_worktree_integration(tmp_path: Path):
     assert pruned is True
 
 
-import asyncio
-from orchestrator.config import GlobalConfig
-from orchestrator.db import StateManager
-from orchestrator.cli import run_project_cycle, _project_worker_loop
-
-
 @pytest.mark.asyncio
 async def test_scenario_concurrent_execution_when_worktrees_enabled(tmp_path: Path):
     """
@@ -420,7 +419,6 @@ async def test_scenario_concurrent_execution_when_worktrees_enabled(tmp_path: Pa
 
     arch_started = asyncio.Event()
     dev_started = asyncio.Event()
-    concurrency_barrier = asyncio.Event()
     both_ran_concurrently = False
 
     async def mock_architect(proj, cfg, sm):
@@ -635,5 +633,190 @@ async def test_concurrent_nodes_git_lock_isolation(tmp_path: Path):
     await WorktreeManager.remove_worktree(project, "architect")
     await WorktreeManager.remove_worktree(project, "devtest")
     await WorktreeManager.prune(project)
+
+
+@pytest.mark.asyncio
+async def test_scenario_subprocess_timeout_terminates_process_tree_and_cleans_locks(tmp_path: Path):
+    """
+    Scenario: Subprocess timeout terminates process tree and cleans index locks
+      Given any git command executed by worktree or tech debt operations
+      When the command exceeds the 30.0s timeout threshold
+      Then the orchestrator MUST terminate the process tree using "proc.kill()" and "await proc.wait()"
+      And return an error tuple (-1, "", "Git command timed out after ...") without leaking zombie processes or retaining ".git/index.lock"
+      And the orchestrator continues normal operation.
+    """
+    repo_dir = tmp_path / "timeout_repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    mock_proc = AsyncMock()
+    mock_proc.pid = 99999
+    mock_proc.returncode = None
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock(return_value=-9)
+
+    async def fake_communicate():
+        await asyncio.sleep(5.0)
+        return (b"", b"")
+
+    mock_proc.communicate = AsyncMock(side_effect=fake_communicate)
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("shutil.which", return_value="/usr/bin/git"), \
+         patch("orchestrator.worktree._kill_process_tree") as mock_kill_tree:
+
+        code, stdout, stderr = await run_git_command(["fetch", "origin", "main"], cwd=repo_dir, timeout=0.05)
+
+        assert code == -1
+        assert stdout == ""
+        assert "Git command timed out after 0.05s" in stderr
+        mock_kill_tree.assert_called_once_with(mock_proc)
+        mock_proc.kill.assert_called_once()
+        mock_proc.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scenario_run_git_command_missing_git(tmp_path: Path):
+    """Verifies that run_git_command returns (-1, '', 'git binary not found...') when git is absent."""
+    with patch("shutil.which", return_value=None):
+        code, stdout, stderr = await run_git_command(["status"], cwd=tmp_path)
+        assert code == -1
+        assert stdout == ""
+        assert "git binary not found" in stderr
+
+
+@pytest.mark.asyncio
+async def test_scenario_run_git_command_general_exception(tmp_path: Path):
+    """Verifies exception handling and cleanup in run_git_command."""
+    mock_proc = AsyncMock()
+    mock_proc.pid = 88888
+    mock_proc.returncode = None
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock(return_value=-1)
+
+    async def fake_communicate():
+        raise OSError("Subprocess spawn error")
+
+    mock_proc.communicate = AsyncMock(side_effect=fake_communicate)
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("shutil.which", return_value="/usr/bin/git"), \
+         patch("orchestrator.worktree._kill_process_tree") as mock_kill_tree:
+
+        code, stdout, stderr = await run_git_command(["status"], cwd=tmp_path)
+        assert code == -1
+        assert stdout == ""
+        assert "Subprocess spawn error" in stderr
+        mock_kill_tree.assert_called_once_with(mock_proc)
+        mock_proc.kill.assert_called_once()
+        mock_proc.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scenario_detached_head_checkout_synchronizes_without_branch_collisions(tmp_path: Path):
+    """
+    Scenario: Detached HEAD checkout synchronizes without branch collisions
+      Given an ephemeral audit worktree directory
+      When "checkout_detached_upstream" executes with branch "main"
+      Then it fetches "origin/main", checks out in detached HEAD mode, and resets hard to "origin/main"
+      And succeeds without "fatal: 'main' is already checked out" errors.
+    """
+    wt_dir = tmp_path / "audit_worktree"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+
+    executed_cmds = []
+
+    async def mock_run_git(args, cwd, timeout=30.0):
+        executed_cmds.append((args, str(cwd), timeout))
+        return (0, "", "")
+
+    with patch("orchestrator.worktree.run_git_command", side_effect=mock_run_git):
+        success = await checkout_detached_upstream(wt_dir, branch="main")
+
+        assert success is True
+        assert len(executed_cmds) == 3
+        assert executed_cmds[0] == (["fetch", "origin", "main"], str(wt_dir.resolve()), 30.0)
+        assert executed_cmds[1] == (["checkout", "--detach", "origin/main"], str(wt_dir.resolve()), 30.0)
+        assert executed_cmds[2] == (["reset", "--hard", "origin/main"], str(wt_dir.resolve()), 30.0)
+
+    # Also test through WorktreeManager classmethod
+    with patch("orchestrator.worktree.run_git_command", side_effect=mock_run_git):
+        executed_cmds.clear()
+        success2 = await WorktreeManager.checkout_detached_upstream(wt_dir, branch="release")
+        assert success2 is True
+        assert executed_cmds[0][0] == ["fetch", "origin", "release"]
+        assert executed_cmds[1][0] == ["checkout", "--detach", "origin/release"]
+        assert executed_cmds[2][0] == ["reset", "--hard", "origin/release"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_checkout_detached_upstream_failures(tmp_path: Path):
+    """Verifies failure handling in checkout_detached_upstream when non-existent cwd or failed git commands."""
+    # 1. Non-existent cwd
+    non_existent = tmp_path / "does_not_exist"
+    assert await checkout_detached_upstream(non_existent) is False
+
+    wt_dir = tmp_path / "audit_worktree_fail"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. Fetch fails
+    with patch("orchestrator.worktree.run_git_command", return_value=(1, "", "fetch error")):
+        assert await checkout_detached_upstream(wt_dir, branch="main") is False
+
+    # 3. Checkout fails
+    with patch("orchestrator.worktree.run_git_command", side_effect=[(0, "", ""), (1, "", "checkout error")]):
+        assert await checkout_detached_upstream(wt_dir, branch="main") is False
+
+    # 4. Reset fails
+    with patch("orchestrator.worktree.run_git_command", side_effect=[(0, "", ""), (0, "", ""), (1, "", "reset error")]):
+        assert await checkout_detached_upstream(wt_dir, branch="main") is False
+
+
+@pytest.mark.asyncio
+async def test_real_git_checkout_detached_upstream(tmp_path: Path):
+    """
+    Integration test with a real local git repository and cloned worktree.
+    Ensures that checkout_detached_upstream works against a real git repo
+    in detached HEAD mode without collisions.
+    """
+    import subprocess
+    import shutil
+
+    if not shutil.which("git"):
+        pytest.skip("git CLI not available")
+
+    # Upstream bare repo
+    upstream_dir = tmp_path / "upstream.git"
+    subprocess.run(["git", "init", "--bare", str(upstream_dir)], check=True, capture_output=True)
+
+    # Seed clone
+    seed_dir = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(upstream_dir), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(seed_dir), check=True, capture_output=True)
+    (seed_dir / "README.md").write_text("# Seed Repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(seed_dir), check=True, capture_output=True)
+
+    # Ephemeral worktree clone
+    ephemeral_dir = tmp_path / "ephemeral"
+    subprocess.run(["git", "clone", str(upstream_dir), str(ephemeral_dir)], check=True, capture_output=True)
+
+    # Add a new commit upstream via seed
+    (seed_dir / "NEW.md").write_text("# New File\n", encoding="utf-8")
+    subprocess.run(["git", "add", "NEW.md"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "second commit"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(seed_dir), check=True, capture_output=True)
+
+    # Execute checkout_detached_upstream on ephemeral repo
+    res = await checkout_detached_upstream(ephemeral_dir, branch="main")
+    assert res is True
+    assert (ephemeral_dir / "NEW.md").exists()
+
+    # Check status is in detached HEAD
+    proc = subprocess.run(["git", "status"], cwd=str(ephemeral_dir), capture_output=True, text=True)
+    assert "HEAD detached" in proc.stdout
+
 
 
