@@ -101,7 +101,7 @@ async def test_supervisor_node_schedule_gating(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_supervisor_status_audit_and_sla(tmp_path: Path, monkeypatch):
+async def test_supervisor_status_audit(tmp_path: Path, monkeypatch):
     import time
     from orchestrator import poller
     from orchestrator.nodes.supervisor import check_repository_anomalies
@@ -112,9 +112,9 @@ async def test_supervisor_status_audit_and_sla(tmp_path: Path, monkeypatch):
     mock_issues = [
         # Issue 1: Unclassified (no managed label)
         {"number": 101, "title": "Unclassified Issue", "labels": [], "createdAt": "2026-01-01T00:00:00Z"},
-        # Issue 2: Stale (> 12h) on active workflow
-        {"number": 102, "title": "Stale Story", "labels": [{"name": "needs-triage"}], "createdAt": stale_iso},
-        # Issue 3: Tech debt (excluded from 12h SLA)
+        # Issue 2: Old open issue (> 12h) on active workflow - should NOT trigger any SLA failure
+        {"number": 102, "title": "Long Open Story", "labels": [{"name": "needs-triage"}], "createdAt": stale_iso},
+        # Issue 3: Tech debt item
         {"number": 103, "title": "Tech Debt Item", "labels": [{"name": "tech-debt"}], "createdAt": stale_iso},
     ]
 
@@ -137,9 +137,9 @@ async def test_supervisor_status_audit_and_sla(tmp_path: Path, monkeypatch):
 
     assert "UNCLASSIFIED_ISSUE" in anomaly_types
     assert 101 in anomaly_issues
-    assert "STALE_ISSUE_SLA" in anomaly_types
-    assert 102 in anomaly_issues
-    # 103 (tech-debt) must NOT trigger STALE_ISSUE_SLA
+    # 12-hour SLA check is removed: old issues must never trigger STALE_ISSUE_SLA
+    assert "STALE_ISSUE_SLA" not in anomaly_types
+    assert 102 not in anomaly_issues
     assert 103 not in anomaly_issues
 
 

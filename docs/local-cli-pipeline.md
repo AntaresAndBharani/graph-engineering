@@ -21,7 +21,7 @@ flowchart TD
     end
 
     subgraph Optional Governance Nodes ["Optional Governance Nodes (Disabled by Default)"]
-        Poller -.->|Anomalies / 12h SLA| N1["Node 0: Supervisor (Watchdog & PO-Proxy)"]
+        Poller -.->|Anomalies| N1["Node 0: Supervisor (Watchdog & PO-Proxy)"]
         Poller -.->|needs-architect-review| N4["Node 3: Reviewer (CI & Auto-Merge)"]
         Poller -.->|tech-debt / enhancement| N5["Node 4: BAU Maintenance (Daily Sweep)"]
     end
