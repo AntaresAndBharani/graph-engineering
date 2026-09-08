@@ -11,6 +11,7 @@ settings:
   poll_interval_seconds: 180          # 3 minutes idle sweep interval
   supervisor_interval_seconds: 3600   # 1 hour consistency supervisor check
   bau_interval_seconds: 86400         # 1 day / 24 hours interval for BAU maintenance
+  tech_debt_interval_seconds: 14400   # 4 hours interval for technical debt audit
   max_concurrent_jobs: 4              # Concurrency threshold to prevent RAM exhaustion
   db_path: "~/.config/orchestrator/state.db"
   log_dir: "~/.config/orchestrator/logs"
@@ -167,3 +168,8 @@ projects:
         enabled: false
       bau:
         enabled: false
+      tech_debt:
+        enabled: true
+        harness: "claude"
+        model: "claude-sonnet-5"
+        effort: "low"
