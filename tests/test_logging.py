@@ -1039,6 +1039,47 @@ def test_scenario_issue_188_force_disk_bypasses_in_memory_buffer(tmp_path: Path)
     assert res_disk.target_file == log_file
 
 
+def test_scenario_issue_189_force_disk_does_not_pollute_project_buffers(tmp_path: Path):
+    """
+    Scenario: force_disk=True fetches directly from disk without polluting or duplicating entries in PROJECT_BUFFERS
+      Given an in-memory buffer with existing logs for "alpha"
+      And new logs exist on disk
+      When get_project_logs is called with force_disk=True
+      Then disk logs are returned
+      And PROJECT_BUFFERS for "alpha" is not mutated or polluted with duplicate entries
+    """
+    from orchestrator.logging import ProjectLogBufferManager, get_project_logs
+
+    ProjectLogBufferManager.reset()
+
+    log_dir = tmp_path / "logs"
+    alpha_log_dir = log_dir / "alpha" / "tester"
+    alpha_log_dir.mkdir(parents=True)
+    log_file = alpha_log_dir / "tester.log"
+    log_file.write_text("[alpha:tester] Line on disk 1\n[alpha:tester] Line on disk 2\n", encoding="utf-8")
+
+    # In-memory buffer has original line
+    ProjectLogBufferManager.add_line("[alpha:tester] In-memory original line", project_name="alpha", node_name="tester")
+    initial_buf_content = list(ProjectLogBufferManager.PROJECT_BUFFERS["alpha"])
+    assert len(initial_buf_content) == 1
+
+    # Call with force_disk=True
+    res_disk = get_project_logs("alpha", log_dir=log_dir, node_name="tester", force_disk=True)
+    assert res_disk.lines == ["[alpha:tester] Line on disk 1", "[alpha:tester] Line on disk 2"]
+
+    # Verify PROJECT_BUFFERS["alpha"] was NOT mutated or polluted
+    after_buf_content = list(ProjectLogBufferManager.PROJECT_BUFFERS["alpha"])
+    assert after_buf_content == initial_buf_content
+
+    # Also test when project_name was not in PROJECT_BUFFERS at all
+    ProjectLogBufferManager.reset()
+    assert "alpha" not in ProjectLogBufferManager.PROJECT_BUFFERS
+    res_disk2 = get_project_logs("alpha", log_dir=log_dir, node_name="tester", force_disk=True)
+    assert res_disk2.lines == ["[alpha:tester] Line on disk 1", "[alpha:tester] Line on disk 2"]
+    assert "alpha" not in ProjectLogBufferManager.PROJECT_BUFFERS
+
+
+
 
 
 

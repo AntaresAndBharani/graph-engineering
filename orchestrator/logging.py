@@ -323,9 +323,10 @@ class ProjectLogBufferManager:
             node_name=node_name,
         )
         if disk_result.lines:
-            if project_name not in cls.PROJECT_BUFFERS:
-                cls.PROJECT_BUFFERS[project_name] = deque(maxlen=500)
-            cls.PROJECT_BUFFERS[project_name].extend((node_name, line) for line in disk_result.lines)
+            if not force_disk:
+                if project_name not in cls.PROJECT_BUFFERS:
+                    cls.PROJECT_BUFFERS[project_name] = deque(maxlen=500)
+                cls.PROJECT_BUFFERS[project_name].extend((node_name, line) for line in disk_result.lines)
             return disk_result
 
         # If a 0-byte file was located on disk, preserve metadata without clearing or polluting memory
