@@ -52,6 +52,7 @@ class NodeConfig(OrchestratorBaseModel):
     branch_prefix: Optional[str] = "feat/issue-"
     auto_merge_approved: bool = True
     review_trigger: Optional[str] = "needs-architect-review"
+    research_enabled: bool = True
     research_harness: Optional[str] = None
     research_model: Optional[str] = None
     research_effort: Optional[str] = None

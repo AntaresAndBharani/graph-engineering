@@ -149,6 +149,7 @@ projects:
         processed_label: "architect-processed" # Transition label applied to parent story upon decomposition
         queued_label: "queued"        # Initial state label assigned to all generated subtasks
         label_output: "ready-for-dev"
+        research_enabled: true         # Enable/disable living architecture research sync
         research_harness: "antigravity"
         research_model: "gemini-3.8-flash-high"
         research_interval_seconds: 604800  # 7 days (weekly evolutionary architecture refresh)

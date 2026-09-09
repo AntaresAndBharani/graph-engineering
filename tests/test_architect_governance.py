@@ -18,12 +18,37 @@ def test_architect_config_defaults():
         research_interval_seconds=604800,
         review_trigger="needs-architect-review",
     )
+    assert cfg.research_enabled is True
     assert cfg.research_harness == "antigravity"
     assert cfg.research_model == "gemini-3.7-flash-high"
     assert cfg.research_interval_seconds == 604800
     assert cfg.review_trigger == "needs-architect-review"
     assert cfg.conflict_harness == "antigravity"
     assert cfg.conflict_model is None
+
+
+@pytest.mark.asyncio
+async def test_architect_research_disabled_skips_sync(tmp_path: Path):
+    db_file = tmp_path / "state.db"
+    state_manager = StateManager(db_file)
+    await state_manager.init_db()
+
+    config = GlobalConfig()
+    project = ProjectConfig(
+        name="test-repo",
+        repo="org/repo",
+        local_path=str(tmp_path),
+        nodes={
+            "architect": NodeConfig(
+                enabled=True,
+                research_enabled=False,
+            )
+        },
+    )
+
+    ran, msg = await run_architect_node(project, config, state_manager, force_research=True)
+    assert ran is False
+    assert "disabled" in msg or "Idle (0 tokens)" in msg
 
 
 @pytest.mark.asyncio

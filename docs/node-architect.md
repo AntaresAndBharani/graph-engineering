@@ -95,6 +95,7 @@ projects:
         # Lookahead Gating & Backoff (seconds)
         lookahead_backoff_seconds: 1200
         # Specialized Research Harness for Weekly Architecture Modernization
+        research_enabled: true  # Set to false to disable living architecture research
         research_harness: "antigravity"
         research_model: "gemini-3.7-flash-high"
         research_interval_seconds: 604800  # 7 days (weekly)

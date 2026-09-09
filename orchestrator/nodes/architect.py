@@ -170,6 +170,9 @@ async def _sync_architecture_plane(
     Uses configured research harness and model from config.yaml for cost-effective web research.
     Gated by research_interval_seconds (default 7 days / weekly).
     """
+    if not node_cfg.research_enabled:
+        return False, "Living architecture research disabled for project."
+
     graph_dir = project.local_path / ".graph"
     graph_dir.mkdir(parents=True, exist_ok=True)
     arch_file = graph_dir / "architecture.md"
