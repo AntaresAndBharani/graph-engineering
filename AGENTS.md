@@ -37,10 +37,13 @@ When the user prefixes their instruction with `/cross-review`, `/claude-review`,
 ## Antigravity Architect Review Protocol (`/agy-architect-review`, `/agy-review`, `/gemini-architect-review`)
 When the user prefixes their instruction with `/agy-architect-review`, `/agy-review`, or asks for an architectural cross-review via Antigravity (`agy`):
 1. **Single Communication Medium:** All exchanges happen strictly via `docs/draft-requisites/implementation-plan.md`. Never use temporary buffers.
-2. **Headless Antigravity (Gemini 3.8 Flash High) Execution:** Invoke `agy` CLI (`--model gemini-3.8-flash-high --dangerously-skip-permissions -p`) or run `.agents/skills/agy-architect-review/scripts/agy_cross_review.py`. Across rounds 2 and 3, use `-c` for session continuity and prompt caching. Effort is embedded in model name and never passed separately.
-3. **Hard 3-Round Cap:** Debate for a maximum of 3 iterations (`## 🔍 Review Iteration N` and `## 🏛️ Gemini Architect Review Iteration N`).
-4. **Early Exit on Consensus:** If Gemini Architect issues `VERDICT: AGREED`, mark the plan as approved.
-5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and present the Dispute Matrix to the operator.
+2. **Tri-Party Review Council:**
+   - **Author Agent:** Formulates the implementation proposal and synthesizes revisions in response to council critiques.
+   - **Gemini Architect (`gemini-3.8-flash-high`):** Headless execution via `agy` CLI (`--model gemini-3.8-flash-high --dangerously-skip-permissions -p`, using `-c` for Rounds 2 & 3). Scrutinizes technical architecture, concurrency, pipe safety, DB schema integrity, and performance.
+   - **Claude QA Guardian (`sonnet`, `effort: low`):** Headless execution via `claude` CLI (`--model sonnet --effort low --dangerously-skip-permissions -p`). Acts as the **Requirements & UX/UI Guardian**—enforces 100% fidelity to the operator's original prompt and constraints (anti-drift), audits UX/UI ergonomics (or functional correctness if backend only), and verifies Gherkin BDD testability.
+3. **Hard 3-Round Cap:** Council debates for a maximum of 3 iterations (`## 🔍 Review Iteration N`, `## 🏛️ Gemini Architect Review Iteration N`, and `## 🧪 Claude QA Review Iteration N`).
+4. **Dual Consensus Gate:** Approval requires **both** Gemini Architect AND Claude QA to issue `VERDICT: AGREED`. If either party objects, the plan is not approved and the author must address their feedback.
+5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and present a consolidated Dispute Matrix to the operator.
 
 
 
