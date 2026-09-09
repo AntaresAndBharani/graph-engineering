@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+import time
 import pytest
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent
@@ -3938,6 +3939,8 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         with open(arch_log_file, "a", encoding="utf-8") as f:
             f.write("Architect: Plan finalized\n")
 
+        # Simulate stream quiet window (> 2.0s) so disk polling tick proceeds
+        app._stream_activity.clear()
         await app._poll_active_log_file()
         await pilot.pause()
 
@@ -3979,6 +3982,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         assert not devtest_log_file.exists()
 
         # Incremental poll encounters FileNotFoundError -> resets state cleanly
+        app._stream_activity.clear()
         await app._poll_active_log_file()
         await pilot.pause()
 
@@ -4492,6 +4496,184 @@ async def test_scenario_issue_189_binary_tailer_incremental_streaming(tmp_path: 
         assert any("Line 1: Status ⚡ OK" in line for line in rendered)
         assert any("Line 2: Multi-byte 🎉 test" in line for line in rendered)
         assert any("Line 3: Trailing" in line and "\ufffd invalid byte" in line for line in rendered)
+
+
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #190: Stream-Disk Coordination Latch & Completion Marker
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scenario_stream_activity_suppresses_redundant_disk_polling(tmp_path: Path):
+    """
+    Scenario: Stream activity suppresses redundant disk polling
+      Given the TUI dashboard is active and viewing a running node
+      When a live stream chunk is received by AsyncHarnessAdapter
+      Then _stream_activity timestamp is updated for the node
+      And _poll_active_log_file skips disk reading if elapsed time < 2.0s
+      When elapsed time exceeds 2.0s without stream activity
+      Then _poll_active_log_file proceeds with disk polling
+    """
+    logs_root = tmp_path / "logs"
+    proj_dir = logs_root / "my-project"
+    arch_dir = proj_dir / "architect"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    log_file = arch_dir / "20260909_120000_architect.log"
+    log_file.write_text("Line 1 from initial run\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="my-project",
+                repo="AntaresAndBharani/my-project",
+                local_path=str(tmp_path),
+                nodes={"architect": NodeConfig(model="claude-sonnet-5")},
+            ),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="my-project",
+    )
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Node starts running
+        await state_manager.acquire_lock(issue_id=190, repo="AntaresAndBharani/my-project", node_type="architect")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node == "architect"
+
+        # Stream chunk arrives
+        now = time.time()
+        app._handle_harness_stream_line("my-project", "architect", "Streamed line: step 1")
+        await pilot.pause()
+
+        assert ("my-project", "architect") in app._stream_activity
+        assert app._stream_activity[("my-project", "architect")] >= now
+
+        # Append new line to disk
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("Disk line: step 2\n")
+
+        # Offset before poll
+        offset_before = app._last_tail_offset
+
+        # Polling tick immediately (< 2.0s) must be suppressed
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert app._last_tail_offset == offset_before
+        assert not any("Disk line: step 2" in line.text for line in log_view.lines)
+
+        # Simulate > 2.0s elapsed without stream activity
+        app._stream_activity[("my-project", "architect")] = time.time() - 3.0
+        await app._poll_active_log_file()
+        await pilot.pause()
+
+        assert any("Disk line: step 2" in line.text for line in log_view.lines)
+
+
+@pytest.mark.asyncio
+async def test_scenario_edge_triggered_completion_marker_without_spam(tmp_path: Path):
+    """
+    Scenario: Edge-triggered completion marker without spam
+      Given a project finishes executing its node and transitions from RUNNING to IDLE
+      When the project table refreshes
+      Then previous execution logs remain visible in the RichLog pane
+      And boundary marker [dim]── Execution completed ──[/dim] is appended exactly once
+      When subsequent 2.0s refresh ticks occur while still IDLE
+      Then no duplicate boundary markers are appended
+      When execution resumes or the user selects another lane
+      Then the completion marker latch resets
+    """
+    logs_root = tmp_path / "logs"
+    proj_dir = logs_root / "my-project"
+    dev_dir = proj_dir / "devtest"
+    dev_dir.mkdir(parents=True, exist_ok=True)
+    log_file = dev_dir / "20260909_140000_devtest.log"
+    log_file.write_text("DevTest: running unit tests\nDevTest: 42 passed\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="my-project",
+                repo="AntaresAndBharani/my-project",
+                local_path=str(tmp_path),
+                nodes={"devtest": NodeConfig(model="gemini-3.8-flash-high")},
+            ),
+            ProjectConfig(
+                name="other-project",
+                repo="AntaresAndBharani/other-project",
+                local_path=str(tmp_path),
+                nodes={"devtest": NodeConfig(model="gemini-3.8-flash-high")},
+            ),
+        ],
+        settings=SettingsConfig(log_dir=str(logs_root)),
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(
+        config=config,
+        state_manager=state_manager,
+        selected_project="my-project",
+    )
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Step 1: Acquire lock -> Running
+        await state_manager.acquire_lock(issue_id=190, repo="AntaresAndBharani/my-project", node_type="devtest")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node == "devtest"
+        assert app._completion_marker_rendered is False
+        assert any("DevTest: 42 passed" in line.text for line in log_view.lines)
+
+        # Step 2: Release lock -> Idle transition
+        await state_manager.release_lock(issue_id=190, repo="AntaresAndBharani/my-project", node_type="devtest")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node is None
+        assert app._completion_marker_rendered is True
+
+        # Previous execution logs remain visible
+        assert any("DevTest: running unit tests" in line.text for line in log_view.lines)
+        assert any("DevTest: 42 passed" in line.text for line in log_view.lines)
+
+        # Marker appended exactly once
+        marker_lines = [line for line in log_view.lines if "Execution completed" in line.text]
+        assert len(marker_lines) == 1
+
+        # Step 3: Subsequent refresh ticks while still IDLE do not duplicate marker
+        await app.update_projects_table()
+        await pilot.pause()
+        await app.update_projects_table()
+        await pilot.pause()
+
+        marker_lines = [line for line in log_view.lines if "Execution completed" in line.text]
+        assert len(marker_lines) == 1
+
+        # Step 4: Resume RUNNING -> resets marker latch
+        await state_manager.acquire_lock(issue_id=191, repo="AntaresAndBharani/my-project", node_type="devtest")
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.selected_node == "devtest"
+        assert app._completion_marker_rendered is False
+
 
 
 
