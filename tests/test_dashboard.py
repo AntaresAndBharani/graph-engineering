@@ -4673,16 +4673,3 @@ async def test_scenario_edge_triggered_completion_marker_without_spam(tmp_path: 
 
         assert app.selected_node == "devtest"
         assert app._completion_marker_rendered is False
-
-
-
-
-
-
-
-
-
-
-
-
-
