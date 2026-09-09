@@ -223,10 +223,11 @@ class DashboardApp(App):
         project_name: Optional[str],
         node_name: Optional[str] = None,
         issue_id: Optional[int] = None,
+        force_disk: bool = False,
     ) -> None:
         """
         Clears the RichLog pane and populates it with scoped logs from ProjectLogBufferManager.
-        Falls back to disk tailing if in-memory buffer is empty.
+        Falls back to disk tailing if in-memory buffer is empty, or if force_disk is True.
         """
         try:
             log_view = self.query_one("#log_view", RichLog)
@@ -270,6 +271,7 @@ class DashboardApp(App):
             log_dir=log_dir,
             max_lines=100,
             node_name=node_name,
+            force_disk=force_disk,
         )
         lines = query_result.lines if hasattr(query_result, "lines") else query_result
 
@@ -856,6 +858,19 @@ class DashboardApp(App):
                 pass
 
         if project_name:
+            # Deterministic multi-node compound lane selection: if node_name is None, check active running jobs
+            if not node_name and self.state_manager:
+                try:
+                    p = next((proj for proj in self.config.projects if proj.name == project_name), None)
+                    if p:
+                        active_jobs = await self.state_manager.get_active_jobs()
+                        p_active = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "RUNNING"]
+                        p_active.sort(key=lambda j: str(j.get("node_type", "")))
+                        if p_active:
+                            node_name = p_active[0].get("node_type")
+                except Exception:
+                    pass
+
             if project_name != self.selected_project or node_name != getattr(self, "selected_node", None):
                 self.selected_project = project_name
                 self.selected_node = node_name
@@ -879,6 +894,86 @@ class DashboardApp(App):
                 self.selected_issue_id = issue_id
                 await self.hydrate_project_logs(project_name, node_name=node_name, issue_id=issue_id)
                 await self._update_bottom_panes(project_name, force=True)
+
+    @on(DataTable.RowSelected, "#projects_table")
+    async def on_project_row_selected(self, event: DataTable.RowSelected) -> None:
+        """
+        Handles row selection (explicit click / Enter) on projects table.
+        Forces fresh disk re-read and hydration (force_disk=True) without being swallowed as a no-op.
+        """
+        table = self.query_one("#projects_table", DataTable)
+        project_name = None
+        node_name = None
+
+        row_key_str = None
+        if event.row_key is not None:
+            row_key_str = event.row_key.value if hasattr(event.row_key, "value") else str(event.row_key)
+
+        if row_key_str and "::" in row_key_str:
+            parts = row_key_str.split("::", 1)
+            project_name = parts[0]
+            node_name = parts[1] if parts[1] != "Idle" else None
+        elif row_key_str:
+            project_name = row_key_str
+
+        if not project_name:
+            try:
+                if event.row_key is not None:
+                    row_data = table.get_row(event.row_key)
+                    if row_data:
+                        raw_name = str(row_data[0]).strip()
+                        if not raw_name.startswith("└─"):
+                            project_name = raw_name
+            except (RowDoesNotExist, KeyError):
+                pass
+
+        if not project_name:
+            try:
+                if event.cursor_row is not None and 0 <= event.cursor_row < table.row_count:
+                    row_data = table.get_row_at(event.cursor_row)
+                    if row_data:
+                        raw_name = str(row_data[0]).strip()
+                        if not raw_name.startswith("└─"):
+                            project_name = raw_name
+            except (RowDoesNotExist, KeyError, IndexError):
+                pass
+
+        if project_name:
+            # Deterministic multi-node compound lane selection: if node_name is None, check active running jobs
+            if not node_name and self.state_manager:
+                try:
+                    p = next((proj for proj in self.config.projects if proj.name == project_name), None)
+                    if p:
+                        active_jobs = await self.state_manager.get_active_jobs()
+                        p_active = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "RUNNING"]
+                        p_active.sort(key=lambda j: str(j.get("node_type", "")))
+                        if p_active:
+                            node_name = p_active[0].get("node_type")
+                except Exception:
+                    pass
+
+            self.selected_project = project_name
+            self.selected_node = node_name
+            self._active_node_identity = (project_name, node_name)
+            issue_id = None
+            if self.state_manager and node_name:
+                try:
+                    active_jobs = await self.state_manager.get_active_jobs()
+                    p = next((proj for proj in self.config.projects if proj.name == project_name), None)
+                    if p:
+                        matching = [
+                            j for j in active_jobs
+                            if j.get("repo") == p.repo
+                            and j.get("node_type") == node_name
+                            and j.get("status") == "RUNNING"
+                        ]
+                        if matching:
+                            issue_id = matching[0].get("issue_id")
+                except Exception:
+                    pass
+            self.selected_issue_id = issue_id
+            await self.hydrate_project_logs(project_name, node_name=node_name, issue_id=issue_id, force_disk=True)
+            await self._update_bottom_panes(project_name, force=True)
 
     @on(DataTable.RowSelected, "#sdlc_widget")
     def on_sdlc_row_selected(self, event: DataTable.RowSelected) -> None:

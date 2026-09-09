@@ -1009,6 +1009,37 @@ def test_scenario_issue_155_zero_byte_active_file_metadata_preservation(tmp_path
     assert devtest_res.lines == ["DevTest active execution line"]
 
 
+def test_scenario_issue_188_force_disk_bypasses_in_memory_buffer(tmp_path: Path):
+    """
+    Scenario: force_disk parameter forces disk re-read bypassing in-memory buffer
+      Given an in-memory buffer with stale logs for project "alpha::tester"
+      And the disk log file contains newly written lines
+      When get_project_logs is invoked with force_disk=False, stale in-memory logs are returned
+      When get_project_logs is invoked with force_disk=True, fresh disk logs are read and returned
+    """
+    from orchestrator.logging import ProjectLogBufferManager, get_project_logs
+    ProjectLogBufferManager.reset()
+
+    log_dir = tmp_path / "logs"
+    alpha_log_dir = log_dir / "alpha" / "tester"
+    alpha_log_dir.mkdir(parents=True)
+    log_file = alpha_log_dir / "tester.log"
+    log_file.write_text("[alpha:tester] Disk log line 1\n[alpha:tester] Disk log line 2\n", encoding="utf-8")
+
+    # In-memory buffer has old lines
+    ProjectLogBufferManager.add_line("[alpha:tester] In-memory stale line", project_name="alpha", node_name="tester")
+
+    # force_disk=False -> returns in-memory lines
+    res_mem = get_project_logs("alpha", log_dir=log_dir, node_name="tester", force_disk=False)
+    assert res_mem.lines == ["[alpha:tester] In-memory stale line"]
+
+    # force_disk=True -> bypasses in-memory buffer and tails disk
+    res_disk = get_project_logs("alpha", log_dir=log_dir, node_name="tester", force_disk=True)
+    assert res_disk.lines == ["[alpha:tester] Disk log line 1", "[alpha:tester] Disk log line 2"]
+    assert res_disk.target_file == log_file
+
+
+
 
 
 
