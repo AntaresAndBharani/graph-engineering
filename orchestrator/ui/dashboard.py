@@ -209,11 +209,15 @@ class DashboardApp(App):
                 node_name=self.selected_node,
                 issue_id=self.selected_issue_id,
             )
-        elif self.log_handler:
+        else:
             log_view = self.query_one(RichLog)
-            for rec in self.log_handler.records:
-                formatted = self.log_handler.format(rec)
-                log_view.write(rich.markup.escape(formatted))
+            if self.log_handler and self.log_handler.records:
+                for rec in self.log_handler.records:
+                    formatted = self.log_handler.format(rec)
+                    log_view.write(rich.markup.escape(formatted))
+            else:
+                log_view.write("[dim]Select a project lane to inspect real-time execution logs.[/dim]")
+                self._placeholder_active = True
 
         # Set non-blocking 2.0s refresh interval
         self.set_interval(2.0, self.update_projects_table)
@@ -329,6 +333,11 @@ class DashboardApp(App):
                     log_view.clear()
                     log_view.write(rich.markup.escape(placeholder))
                     self._placeholder_active = True
+            elif not project_name:
+                placeholder = "[dim]Select a project lane to inspect real-time execution logs.[/dim]"
+                log_view.clear()
+                log_view.write(placeholder)
+                self._placeholder_active = True
             else:
                 log_view.clear()
                 self._placeholder_active = False
@@ -792,10 +801,14 @@ class DashboardApp(App):
         # Incremental read strictly from byte offset N
         offset = self._last_tail_offset
         try:
-            with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+            with open(target_file, "rb") as f:
                 f.seek(offset)
-                new_content = f.read()
+                raw_bytes = f.read()
                 self._last_tail_offset = f.tell()
+            new_content = raw_bytes.decode("utf-8", errors="replace")
+        except PermissionError:
+            log_view.write("[yellow]⚠️ Log file locked by harness or inaccessible. Retrying...[/yellow]")
+            return
         except FileNotFoundError:
             self._last_tail_file = None
             self._last_tail_offset = 0

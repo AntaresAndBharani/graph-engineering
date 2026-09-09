@@ -4348,6 +4348,153 @@ async def test_scenario_issue_188_deterministic_multi_node_compound_lane_selecti
         assert not any("Architect planning pipeline" in r for r in rendered_dev)
 
 
+@pytest.mark.asyncio
+async def test_scenario_issue_189_first_paint_empty_state_and_lock_fail_closed(tmp_path: Path):
+    """
+    Scenario: First-Paint and File Lock Fail-Closed Resilience
+      Given the dashboard starts up and no project has been selected yet
+      Then the RichLog pane displays "[dim]Select a project lane to inspect real-time execution logs.[/dim]"
+      When a selected project's log file is temporarily locked with PermissionError by an external harness
+      Then the dashboard catches the exception fail-closed
+      And renders "[yellow]⚠️ Log file locked by harness or inaccessible. Retrying...[/yellow]" without crashing the application.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    ProjectLogBufferManager.reset()
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path / "alpha")),
+        ],
+        settings=SettingsConfig(log_dir=str(log_dir)),
+    )
+
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = []
+    mock_sm.get_project_state_fingerprint.return_value = "fp_empty"
+
+    # Test with empty projects initially to verify pristine first-paint state
+    empty_config = GlobalConfig(
+        projects=[],
+        settings=SettingsConfig(log_dir=str(log_dir)),
+    )
+    app_empty = DashboardApp(config=empty_config, state_manager=mock_sm)
+    async with app_empty.run_test() as pilot:
+        log_view = app_empty.query_one("#log_view", RichLog)
+        await pilot.pause()
+        assert app_empty.selected_project is None
+        rendered_initial = [line.text for line in log_view.lines]
+        assert any("Select a project lane to inspect real-time execution logs." in line for line in rendered_initial)
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # When project is deselected / unselected or during empty state
+        await app.hydrate_project_logs(None)
+        rendered_unselected = [line.text for line in log_view.lines]
+        assert any("Select a project lane to inspect real-time execution logs." in line for line in rendered_unselected)
+
+        # When a selected project's log file is temporarily locked with PermissionError by an external harness
+        app.selected_project = "alpha"
+        app.selected_node = "tester"
+        dummy_log_file = log_dir / "alpha" / "tester" / "tester.log"
+        dummy_log_file.parent.mkdir(parents=True, exist_ok=True)
+        dummy_log_file.write_bytes(b"initial bytes\n")
+        app._last_tail_file = dummy_log_file
+        app._last_tail_offset = 0
+
+        with patch("builtins.open", side_effect=PermissionError("File locked by external harness")):
+            await app._poll_active_log_file()
+
+        # Then the dashboard catches the exception fail-closed
+        # And renders "[yellow]⚠️ Log file locked by harness or inaccessible. Retrying...[/yellow]" without crashing
+        rendered_after_lock = [line.text for line in log_view.lines]
+        assert any("Log file locked by harness or inaccessible. Retrying..." in line for line in rendered_after_lock)
+        # Offset is preserved
+        assert app._last_tail_offset == 0
+        assert app._last_tail_file == dummy_log_file
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_189_binary_tailer_incremental_streaming(tmp_path: Path):
+    """
+    Scenario: Real-Time Non-Blocking Incremental Streaming (Binary Tailer)
+      Given the dashboard is displaying live logs for "alpha::tester" at byte offset 1024
+      When the active test harness writes 256 bytes containing CRLF, multi-byte UTF-8, or invalid byte sequences
+      Then the next 2.0s timer tick reads from offset 1024 using binary mode "rb"
+      And decodes safely with errors="replace" without splitting UTF-8 runes or raising UnicodeDecodeError
+      And appends the new lines to the RichLog pane without blocking the Textual event loop.
+    """
+    from unittest.mock import AsyncMock
+
+    ProjectLogBufferManager.reset()
+
+    log_dir = tmp_path / "logs"
+    alpha_dir = log_dir / "alpha" / "tester"
+    alpha_dir.mkdir(parents=True)
+    target_file = alpha_dir / "tester.log"
+
+    # Write initial 1024 bytes
+    initial_bytes = b"X" * 1024
+    target_file.write_bytes(initial_bytes)
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path / "alpha")),
+        ],
+        settings=SettingsConfig(log_dir=str(log_dir)),
+    )
+
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/alpha", "node_type": "tester", "status": "RUNNING", "issue_id": 42},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_alpha"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        await pilot.pause()
+
+        # Given the dashboard is displaying live logs for "alpha::tester" at byte offset 1024
+        app.selected_project = "alpha"
+        app.selected_node = "tester"
+        app._last_tail_file = target_file
+        app._last_tail_offset = 1024
+
+        # When the active test harness writes 256 bytes containing CRLF, multi-byte UTF-8, or invalid byte sequences
+        # e.g., UTF-8 runes like '⚡' (3 bytes), '🎉' (4 bytes), CRLF '\r\n', invalid byte b'\xff'
+        chunk = "Line 1: Status ⚡ OK\r\nLine 2: Multi-byte 🎉 test\r\nLine 3: Trailing ".encode("utf-8") + b"\xff invalid byte\r\n"
+        # Pad to exactly 256 bytes
+        chunk += b"P" * (256 - len(chunk))
+        with open(target_file, "ab") as f:
+            f.write(chunk)
+
+        assert target_file.stat().st_size == 1024 + 256
+
+        # Then the next tick reads from offset 1024 using binary mode "rb" and decodes safely
+        await app._poll_active_log_file()
+
+        # Check that offset advanced to 1280
+        assert app._last_tail_offset == 1280
+
+        # And appends the new lines to the RichLog pane
+        rendered = [line.text for line in log_view.lines]
+        assert any("Line 1: Status ⚡ OK" in line for line in rendered)
+        assert any("Line 2: Multi-byte 🎉 test" in line for line in rendered)
+        assert any("Line 3: Trailing" in line and "\ufffd invalid byte" in line for line in rendered)
+
+
+
 
 
 
