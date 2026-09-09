@@ -4602,7 +4602,6 @@ async def test_scenario_edge_triggered_completion_marker_without_spam(tmp_path: 
     dev_dir.mkdir(parents=True, exist_ok=True)
     log_file = dev_dir / "20260909_140000_devtest.log"
     log_file.write_text("DevTest: running unit tests\nDevTest: 42 passed\n", encoding="utf-8")
-
     config = GlobalConfig(
         projects=[
             ProjectConfig(
