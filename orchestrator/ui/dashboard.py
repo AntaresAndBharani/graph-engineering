@@ -383,10 +383,11 @@ class DashboardApp(App):
                     log_view.clear()
 
             escaped = rich.markup.escape(formatted)
+            scroll_end = bool(self.auto_scroll and log_view.is_vertical_scroll_end)
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
-                self.call_from_thread(log_view.write, escaped)
+                self.call_from_thread(log_view.write, escaped, scroll_end=scroll_end)
             else:
-                log_view.write(escaped)
+                log_view.write(escaped, scroll_end=scroll_end)
         except Exception:
             pass
 
@@ -430,10 +431,11 @@ class DashboardApp(App):
                     log_view.clear()
 
             escaped = rich.markup.escape(line)
+            scroll_end = bool(self.auto_scroll and log_view.is_vertical_scroll_end)
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
-                self.call_from_thread(log_view.write, escaped)
+                self.call_from_thread(log_view.write, escaped, scroll_end=scroll_end)
             else:
-                log_view.write(escaped)
+                log_view.write(escaped, scroll_end=scroll_end)
 
             if self._last_tail_file and self._last_tail_file.exists():
                 try:
@@ -871,7 +873,10 @@ class DashboardApp(App):
 
             for line in new_content.splitlines():
                 clean_line = strip_ansi(line).rstrip("\r\n")
-                log_view.write(rich.markup.escape(clean_line))
+                log_view.write(
+                    rich.markup.escape(clean_line),
+                    scroll_end=bool(self.auto_scroll and log_view.is_vertical_scroll_end),
+                )
 
     @on(DataTable.RowHighlighted, "#projects_table")
     async def on_project_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
