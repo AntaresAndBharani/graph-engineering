@@ -3030,9 +3030,9 @@ async def test_scenario_direct_main_loop_writing_without_call_from_thread(tmp_pa
 
         # Must NOT call call_from_thread on the main thread
         call_from_thread_spy.assert_not_called()
-        # Must write directly to log_view.write with rich.markup.escape
+        # Must write directly to log_view.write with rich.markup.escape and scroll_end
         expected_escaped_stream = rich.markup.escape(raw_stream_line)
-        log_write_spy.assert_called_with(expected_escaped_stream)
+        log_write_spy.assert_called_with(expected_escaped_stream, scroll_end=True)
 
         # 2. Test log handler record emission on the main loop
         rec = logging.LogRecord(
@@ -3056,9 +3056,9 @@ async def test_scenario_direct_main_loop_writing_without_call_from_thread(tmp_pa
 
         # Must NOT call call_from_thread on the main thread
         call_from_thread_spy.assert_not_called()
-        # Must write directly to log_view.write with rich.markup.escape
+        # Must write directly to log_view.write with rich.markup.escape and scroll_end
         expected_escaped_log = rich.markup.escape(formatted_log)
-        log_write_spy.assert_called_with(expected_escaped_log)
+        log_write_spy.assert_called_with(expected_escaped_log, scroll_end=True)
 
         # 3. Test background worker thread execution invokes call_from_thread
         log_write_spy.reset_mock()
@@ -3088,6 +3088,7 @@ async def test_scenario_direct_main_loop_writing_without_call_from_thread(tmp_pa
         assert call_from_thread_spy.call_count >= 1
         assert call_from_thread_spy.call_args[0][0] == log_view.write
         assert call_from_thread_spy.call_args[0][1] == rich.markup.escape(thread_line)
+        assert call_from_thread_spy.call_args[1]["scroll_end"] is True
 
 
 @pytest.mark.asyncio
@@ -4673,3 +4674,166 @@ async def test_scenario_edge_triggered_completion_marker_without_spam(tmp_path: 
 
         assert app.selected_node == "devtest"
         assert app._completion_marker_rendered is False
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_191_native_viewport_pinning_and_space_bar_auto_scroll_toggle(tmp_path: Path):
+    """
+    Feature: Native Viewport Pinning and Auto-Scroll Toggle (#191)
+
+    Scenario: Auto-Scroll Respects Space-Bar Toggle and Viewport Pinning
+      Given live logs are streaming into the log pane
+      When the operator presses "space" to toggle auto-scroll OFF (self.auto_scroll = False)
+      And new log lines arrive from the active node
+      Then lines are appended to the widget buffer without scrolling to the bottom;
+      When the operator presses "space" to re-enable auto-scroll and scrolls up into history
+      Then arriving lines do NOT yank the viewport to the bottom until the operator scrolls back to the bottom.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="test-project",
+                repo="AntaresAndBharani/test-project",
+                local_path=str(tmp_path),
+            )
+        ]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager, selected_project="test-project")
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        log_view.styles.height = 10
+        await pilot.pause()
+
+        # Given live logs are streaming into the log pane
+        for i in range(50):
+            app._handle_harness_stream_line("test-project", "devtest", f"live stream line {i}")
+            await pilot.pause()
+
+        assert log_view.is_vertical_scroll_end is True
+        initial_scroll_offset = log_view.scroll_offset.y
+        assert initial_scroll_offset > 0
+
+        # When the operator presses "space" to toggle auto-scroll OFF (self.auto_scroll = False)
+        await pilot.press("space")
+        await pilot.pause()
+        assert app.auto_scroll is False
+        assert log_view.auto_scroll is False
+        assert "[Auto-Scroll: OFF]" in app.sub_title
+
+        # And new log lines arrive from the active node
+        offset_before_new_lines = log_view.scroll_offset.y
+        app._handle_harness_stream_line("test-project", "devtest", "new log line while auto-scroll off")
+        await pilot.pause()
+
+        # Then lines are appended to the widget buffer without scrolling to the bottom;
+        assert any("new log line while auto-scroll off" in line.text for line in log_view.lines)
+        assert log_view.scroll_offset.y == offset_before_new_lines
+
+        # When the operator presses "space" to re-enable auto-scroll and scrolls up into history
+        await pilot.press("space")
+        await pilot.pause()
+        assert app.auto_scroll is True
+        assert log_view.auto_scroll is True
+        assert "[Auto-Scroll: ON]" in app.sub_title
+
+        log_view.scroll_to(y=0, animate=False)
+        await pilot.pause()
+        assert log_view.scroll_offset.y == 0
+        assert log_view.is_vertical_scroll_end is False
+
+        # Then arriving lines do NOT yank the viewport to the bottom until the operator scrolls back to the bottom.
+        app._handle_harness_stream_line("test-project", "devtest", "arriving line while scrolled up in history")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert any("arriving line while scrolled up in history" in line.text for line in log_view.lines)
+        assert log_view.scroll_offset.y == 0
+        assert log_view.is_vertical_scroll_end is False
+
+        # Operator scrolls back to the bottom
+        log_view.scroll_to(y=log_view.max_scroll_y, animate=False)
+        await pilot.pause()
+        assert log_view.is_vertical_scroll_end is True
+
+        # Now arriving lines follow the bottom stream
+        app._handle_harness_stream_line("test-project", "devtest", "arriving line at bottom follows stream")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert any("arriving line at bottom follows stream" in line.text for line in log_view.lines)
+        assert log_view.is_vertical_scroll_end is True
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_191_log_record_and_poll_active_file_scroll_pinning(tmp_path: Path):
+    """
+    Asserts that _handle_log_record and _poll_active_log_file also respect
+    native is_vertical_scroll_end viewport pinning when auto_scroll is active.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="test-project",
+                repo="AntaresAndBharani/test-project",
+                local_path=str(tmp_path),
+            )
+        ]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager, selected_project="test-project")
+
+    async with app.run_test() as pilot:
+        log_view = app.query_one("#log_view", RichLog)
+        log_view.styles.height = 10
+        await pilot.pause()
+
+        # Populate with initial log records
+        for i in range(40):
+            rec = logging.LogRecord(
+                name="orchestrator",
+                level=logging.INFO,
+                pathname=__file__,
+                lineno=10,
+                msg=f"[test-project:devtest] Log record line {i}",
+                args=(),
+                exc_info=None,
+            )
+            app._handle_log_record(rec, f"[test-project:devtest] Log record line {i}")
+            await pilot.pause()
+
+        assert log_view.is_vertical_scroll_end is True
+
+        # Scroll up to top
+        log_view.scroll_to(y=0, animate=False)
+        await pilot.pause()
+        assert log_view.scroll_offset.y == 0
+        assert log_view.is_vertical_scroll_end is False
+
+        # Emit log record while scrolled up -> does NOT yank
+        rec_pinned = logging.LogRecord(
+            name="orchestrator",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=10,
+            msg="[test-project:devtest] New pinned record",
+            args=(),
+            exc_info=None,
+        )
+        app._handle_log_record(rec_pinned, "[test-project:devtest] New pinned record")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert log_view.scroll_offset.y == 0
+        assert log_view.is_vertical_scroll_end is False
+        assert any("New pinned record" in line.text for line in log_view.lines)
+
