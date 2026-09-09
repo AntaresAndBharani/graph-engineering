@@ -5,6 +5,7 @@ import datetime
 import logging
 from pathlib import Path
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import rich.markup
@@ -147,6 +148,8 @@ class DashboardApp(App):
         self._last_tail_file: Optional[Path] = None
         self._last_tail_offset: int = 0
         self._placeholder_active: bool = False
+        self._stream_activity: dict[tuple[str, Optional[str]], float] = {}
+        self._completion_marker_rendered: bool = False
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
         self.auto_scroll: bool = True
@@ -228,11 +231,13 @@ class DashboardApp(App):
         node_name: Optional[str] = None,
         issue_id: Optional[int] = None,
         force_disk: bool = False,
+        preserve_on_idle: bool = False,
     ) -> None:
         """
         Clears the RichLog pane and populates it with scoped logs from ProjectLogBufferManager.
         Falls back to disk tailing if in-memory buffer is empty, or if force_disk is True.
         """
+        should_preserve = preserve_on_idle or getattr(self, "_transitioning_running_to_idle", False)
         try:
             log_view = self.query_one("#log_view", RichLog)
         except Exception:
@@ -339,8 +344,14 @@ class DashboardApp(App):
                 log_view.write(placeholder)
                 self._placeholder_active = True
             else:
-                log_view.clear()
-                self._placeholder_active = False
+                if should_preserve:
+                    self._placeholder_active = False
+                    if not self._completion_marker_rendered:
+                        log_view.write("[dim]── Execution completed ──[/dim]")
+                        self._completion_marker_rendered = True
+                else:
+                    log_view.clear()
+                    self._placeholder_active = False
         else:
             self._placeholder_active = False
             log_view.clear()
@@ -349,6 +360,9 @@ class DashboardApp(App):
                     log_view.write(rich.markup.escape(line))
                 else:
                     log_view.write(line)
+            if should_preserve and not self._completion_marker_rendered:
+                log_view.write("[dim]── Execution completed ──[/dim]")
+                self._completion_marker_rendered = True
 
     def _handle_log_record(self, record: logging.LogRecord, formatted: str) -> None:
         """Callback invoked by TextualLogHandler on new log emissions."""
@@ -398,6 +412,8 @@ class DashboardApp(App):
         line_project = project_name or self.buffer_manager.extract_project_name(line)
         line_node = node_name or self.buffer_manager.extract_node_name(line)
         self.buffer_manager.add_line(line, project_name=line_project, node_name=line_node)
+        if line_project:
+            self._stream_activity[(line_project, line_node)] = time.time()
 
         if self.selected_project and line_project and line_project != self.selected_project:
             return
@@ -644,6 +660,7 @@ class DashboardApp(App):
                 if prev_identity is None:
                     self._active_node_identity = current_identity
                     if active_node is not None:
+                        self._completion_marker_rendered = False
                         self.selected_node = active_node
                         self.selected_issue_id = active_issue_id
                         await self.hydrate_project_logs(
@@ -652,14 +669,34 @@ class DashboardApp(App):
                             issue_id=active_issue_id,
                         )
                 elif current_identity != prev_identity:
+                    prev_proj, prev_node = prev_identity
+                    is_running_to_idle = (
+                        prev_proj == current_proj_name
+                        and prev_node is not None
+                        and active_node is None
+                    )
+
                     self._active_node_identity = current_identity
                     self.selected_node = active_node
                     self.selected_issue_id = active_issue_id
-                    await self.hydrate_project_logs(
-                        current_proj_name,
-                        node_name=active_node,
-                        issue_id=active_issue_id,
-                    )
+
+                    if is_running_to_idle:
+                        self._transitioning_running_to_idle = True
+                        try:
+                            await self.hydrate_project_logs(
+                                current_proj_name,
+                                node_name=None,
+                                issue_id=None,
+                            )
+                        finally:
+                            self._transitioning_running_to_idle = False
+                    else:
+                        self._completion_marker_rendered = False
+                        await self.hydrate_project_logs(
+                            current_proj_name,
+                            node_name=active_node,
+                            issue_id=active_issue_id,
+                        )
 
         # Preserve cursor within valid bounds / selected project & node
         if table.row_count > 0:
@@ -716,7 +753,7 @@ class DashboardApp(App):
             except Exception:
                 pass
 
-    async def _poll_active_log_file(self) -> None:
+    async def _poll_active_log_file(self, force: bool = False) -> None:
         """
         Incremental log tailer executed on the 2.0s table refresh tick.
         Performs offset handoff from hydrate_project_logs, reading strictly from _last_tail_offset.
@@ -726,6 +763,14 @@ class DashboardApp(App):
         """
         if not self.selected_project:
             return
+
+        if not force:
+            last_stream = max(
+                self._stream_activity.get((self.selected_project, getattr(self, "selected_node", None)), 0.0),
+                self._stream_activity.get((self.selected_project, None), 0.0),
+            )
+            if time.time() - last_stream < 2.0:
+                return
 
         try:
             log_view = self.query_one("#log_view", RichLog)
@@ -885,6 +930,7 @@ class DashboardApp(App):
                     pass
 
             if project_name != self.selected_project or node_name != getattr(self, "selected_node", None):
+                self._completion_marker_rendered = False
                 self.selected_project = project_name
                 self.selected_node = node_name
                 self._active_node_identity = (project_name, node_name)
@@ -965,6 +1011,7 @@ class DashboardApp(App):
                 except Exception:
                     pass
 
+            self._completion_marker_rendered = False
             self.selected_project = project_name
             self.selected_node = node_name
             self._active_node_identity = (project_name, node_name)
