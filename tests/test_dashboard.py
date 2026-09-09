@@ -4148,6 +4148,206 @@ async def test_scenario_sdlc_progress_widget_renders_columns_in_updated_order_ac
         assert [str(col.label) for col in sdlc_widget.columns.values()] == ["ID", "PR Status", "Title", "Status/Label"]
 
 
+@pytest.mark.asyncio
+async def test_scenario_issue_188_immediate_log_hydration_on_lane_selection(tmp_path: Path):
+    """
+    Scenario 1: Immediate Log Hydration on Lane Selection (RowHighlighted)
+      Given the projects table contains project "alpha" with active node "tester"
+      When the operator navigates to or clicks the "alpha" lane in #projects_table
+      Then #projects_table fires DataTable.RowHighlighted
+      And the RichLog pane is hydrated with the most recent 100 lines for "alpha::tester"
+      And the border title updates to "Live Output [alpha | tester*]".
+    """
+    ProjectLogBufferManager.reset()
+
+    log_dir = tmp_path / "logs"
+    alpha_log_dir = log_dir / "alpha" / "tester"
+    alpha_log_dir.mkdir(parents=True)
+    log_file = alpha_log_dir / "tester.log"
+    # Write 120 lines to verify most recent 100 lines
+    file_lines = [f"[alpha:tester] Test line {i}" for i in range(1, 121)]
+    log_file.write_text("\n".join(file_lines) + "\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path / "alpha")),
+        ],
+        settings=SettingsConfig(log_dir=str(log_dir)),
+    )
+
+    from unittest.mock import AsyncMock
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/alpha", "node_type": "tester", "status": "RUNNING", "issue_id": 42},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_alpha"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        table.focus()
+        await pilot.pause()
+
+        # The table has row "alpha::tester"
+        assert table.row_count == 1
+        assert "alpha::tester" in [k.value if hasattr(k, "value") else str(k) for k in table.rows.keys()]
+
+        # Fire RowHighlighted explicitly by moving cursor / triggering highlight
+        row_key = list(table.rows.keys())[0]
+        table.post_message(DataTable.RowHighlighted(table, cursor_row=0, row_key=row_key))
+        await pilot.pause()
+
+        # Then RichLog pane hydrated with most recent 100 lines for alpha::tester
+        rendered = [line.text for line in log_view.lines]
+        assert len(rendered) == 100
+        assert "Test line 21" in rendered[0]
+        assert "Test line 120" in rendered[-1]
+        assert "Test line 1\n" not in "".join(rendered)
+
+        # And border title updates to Live Output [alpha | tester*]
+        assert "Live Output" in str(log_view.border_title)
+        assert "alpha" in str(log_view.border_title)
+        assert "tester*" in str(log_view.border_title)
+        assert app.selected_project == "alpha"
+        assert app.selected_node == "tester"
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_188_explicit_reclick_forces_fresh_disk_hydration(tmp_path: Path):
+    """
+    Scenario 2: Explicit Re-Click Forces Fresh Disk Hydration (RowSelected)
+      Given the operator is currently viewing project "alpha" with node "tester"
+      When the operator re-clicks the active row or presses Enter on #projects_table
+      Then #projects_table fires DataTable.RowSelected
+      And the dashboard executes hydrate_project_logs with force_disk=True
+      And the latest logs from disk are re-read and rendered without being swallowed as a no-op.
+    """
+    ProjectLogBufferManager.reset()
+
+    log_dir = tmp_path / "logs"
+    alpha_log_dir = log_dir / "alpha" / "tester"
+    alpha_log_dir.mkdir(parents=True)
+    log_file = alpha_log_dir / "tester.log"
+    log_file.write_text("[alpha:tester] Initial disk log line 1\n", encoding="utf-8")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="alpha", repo="org/alpha", local_path=str(tmp_path / "alpha")),
+        ],
+        settings=SettingsConfig(log_dir=str(log_dir)),
+    )
+
+    from unittest.mock import AsyncMock
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/alpha", "node_type": "tester", "status": "RUNNING", "issue_id": 42},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_alpha"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        table.focus()
+        await pilot.pause()
+
+        # Initially hydrated with Initial disk log line 1
+        rendered_initial = [line.text for line in log_view.lines]
+        assert any("Initial disk log line 1" in r for r in rendered_initial)
+
+        # Mutate disk log file with new content while in-memory buffer still has only old line
+        log_file.write_text("[alpha:tester] Fresh disk log line after re-click\n", encoding="utf-8")
+
+        # Re-click active row or press Enter on #projects_table
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # The latest logs from disk must be re-read and rendered without being swallowed as a no-op
+        rendered_after = [line.text for line in log_view.lines]
+        assert any("Fresh disk log line after re-click" in r for r in rendered_after)
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_188_deterministic_multi_node_compound_lane_selection(tmp_path: Path):
+    """
+    Scenario 3: Deterministic Multi-Node Compound Lane Selection
+      Given project "beta" has concurrent active jobs "beta::architect" and "beta::devtest"
+      When clicking the primary parent row for "beta"
+      Then "architect" is deterministically selected (first alphabetically by node_type)
+      When clicking the nested child row "  └─ devtest"
+      Then the dashboard specifically binds and hydrates logs for "beta::devtest".
+    """
+    ProjectLogBufferManager.reset()
+
+    # Seed logs for beta architect and devtest
+    ProjectLogBufferManager.add_line("[beta:architect] Architect planning pipeline", project_name="beta", node_name="architect")
+    ProjectLogBufferManager.add_line("[beta:devtest] DevTest running test suite", project_name="beta", node_name="devtest")
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(name="beta", repo="org/beta", local_path=str(tmp_path / "beta")),
+        ],
+        settings=SettingsConfig(log_dir=str(tmp_path / "logs")),
+    )
+
+    from unittest.mock import AsyncMock
+    mock_sm = AsyncMock(spec=StateManager)
+    mock_sm.get_paused_projects.return_value = []
+    # Both active jobs running concurrently
+    mock_sm.get_active_jobs.return_value = [
+        {"repo": "org/beta", "node_type": "devtest", "status": "RUNNING", "issue_id": 202},
+        {"repo": "org/beta", "node_type": "architect", "status": "RUNNING", "issue_id": 201},
+    ]
+    mock_sm.get_project_state_fingerprint.return_value = "fp_beta"
+
+    app = DashboardApp(config=config, state_manager=mock_sm)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        log_view = app.query_one("#log_view", RichLog)
+        table.focus()
+        await pilot.pause()
+
+        # Both rows rendered
+        assert table.row_count == 2
+        row_keys = [k.value if hasattr(k, "value") else str(k) for k in table.rows.keys()]
+        assert row_keys == ["beta::architect", "beta::devtest"]
+
+        # Clicking / selecting primary parent row: row 0 ("beta::architect")
+        table.move_cursor(row=0)
+        await pilot.pause()
+
+        assert app.selected_project == "beta"
+        assert app.selected_node == "architect"
+        assert app.selected_issue_id == 201
+        assert "Live Output" in str(log_view.border_title)
+        assert "beta" in str(log_view.border_title)
+        assert "architect*" in str(log_view.border_title)
+        rendered_arch = [line.text for line in log_view.lines]
+        assert any("Architect planning pipeline" in r for r in rendered_arch)
+        assert not any("DevTest running test suite" in r for r in rendered_arch)
+
+        # When clicking nested child row "  └─ devtest" (row 1)
+        table.move_cursor(row=1)
+        await pilot.pause()
+
+        # Then specifically binds and hydrates logs for beta::devtest
+        assert app.selected_project == "beta"
+        assert app.selected_node == "devtest"
+        assert app.selected_issue_id == 202
+        assert "Live Output" in str(log_view.border_title)
+        assert "beta" in str(log_view.border_title)
+        assert "devtest*" in str(log_view.border_title)
+        rendered_dev = [line.text for line in log_view.lines]
+        assert any("DevTest running test suite" in r for r in rendered_dev)
+        assert not any("Architect planning pipeline" in r for r in rendered_dev)
+
+
 
 
 

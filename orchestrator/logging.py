@@ -286,13 +286,14 @@ class ProjectLogBufferManager:
         log_dir: Optional[Union[Path, str]] = None,
         max_lines: int = 100,
         node_name: Optional[str] = None,
+        force_disk: bool = False,
     ) -> LogQueryResult:
         """
         Retrieves scoped historical log lines for the given project (and optional node).
-        If in-memory deque has entries matching the scope via matches_node_scope, returns them.
-        When node_name is supplied, untagged in-memory lines are strictly excluded.
-        If in-memory deque has no matching entries for the requested scope and project_name is provided,
+        If force_disk is False and in-memory deque has entries matching the scope via matches_node_scope, returns them.
+        When force_disk is True or in-memory deque has no matching entries for the requested scope and project_name is provided,
         falls back to tailing disk logs.
+        When node_name is supplied, untagged in-memory lines are strictly excluded.
         Enforces strict node isolation: if node_name is supplied and has no disk logs,
         never falls back to unfiltered project files or global buffer.
         """
@@ -302,7 +303,7 @@ class ProjectLogBufferManager:
             return LogQueryResult(lines=list(cls.GLOBAL_LOG_BUFFER), target_file=None, file_size=0)
 
         buf = cls.PROJECT_BUFFERS.get(project_name)
-        if buf:
+        if buf and not force_disk:
             if node_name is not None:
                 matching = [
                     item[1]
@@ -361,6 +362,7 @@ def get_project_logs(
     log_dir: Optional[Union[Path, str]] = None,
     max_lines: int = 100,
     node_name: Optional[str] = None,
+    force_disk: bool = False,
 ) -> LogQueryResult:
     """Module-level scoped historical log retrieval returning LogQueryResult."""
     return ProjectLogBufferManager.get_project_logs(
@@ -368,6 +370,7 @@ def get_project_logs(
         log_dir=log_dir,
         max_lines=max_lines,
         node_name=node_name,
+        force_disk=force_disk,
     )
 
 
