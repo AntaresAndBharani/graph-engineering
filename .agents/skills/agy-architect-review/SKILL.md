@@ -1,25 +1,32 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative cross-architectural debate and consensus review between Claude and Gemini Architect (gemini-3.8-flash-high) using the Antigravity (agy) CLI. Iterates up to a maximum of 3 rounds exclusively via docs/draft-requisites/implementation-plan.md, unearthing technical drawbacks, architectural hazards, and edge cases. If consensus is reached, the plan is marked approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review, /agy-review, or /gemini-architect-review.
+  Collaborative Tri-Party Architectural Review Council between Author, Gemini Architect (gemini-3.8-flash-high via agy CLI), and Claude QA Guardian (sonnet with low effort via claude CLI). Iterates up to a maximum of 3 rounds exclusively via docs/draft-requisites/implementation-plan.md. Gemini Architect evaluates system architecture, concurrency, and performance, while Claude QA guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. If dual consensus is reached, the plan is marked approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review, /agy-review, or /gemini-architect-review.
 ---
 
-# Antigravity (Gemini Flash High) Architect Cross-Review Workflow (/agy-architect-review)
+# Antigravity Tri-Party Architect & QA Cross-Review Workflow (/agy-architect-review)
 
-Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan using the Antigravity (`agy`) CLI powered by **`gemini-3.8-flash-high`**.
+Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan using the Antigravity (`agy`) CLI powered by **`gemini-3.8-flash-high`** and the Claude QA Guardian powered by **`claude` CLI (`sonnet`, `effort: low`)**.
 
 ---
 
-## 🎯 Purpose & Core Value
+## 🎯 Purpose & Core Value: The Tri-Party Review Council
 
-This skill orchestrates a rigorous, bi-directional architectural dialogue mediated between the authoring agent and **Gemini Architect (`gemini-3.8-flash-high`)** via the `agy` CLI to pressure-test, critique, and align on an implementation plan.
+In complex software design, deep architectural debates between author and systems architects often risk **requirements drift**—technical optimizations, deep refactorings, or abstractions can inadvertently drop, dilute, or over-complicate the operator's original user requirements or neglect user experience.
 
-Key invariants:
-1. **Single Medium of Truth:** All communication happens **exclusively** through `docs/draft-requisites/implementation-plan.md` in the target project workspace. Neither agent communicates through ephemeral chat buffers; all feedback is permanently audited.
-2. **Autonomous Headless Antigravity Execution & Session Continuity:** Gemini Architect is invoked via `agy` CLI with `--model gemini-3.8-flash-high --dangerously-skip-permissions -p`. Across iterative debate rounds (Rounds 2 & 3), the review runner resumes the session using `-c`, preserving previous conversational memory and token cache rather than re-indexing from scratch on each round.
-3. **Gemini Model Invariant:** In `gemini-3.8-flash-high`, reasoning effort is built into the model identity itself, so `--effort` is omitted.
+To solve this, the **Antigravity Review Protocol** establishes a **Tri-Party Review Council**:
+1. **Author Agent (Synthesizer):** Drafts the initial proposal and synthesizes revisions in response to critiques.
+2. **Gemini Architect (`gemini-3.8-flash-high` via `agy`):** Scrutinizes systems architecture, concurrency, pipe/lock safety, DB schema integrity, performance, and failure modes.
+3. **Claude QA Guardian (`sonnet`, `effort: low` via `claude`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
+
+### Key Invariants:
+1. **Single Medium of Truth:** All communication happens **exclusively** through `docs/draft-requisites/implementation-plan.md` in the target project workspace. All feedback is permanently audited in the living audit trail.
+2. **Autonomous Headless Execution & Session Continuity:**
+   - Gemini Architect runs via `agy` CLI with `--model gemini-3.8-flash-high --dangerously-skip-permissions -p` (resuming via `-c` in Rounds 2 & 3).
+   - Claude QA runs via `claude` CLI with `--model sonnet --effort low --dangerously-skip-permissions -p` (resuming via session ID in Rounds 2 & 3).
+3. **Dual Consensus Gate:** Approval requires **both** Gemini Architect (`VERDICT: AGREED`) AND Claude QA (`VERDICT: AGREED`). If either party objects, the plan is NOT approved.
 4. **Hard 3-Round Cap:** The debate cannot exceed 3 rounds.
-5. **Guaranteed Operator Escalation:** If after 3 rounds agreement is not achieved (`VERDICT: AGREED`), execution halts immediately and the skill surfaces a structured dispute matrix of unresolved points directly to the human operator.
+5. **Guaranteed Operator Escalation:** If after 3 rounds dual agreement is not achieved, execution halts immediately and surfaces a consolidated dispute matrix directly to the human operator.
 
 ---
 
@@ -29,19 +36,51 @@ Key invariants:
 stateDiagram-v2
     [*] --> CheckPlan: Trigger /agy-architect-review
     CheckPlan --> InitialReview: docs/draft-requisites/implementation-plan.md exists
-    InitialReview --> AppendInitial: Authoring agent evaluates codebase & appends Iteration N
-    AppendInitial --> InvokeGemini: Invoke Gemini Architect via agy CLI
-    InvokeGemini --> GeminiCritique: Gemini inspects codebase & appends Iteration N
-    GeminiCritique --> CheckVerdict: Read Gemini Verdict
+    InitialReview --> AppendAuthor: Author evaluates codebase & appends Review Iteration N
     
-    CheckVerdict --> ConsensusApproved: VERDICT is AGREED
-    ConsensusApproved --> [*]: Final Decision Plan approved & ready
+    AppendAuthor --> CouncilReview: Launch Dual Council Review (Round N)
+    state CouncilReview {
+        [*] --> InvokeGemini: Invoke Gemini Architect via agy CLI
+        [*] --> InvokeClaudeQA: Invoke Claude QA via claude CLI
+        InvokeGemini --> GeminiReview: Append Gemini Architect Iteration N
+        InvokeClaudeQA --> ClaudeQAReview: Append Claude QA Iteration N
+        GeminiReview --> JoinCouncil
+        ClaudeQAReview --> JoinCouncil
+        JoinCouncil --> [*]
+    }
     
-    CheckVerdict --> CheckRounds: VERDICT is DISAGREED
-    CheckRounds --> InitialReview: Round < 3 (Authoring agent addresses concerns)
+    CouncilReview --> CheckDualVerdict: Evaluate Both Verdicts
+    
+    CheckDualVerdict --> ConsensusApproved: Both Gemini & Claude QA issue VERDICT: AGREED
+    ConsensusApproved --> [*]: Final Decision Plan approved & ready for operator sign-off
+    
+    CheckDualVerdict --> CheckRounds: Either Gemini or Claude QA issues VERDICT: DISAGREED
+    CheckRounds --> AppendAuthor: Round < 3 (Author addresses objections in Round N+1)
     CheckRounds --> EscalateOperator: Round == 3 (Cap reached)
-    EscalateOperator --> [*]: Surface unresolved points matrix to Operator
+    EscalateOperator --> [*]: Surface consolidated dispute matrix to Operator
 ```
+
+---
+
+## 🎯 Role Mandates & Rubrics
+
+### 🏛️ Party 1: Gemini Architect (`gemini-3.8-flash-high`)
+- **Lens:** Systems Architecture, Performance, Scalability & Safety
+- **Core Checks:**
+  - Database schema, locking, index efficiency, migrations.
+  - Subprocess pipe deadlocks, Windows buffer saturation, timeout process killing.
+  - Concurrency, race conditions, async task boundaries.
+  - Backward compatibility, regression risks on existing pipelines.
+- **Section Appended:** `## 🏛️ Gemini Architect Review Iteration N`
+
+### 🧪 Party 2: Claude QA Guardian (`sonnet`, `effort: low`)
+- **Lens:** Requirements Fidelity, UX/UI Experience & Functional Correctness
+- **Core Checks:**
+  - **Anti-Drift Requirement Guardian:** Cross-checks proposal line-by-line against the **user's original prompt and stated constraints**. Disallows dropping, over-abstracting, or altering the user's intent.
+  - **UX/UI Experience Audit (If UI exists):** Audits layout ergonomics, interactive states (loading, empty, error, active cursor), visual hierarchy, Rich tables, and user feedback.
+  - **Functional Correctness Audit (If no UI exists):** Audits behavioral correctness, input validation, error messages returned to user/logs, edge cases (cold-start, network drop, zero-division), and fail-closed safety.
+  - **BDD Acceptance Criteria & Testability:** Confirms Gherkin scenarios are complete, unambiguous, and cover nominal and adversarial paths.
+- **Section Appended:** `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)`
 
 ---
 
@@ -55,9 +94,9 @@ Ensure the target project has an existing implementation plan:
 If the file does not exist, prompt the user or run `/refine-story` first to establish the initial proposal.
 
 ### Step 2: Pre-Review / Counter-Proposal (Round N)
-Before or between Gemini invocations:
+Before council review:
 1. Inspect the live codebase (`grep_search`, `view_file`) to verify ground truth.
-2. Append the architectural perspective to `docs/draft-requisites/implementation-plan.md`:
+2. Append the author's iteration to `docs/draft-requisites/implementation-plan.md`:
    ```markdown
    ## 🔍 Review Iteration N (Author Perspective)
    ### 1. Ground Truth Codebase Inspection
@@ -65,57 +104,75 @@ Before or between Gemini invocations:
    ### 3. Edge Cases & Resilience Strategy
    ```
 
-### Step 3: Headless Antigravity (Gemini 3.8 Flash High) Execution
-Invoke Gemini Architect non-interactively using the provided helper script or direct CLI command.
+### Step 3: Council Execution (Gemini Architect + Claude QA)
+Invoke the review council non-interactively using the helper script or direct CLI commands.
 
 #### Option A: Via Python Helper Script (Recommended)
 ```powershell
-python <skill_path>/scripts/agy_cross_review.py --model gemini-3.8-flash-high --max-rounds 3
+python .agents/skills/agy-architect-review/scripts/agy_cross_review.py --max-rounds 3
 ```
 The helper script automatically:
 - Resolves the local `docs/draft-requisites/implementation-plan.md`.
-- Formulates the architectural critique prompt.
-- Executes `agy -p ... --model gemini-3.8-flash-high --dangerously-skip-permissions` (resuming via `-c` for Rounds 2 & 3).
-- Parses Gemini's appended section and verdict.
-- Emits structured JSON summary.
+- Executes Gemini Architect (`agy --model gemini-3.8-flash-high`) with session continuity (`-c`).
+- Executes Claude QA (`claude --model sonnet --effort low`) with session continuity.
+- Parses both verdicts and extracts any disagreement points.
+- Emits structured JSON summary and enforces the dual consensus gate.
 
-#### Option B: Direct Shell Invocation
+#### Option B: Direct Shell Invocations
+
+**1. Gemini Architect Invocation:**
 ```powershell
-$prompt = @"
-You are the Principal Architect conducting Round N of an unsparing, hyper-critical Architectural Review of 'docs/draft-requisites/implementation-plan.md'.
-1. Read the plan and inspect the live codebase using your Read/Grep/Bash tools.
-2. Scrutinize all drawbacks, architectural hazards, performance bottlenecks, schema locking, and backward-compatibility risks.
-3. Append a new section to 'docs/draft-requisites/implementation-plan.md' titled:
+$gemini_prompt = @"
+You are the Principal Architect conducting Round N of an unsparing Architectural Review of 'docs/draft-requisites/implementation-plan.md'.
+1. Read the plan and inspect the live codebase using your tools.
+2. Scrutinize system drawbacks, concurrency hazards, pipe safety, schema locking, and performance.
+3. Append a new section titled:
 ## 🏛️ Gemini Architect Review Iteration N
-Must conclude with either:
-VERDICT: AGREED (only if 100% sound with zero unresolved drawbacks) or VERDICT: DISAGREED.
-4. Output a concise 3-5 bullet point summary to stdout.
+Must conclude with: VERDICT: AGREED or VERDICT: DISAGREED.
 "@
 
 # Round 1:
-agy -p $prompt --model gemini-3.8-flash-high --dangerously-skip-permissions
-
+agy -p $gemini_prompt --model gemini-3.8-flash-high --dangerously-skip-permissions
 # Rounds 2 & 3:
-agy -c -p $prompt --model gemini-3.8-flash-high --dangerously-skip-permissions
+agy -c -p $gemini_prompt --model gemini-3.8-flash-high --dangerously-skip-permissions
+```
+
+**2. Claude QA Guardian Invocation:**
+```powershell
+$qa_prompt = @"
+You are the QA Lead & Requirements Guardian conducting Round N of the Review of 'docs/draft-requisites/implementation-plan.md'.
+1. Read the plan and check the user's original requirements and constraints.
+2. Anti-Drift Check: Ensure the plan remains 100% faithful to original requirements without scope creep or dropped invariants.
+3. UX/UI & Functional Check: If UI exists, audit UX ergonomics and user feedback; if backend only, audit functional correctness and error handling.
+4. Testability Check: Confirm Gherkin BDD criteria cover edge cases and failure modes.
+5. Append a new section titled:
+## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)
+Must conclude with: VERDICT: AGREED or VERDICT: DISAGREED.
+"@
+
+# Round 1:
+claude -p $qa_prompt --model sonnet --effort low --dangerously-skip-permissions
+# Rounds 2 & 3:
+claude -p $qa_prompt --model sonnet --effort low --dangerously-skip-permissions
 ```
 
 ### Step 4: Verdict Analysis & Convergence Check
 Read the updated `docs/draft-requisites/implementation-plan.md`.
 
-#### Case 1: Consensus Reached (`VERDICT: AGREED`)
+#### Case 1: Dual Consensus Reached (`Both AGREED`)
 - Update `## 🎯 Final Decision Plan & User Story Specification` incorporating all refined insights and agreed safeguards.
-- Mark status: **APPROVED BY ARCHITECT CONSENSUS**.
+- Mark status: **✅ APPROVED BY ARCHITECT & QA CONSENSUS**.
 - Report completion and present the approved Final Decision Plan to the user.
 
 #### Case 2: Disagreement & Round < 3
-- Analyze objections under `## 🏛️ Gemini Architect Review Iteration N`.
-- Identify whether concessions, architectural refactoring, or code-grounded explanations are needed.
-- Increment round count ($N \to N+1$).
-- Append `## 🔍 Review Iteration N+1 (Response to Gemini Architect)` addressing every objection.
-- Return to **Step 3** to re-invoke Gemini Architect for Round $N+1$.
+- Analyze objections under both `## 🏛️ Gemini Architect Review Iteration N` and `## 🧪 Claude QA Review Iteration N`.
+- Identify required refactorings, requirements clarifications, or UX fixes.
+- Increment round count ($N 	o N+1$).
+- Append `## 🔍 Review Iteration N+1 (Author Response)` addressing all objections.
+- Return to **Step 3** to re-invoke the council for Round $N+1$.
 
 #### Case 3: Cap Reached (Round == 3 with Disagreement)
-- **DO NOT INVOKE GEMINI AGAIN.**
+- **DO NOT INVOKE COUNCIL AGAIN.**
 - Append escalation marker in `docs/draft-requisites/implementation-plan.md`:
   ```markdown
   ## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies (Round 3 Cap Reached)
@@ -126,23 +183,22 @@ Read the updated `docs/draft-requisites/implementation-plan.md`.
 
 ## 🚨 Operator Escalation Format (When Round 3 Has No Consensus)
 
-When Round 3 finishes without consensus, output the following structured briefing directly to the operator:
-
 ```markdown
-### ⚠️ Cross-Review Round 3 Escalation: Unresolved Architectural Disagreements
+### ⚠️ Tri-Party Cross-Review Round 3 Escalation: Unresolved Disagreements
 
-The authoring agent and Gemini Architect (gemini-3.8-flash-high) have completed 3 iterative debate rounds via `implementation-plan.md` without reaching 100% consensus. As per protocol, execution has halted to request your architectural decision.
+The Author, Gemini Architect, and Claude QA Guardian have completed 3 iterative debate rounds via `implementation-plan.md` without reaching 100% consensus. Execution has halted to request your architectural decision.
 
 #### 📊 Points of Contention Matrix
-| Contested Item | Author Stance & Rationale | Gemini Architect Stance & Rationale | Risk / Trade-Off |
+| Role | Contested Item | Stance & Objections | Proposed Alternative / Risk |
 | :--- | :--- | :--- | :--- |
-| **1. [Topic A]** | ... | ... | ... |
-| **2. [Topic B]** | ... | ... | ... |
+| **Gemini Architect** | [System/Technical Item] | ... | ... |
+| **Claude QA** | [Requirement/UX Item] | ... | ... |
+| **Author** | [Proposed Synthesis] | ... | ... |
 
 #### 🎯 Action Required from Operator
 Please select how you wish to proceed:
-- **Option 1:** Adopt the Author proposal for [Topic A] and [Topic B].
-- **Option 2:** Adopt Gemini Architect's proposal for [Topic A] and [Topic B].
+- **Option 1:** Adopt the Author proposal.
+- **Option 2:** Adopt Gemini Architect's recommendation on technical points and Claude QA's recommendation on requirements/UX.
 - **Option 3:** Provide specific compromise or custom guidance.
 ```
 
@@ -154,5 +210,6 @@ In `docs/draft-requisites/implementation-plan.md`, sections MUST strictly use th
 - Initial plan: `## 📋 Initial Implementation Proposal`
 - Author reviews: `## 🔍 Review Iteration N (Author Perspective)`
 - Gemini Architect reviews: `## 🏛️ Gemini Architect Review Iteration N`
+- Claude QA reviews: `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)`
 - Final decision: `## 🎯 Final Decision Plan & User Story Specification`
 - Escalation: `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`
