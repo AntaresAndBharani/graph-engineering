@@ -185,12 +185,15 @@ def invoke_claude(
 
 
 def parse_gemini_verdict(plan_content: str, stdout: str, round_num: int) -> str:
+    sections = re.split(r"^#\s*📋\s*Implementation Plan", plan_content, flags=re.MULTILINE)
+    active_section = sections[-1] if sections else plan_content
+
     round_match = re.search(
         rf"##\s*🏛️\s*Gemini(?:\s+Architect)?\s+Review Iteration\s+{round_num}(.*?)(?:\n##(?=[^#])|\Z)",
-        plan_content,
+        active_section,
         re.DOTALL
     )
-    section_text = round_match.group(1) if round_match else plan_content
+    section_text = round_match.group(1) if round_match else stdout
 
     if re.search(r"VERDICT:\s*AGREED", section_text, re.IGNORECASE):
         return "AGREED"
@@ -206,12 +209,15 @@ def parse_gemini_verdict(plan_content: str, stdout: str, round_num: int) -> str:
 
 
 def parse_qa_verdict(plan_content: str, stdout: str, round_num: int) -> str:
+    sections = re.split(r"^#\s*📋\s*Implementation Plan", plan_content, flags=re.MULTILINE)
+    active_section = sections[-1] if sections else plan_content
+
     round_match = re.search(
         rf"##\s*🧪\s*Claude\s+QA\s+Review Iteration\s+{round_num}(.*?)(?:\n##(?=[^#])|\Z)",
-        plan_content,
+        active_section,
         re.DOTALL
     )
-    section_text = round_match.group(1) if round_match else plan_content
+    section_text = round_match.group(1) if round_match else stdout
 
     if re.search(r"VERDICT:\s*AGREED", section_text, re.IGNORECASE):
         return "AGREED"
@@ -227,10 +233,13 @@ def parse_qa_verdict(plan_content: str, stdout: str, round_num: int) -> str:
 
 
 def extract_disagreement_points(plan_content: str, round_num: int, header_prefix: str = "🏛️") -> list[str]:
+    sections = re.split(r"^#\s*📋\s*Implementation Plan", plan_content, flags=re.MULTILINE)
+    active_section = sections[-1] if sections else plan_content
+
     points = []
     round_match = re.search(
         rf"##\s*{header_prefix}.*?Iteration\s+{round_num}(.*?)(?:\n##(?=[^#])|\Z)",
-        plan_content,
+        active_section,
         re.DOTALL
     )
     if not round_match:
@@ -311,7 +320,7 @@ def main() -> None:
             qa_session_id = qa_session_file.read_text(encoding="utf-8").strip()
             is_qa_resume = bool(qa_session_id)
         if not qa_session_id:
-            qa_session_id = f"qa-review-{uuid.uuid4().hex[:8]}"
+            qa_session_id = str(uuid.uuid4())
             qa_session_file.write_text(qa_session_id, encoding="utf-8")
 
     # 1. Execute Gemini Architect

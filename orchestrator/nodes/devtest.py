@@ -1295,9 +1295,14 @@ async def run_devtest_node(
             f"Implement the code strictly adhering to those local repository standards.\n"
         )
 
+    issue_body_text = target_issue.get("body", "").strip()
+    issue_body_section = f"\nISSUE SPECIFICATION:\n{issue_body_text}\n" if issue_body_text else ""
+
     prompt = (
         f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
-        f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}').\n\n"
+        f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}') in repository '{project.repo}'.\n"
+        f"IMPORTANT: The current target repository is '{project.repo}'. Do not query, inspect, or operate on other repositories.\n\n"
+        f"{issue_body_section}\n"
         f"{context_note}"
         f"OPERATIONAL STEPS:\n"
         f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
@@ -1305,7 +1310,7 @@ async def run_devtest_node(
         f"3. Implement the minimal clean code required to make all tests pass.\n"
         f"4. Verify that the entire test suite and linter pass cleanly.\n"
         f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
-        f"6. Open a Pull Request using `gh pr create --title '<title>' --body 'Closes #{issue_id}'`.\n"
+        f"6. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n"
     )
 
     adapter = AsyncHarnessAdapter(

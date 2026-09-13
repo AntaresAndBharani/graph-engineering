@@ -51,8 +51,16 @@ To maximize reasoning depth while drastically minimizing token costs:
 - **1-Pass All-Queued Invariant**:
   - All newly created subtasks (1..N) are labeled **`queued`** with `Parent: #<issue_id>` in their bodies.
   - The parent story is transitioned to **`architect-processed`**.
-  - DevTest sequentially activates Subtask 1 (`queued` $	o$ `ready-for-dev`) on pickup, preventing race conditions.
+  - DevTest sequentially activates Subtask 1 (`queued` -> `ready-for-dev`) on pickup, preventing race conditions.
 - **Parent Subtask Checklist Sync**: Automatically updates the parent issue body with a structured `- [ ] #<subtask_id> - <title>` markdown checklist and posts an audit comment.
+
+### 3. Upstream Zero-Token Architect Bypass (`architect-processed` / `ready-for-dev`)
+- When requirements are pre-refined and sliced upstream via `/refine-story` or `/agy-architect-review`, issues are provisioned directly without `needs-triage`:
+  - **Standalone Tasks ($\le 300$ LOC):** Labeled directly with `ready-for-dev` (0 tokens).
+  - **Decomposed Features ($> 300$ LOC):** Parent issue labeled `architect-processed` (0 tokens), with Child Slice 1 labeled `ready-for-dev` and Slices 2..N labeled `queued`.
+- The runtime Architect Node completely ignores these issues, saving 100% of triage/decomposition LLM tokens.
+- Native `_advance_parent_and_unlock_next_subtask` in DevTest handles sequential progression, parent checklist checkoffs, and final parent closure.
+
 
 ---
 

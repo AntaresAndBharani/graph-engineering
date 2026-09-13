@@ -213,3 +213,33 @@ In `docs/draft-requisites/implementation-plan.md`, sections MUST strictly use th
 - Claude QA reviews: `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)`
 - Final decision: `## 🎯 Final Decision Plan & User Story Specification`
 - Escalation: `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`
+
+---
+
+## ⚡ Upstream Functional Slicing & Direct DevTest Assignment Protocol
+
+When decomposing requirements during `/agy-architect-review` or `/refine-story`, the Tri-Party Council directly provisions issues for `devtest` execution to bypass runtime Architect triage, completely eliminating runtime token consumption.
+
+### 1. Zero-Token Architect Bypass Invariant
+- Runtime Architect Node only activates on issues with label `needs-triage`.
+- Pre-refined issues are provisioned with labels `architect-processed`, `ready-for-dev`, and `queued`, consuming **0 LLM tokens** at runtime from the Architect Node.
+
+### 2. Pattern Selection
+- **Pattern A (Standalone Task, $\le 300$ LOC, $\le 4$ files):**
+  - Create a single issue labeled `ready-for-dev` (no parent, no child).
+  - DevTest executes directly via Fallback 1 dispatch and closes the issue upon PR merge.
+- **Pattern B (Decomposed Feature Story, $> 300$ LOC):**
+  - **Parent Feature Issue:** Created with label `architect-processed` and a markdown checklist `- [ ] #<child_id>` in the body.
+  - **Parent Audit Comment:** Post an immediate issue comment on the parent linking all child issue numbers (`Child issues: #101, #102`) for search-lag defense.
+  - **Child Slice 1:** Created with label `ready-for-dev` and body starting with `Parent: #<parent_id>`.
+  - **Child Slices 2..N:** Created with label `queued` and body starting with `Parent: #<parent_id>`.
+  - DevTest executes Slice 1, advances the parent checklist via native `_advance_parent_and_unlock_next_subtask`, unlocks Slice 2 to `ready-for-dev`, and marks the parent `dev-implemented` upon completion.
+
+### 3. Strict Pre-Flight Sizing Gate
+- Every functional slice must deliver a vertical capability and touch $\le 4$ files with $\le 300$ estimated LOC diff.
+- If any slice exceeds this boundary, the Review Council MUST reject the slice and mandate further sub-slicing prior to consensus approval.
+
+### 4. Single Active Feature Invariant (Operational Protocol)
+- Only **one active feature parent story** (`architect-processed`) may be provisioned per project at a time.
+- Backlog feature stories remain deferred or unprovisioned without `architect-processed` until the active feature merges and closes, preventing SQLite active story lock starvation.
+

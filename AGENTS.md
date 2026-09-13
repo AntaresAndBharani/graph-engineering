@@ -45,6 +45,21 @@ When the user prefixes their instruction with `/agy-architect-review`, `/agy-rev
 4. **Dual Consensus Gate:** Approval requires **both** Gemini Architect AND Claude QA to issue `VERDICT: AGREED`. If either party objects, the plan is not approved and the author must address their feedback.
 5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and present a consolidated Dispute Matrix to the operator.
 
+## Upstream Functional Slicing & Direct DevTest Assignment Protocol
+When pre-refining requirements using `/refine-story` or `/agy-architect-review`:
+1. **Zero-Token Runtime Architect Bypass:** Pre-refined stories bypass runtime Architect Node triage (`needs-triage`) completely, saving 100% of runtime triage/decomposition LLM tokens.
+2. **Pattern Selection:**
+   - **Pattern A (Standalone Task, $\le 300$ LOC, $\le 4$ files):** Create a single issue with label `ready-for-dev` (no parent, no child). DevTest executes directly via Fallback 1 and closes the issue upon merge.
+   - **Pattern B (Decomposed Feature, $> 300$ LOC):**
+     - Create a Parent Feature Issue labeled `architect-processed` with a `- [ ] #<child_id>` checklist in the body.
+     - Post an immediate comment on the Parent issue linking all child issue numbers (`Child issues: #101, #102`).
+     - Create Child Slice 1 labeled `ready-for-dev` with `Parent: #<parent_id>` in the body.
+     - Create Child Slices 2..N labeled `queued` with `Parent: #<parent_id>` in the body.
+     - DevTest executes Slice 1, advances the parent checklist, promotes Slice 2 to `ready-for-dev`, and marks the parent `dev-implemented` upon completion.
+3. **Strict Sizing Boundary:** Every functional slice must deliver a vertical capability and touch $\le 4$ files with $\le 300$ estimated LOC diff. Slices exceeding this boundary must be sub-sliced before issue provisioning.
+4. **Single Active Feature Invariant:** Provision only **one active feature parent story** (`architect-processed`) per project at a time. Backlog feature stories remain held without `architect-processed` until the active feature merges and closes.
+
+
 
 
 
