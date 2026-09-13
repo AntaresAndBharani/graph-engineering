@@ -65,7 +65,15 @@ config_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(config_app, name="config")
+
+story_app = typer.Typer(
+    name="story",
+    help="Upstream functional story provisioning and lifecycle commands.",
+    no_args_is_help=True,
+)
+app.add_typer(story_app, name="story")
 console = Console(legacy_windows=False)
+
 
 
 def version_callback(value: bool):
@@ -2113,6 +2121,142 @@ async def _run_supervisor_status(
     console.print(table)
 
 
+@story_app.command("provision")
+def story_provision_command(
+    project_name: str = typer.Argument(
+        ...,
+        help="Target registered project name.",
+    ),
+    plan_file: Optional[Path] = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Path to implementation-plan.md or specification file (defaults to docs/draft-requisites/implementation-plan.md).",
+    ),
+    pattern: Optional[str] = typer.Option(
+        None,
+        "--pattern",
+        "-p",
+        help="Explicit pattern override: 'A' (standalone direct task) or 'B' (decomposed feature).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Simulate issue creation without touching GitHub or state.db.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the Single Active Feature Invariant check even if an active story is locked.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to custom config.yaml file.",
+    ),
+):
+    """Deterministically provisions upstream requirements to GitHub using Pattern A or Pattern B."""
+    asyncio.run(_run_story_provision(project_name, plan_file, pattern, dry_run, force, config_path))
+
+
+async def _run_story_provision(
+    project_name: str,
+    plan_file: Optional[Path],
+    pattern: Optional[str],
+    dry_run: bool,
+    force: bool,
+    config_path: Optional[Path],
+) -> None:
+    from orchestrator.provisioning import parse_decision_plan, provision_story
+
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=2)
+
+    matching = [p for p in config.projects if p.name == project_name]
+    if not matching:
+        console.print(f"[bold red]Error:[/bold red] Project '{project_name}' not found in configuration.")
+        raise typer.Exit(code=1)
+    project = matching[0]
+
+    # Resolve plan file
+    target_plan = plan_file
+    if not target_plan:
+        cwd = Path.cwd()
+        candidate = cwd / "docs" / "draft-requisites" / "implementation-plan.md"
+        if candidate.exists():
+            target_plan = candidate
+        else:
+            # Check project root if configured
+            proj_root = Path(project.path).expanduser() if hasattr(project, "path") and project.path else cwd
+            proj_candidate = proj_root / "docs" / "draft-requisites" / "implementation-plan.md"
+            if proj_candidate.exists():
+                target_plan = proj_candidate
+            else:
+                console.print(f"[bold red]Error:[/bold red] Could not find 'docs/draft-requisites/implementation-plan.md'. Specify with --file.")
+                raise typer.Exit(code=1)
+
+    if not target_plan.exists():
+        console.print(f"[bold red]Error:[/bold red] Plan file not found: {target_plan}")
+        raise typer.Exit(code=1)
+
+    plan_content = target_plan.read_text(encoding="utf-8", errors="replace")
+    plan = parse_decision_plan(plan_content, default_pattern=pattern)
+
+    state_manager = StateManager(config.settings.resolved_db_path)
+    await state_manager.init_db()
+
+    console.print(f"[bold cyan]Provisioning Story for Project:[/bold cyan] [green]{project.name}[/green] ([magenta]{project.repo}[/magenta])")
+    console.print(f"[bold cyan]Plan File:[/bold cyan] {target_plan}")
+    console.print(f"[bold cyan]Selected Pattern:[/bold cyan] [yellow]Pattern {plan.pattern}[/yellow] ({'Standalone Task' if plan.pattern == 'A' else 'Decomposed Feature'})")
+
+    if dry_run:
+        console.print("[bold yellow]⚡ DRY-RUN MODE: Simulating issue creation without modifying GitHub or SQLite state.[/bold yellow]")
+
+    try:
+        result = await provision_story(
+            project=project,
+            plan=plan,
+            state_manager=state_manager,
+            dry_run=dry_run,
+            force=force,
+        )
+    except RuntimeError as e:
+        console.print(f"[bold red]❌ Safety Guard Violation:[/bold red] {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[bold red]❌ Provisioning Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    # Render summary table
+    table = Table(title=f"Provisioning Summary: {project.name}", header_style="bold cyan")
+    table.add_column("Type", style="bold")
+    table.add_column("Issue #", style="bold white")
+    table.add_column("Labels", style="green")
+    table.add_column("Title", style="white")
+
+    if result.get("parent_issue"):
+        p_info = result["parent_issue"]
+        p_num = str(p_info.get("issue_number") or "(dry-run)")
+        p_labels = ", ".join(p_info.get("labels", []))
+        table.add_row("PARENT", p_num, f"[magenta]{p_labels}[/magenta]", p_info.get("title", ""))
+
+    for c_info in result.get("child_issues", []):
+        c_type = c_info.get("type", f"SLICE {c_info.get('slice')}")
+        c_num = str(c_info.get("issue_number") or "(dry-run)")
+        c_labels = ", ".join(c_info.get("labels", []))
+        table.add_row(c_type, c_num, f"[yellow]{c_labels}[/yellow]", c_info.get("title", ""))
+
+    console.print(table)
+    if not dry_run:
+        console.print("[bold green]✓ Successfully provisioned and synchronized with SQLite blackboard![/bold green]")
+        console.print("DevTest node will automatically pick up Slice 1 on the next cycle pass.")
+
+
 
 if __name__ == "__main__":
     app()
+

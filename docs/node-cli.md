@@ -263,6 +263,28 @@ orchestrator supervisor status -p <project_name>
 
 ---
 
+### `orchestrator story provision`
+Deterministic upstream story provisioning command that parses `docs/draft-requisites/implementation-plan.md` and creates GitHub issues following Pattern A or Pattern B with zero runtime LLM token consumption.
+
+```bash
+orchestrator story provision <project_name> [OPTIONS]
+```
+
+**Options**:
+- `--file`, `-f <PATH>`: Path to implementation plan file (defaults to `docs/draft-requisites/implementation-plan.md`).
+- `--pattern`, `-p <TEXT>`: Explicit pattern override: `A` (standalone direct task $\le 300$ LOC) or `B` (decomposed feature $> 300$ LOC).
+- `--dry-run`: Simulates issue creation and displays the structured plan table without modifying GitHub or `state.db`.
+- `--force`: Bypasses the Single Active Feature Invariant check even if an active story lock is detected.
+- `--config`, `-c <PATH>`: Path to custom `config.yaml` file.
+
+**Safety Invariants**:
+- **Single Active Feature Invariant**: Pre-flight check inspects `StateManager.get_active_locked_story_id(project.name)`. If an active story is already held and `--force` is not passed, the command exits with code 1, preventing queue lock starvation.
+- **Triple-Redundancy Defense**: Pattern B immediately posts an issue comment on the parent linking all child issue numbers (`Child issues: #101, #102`) to guarantee child discovery against GitHub API search-lag.
+- **Immediate Blackboard Sync**: Issues and parent/child hierarchies are synchronized immediately with SQLite `sdlc_items` table via `poller.poll_project_sdlc_items`.
+
+---
+
+
 ## 🔁 Transient Upstream Error Retry Engine
 
 The `AsyncHarnessAdapter` integrates an in-memory automatic retry engine with exponential backoff and randomized jitter to handle transient upstream API errors (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502/504 Bad Gateway/Timeout, connection resets).
