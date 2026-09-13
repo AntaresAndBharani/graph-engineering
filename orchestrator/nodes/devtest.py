@@ -1124,6 +1124,7 @@ async def run_devtest_node(
                 "labels": [lbl for lbl in curr_labels if not any(t in lbl.lower() for t in (trigger, "ready-for-dev", "queued", "status:ready-for-dev", "status:queued"))],
             }],
         )
+        await state_manager.release_lock(target_issue_id, project.repo, "devtest")
         return False, f"Target issue #{target_issue_id} is already closed on GitHub. Synchronized state and skipped."
 
     issue_id = target_issue["number"]
@@ -1376,8 +1377,8 @@ async def run_devtest_node(
                 "gh", "pr", "list",
                 "--repo", project.repo,
                 "--head", branch_name,
-                "--state", "open",
-                "--json", "number,title,labels,headRefName,statusCheckRollup,mergeable",
+                "--state", "all",
+                "--json", "number,title,labels,headRefName,statusCheckRollup,mergeable,state",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -1392,6 +1393,52 @@ async def run_devtest_node(
 
     if existing_pr:
         pr_num = existing_pr["number"]
+        pr_state = str(existing_pr.get("state", "")).upper()
+
+        # If PR was already merged or closed during autonomous execution
+        if pr_state in ("MERGED", "CLOSED"):
+            # Ensure issue is marked dev-implemented and closed on GitHub
+            try:
+                p_edit = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "edit", str(issue_id),
+                    "--repo", project.repo,
+                    "--remove-label", trigger,
+                    "--add-label", output_label,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                await asyncio.wait_for(p_edit.communicate(), timeout=10.0)
+                p_close = await asyncio.create_subprocess_exec(
+                    "gh", "issue", "close", str(issue_id),
+                    "--repo", project.repo,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                await asyncio.wait_for(p_close.communicate(), timeout=10.0)
+            except Exception as e:
+                _logger.debug("Error updating issue #%s after merged PR: %s", issue_id, e)
+
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": issue_id,
+                    "title": issue_title,
+                    "state": "MERGED",
+                    "labels": [output_label],
+                    "linked_pr": pr_num,
+                }],
+            )
+
+            try:
+                await _advance_parent_and_unlock_next_subtask(project, state_manager, issue_id)
+            except Exception as ex:
+                _logger.debug("Parent advance after merged PR error: %s", ex)
+
+            await state_manager.release_lock(issue_id, project.repo, "devtest")
+            return True, f"DevTest subtask #{issue_id} verified: PR #{pr_num} already {pr_state}. Parent advance triggered."
+
         ran, msg = await _verify_and_auto_merge_pr(
             project=project,
             state_manager=state_manager,
