@@ -131,14 +131,21 @@ Every refined user story must be tracked in `docs/draft-requisites/implementatio
 
 ### Step 5: Issue Creation (Post-Approval & Direct DevTest Provisioning)
 Once the user explicitly approves:
-1. **Zero-Token Runtime Architect Bypass:** Pre-refined requirements do NOT use `needs-triage` (saving 100% of runtime Architect LLM tokens).
-2. **Provisioning Pattern Selection:**
-   - **Pattern A (Standalone Task, $\le 300$ LOC, $\le 4$ files):** Create a single issue labeled `ready-for-dev` directly (no parent, no child). DevTest executes directly via Fallback 1.
+1. **Deterministic CLI Provisioning (`/provision-story`):**
+   - Execute deterministic provisioning using the companion skill `/provision-story` or directly via CLI:
+     ```powershell
+     python -m orchestrator.cli story provision <project_name>
+     ```
+   - Pre-flight dry run is available via `--dry-run`.
+   - The CLI parses `docs/draft-requisites/implementation-plan.md`, verifies the Single Active Feature Invariant, creates issues via `gh` CLI, posts the triple-redundancy comment, and synchronizes SQLite `state.db` with 0 runtime LLM tokens.
+2. **Zero-Token Runtime Architect Bypass:** Pre-refined requirements do NOT use `needs-triage` (saving 100% of runtime Architect LLM tokens).
+3. **Provisioning Pattern Selection:**
+   - **Pattern A (Standalone Task, $\le 300$ LOC, $\le 4$ files):** Single issue labeled `ready-for-dev` directly (no parent, no child). DevTest executes directly via Fallback 1.
    - **Pattern B (Decomposed Feature Story, $> 300$ LOC):**
-     - Create a Parent Feature Issue labeled `architect-processed` with markdown checklist `- [ ] #<child_id>` in the body.
-     - Post an immediate comment on the Parent issue listing all child issue numbers (`Child issues: #101, #102`) for search-lag defense.
-     - Create Child Slice 1 labeled `ready-for-dev` with `Parent: #<parent_id>` in the body.
-     - Create Child Slices 2..N labeled `queued` with `Parent: #<parent_id>` in the body.
+     - Parent Feature Issue labeled `architect-processed` with markdown checklist `- [ ] #<child_id>` in the body.
+     - Immediate comment on Parent issue listing all child issue numbers (`Child issues: #101, #102`) for search-lag defense.
+     - Child Slice 1 labeled `ready-for-dev` with `Parent: #<parent_id>` in the body.
+     - Child Slices 2..N labeled `queued` with `Parent: #<parent_id>` in the body.
      - DevTest executes Slice 1, advances the parent checklist via native `_advance_parent_and_unlock_next_subtask`, unlocks Slice 2, and closes the parent upon completion.
-3. **Single Active Feature Invariant:** Provision only **one active feature parent story** (`architect-processed`) per project at a time. Backlog feature stories remain deferred or unprovisioned without `architect-processed` until the active feature merges.
+4. **Single Active Feature Invariant:** Provision only **one active feature parent story** (`architect-processed`) per project at a time. The CLI fails closed if an active story lock is detected. Backlog feature stories remain deferred or unprovisioned without `architect-processed` until the active feature merges.
 

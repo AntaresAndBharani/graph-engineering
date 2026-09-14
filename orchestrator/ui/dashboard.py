@@ -583,8 +583,8 @@ class DashboardApp(App):
             # Check if active lock exists for repo
             matching_jobs = [j for j in active_jobs if j.get("repo") == p.repo and j.get("status") == "RUNNING"]
             if matching_jobs:
-                # Sort matching jobs alphabetically by node_type for deterministic rendering
-                matching_jobs.sort(key=lambda j: str(j.get("node_type", "")))
+                # Sort matching jobs by node_type and latest started_at descending
+                matching_jobs.sort(key=lambda j: (str(j.get("node_type", "")), -float(j.get("started_at", 0) or 0)))
                 for idx, job in enumerate(matching_jobs):
                     node_type = job.get("node_type", "Working")
                     row_key = f"{p.name}::{node_type}"

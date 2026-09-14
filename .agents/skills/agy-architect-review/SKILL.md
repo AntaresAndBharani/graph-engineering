@@ -243,3 +243,11 @@ When decomposing requirements during `/agy-architect-review` or `/refine-story`,
 - Only **one active feature parent story** (`architect-processed`) may be provisioned per project at a time.
 - Backlog feature stories remain deferred or unprovisioned without `architect-processed` until the active feature merges and closes, preventing SQLite active story lock starvation.
 
+### 5. Deterministic CLI Automation (`/provision-story`)
+- Do NOT provision issues manually. Use the companion skill `/provision-story` or run the deterministic CLI command:
+  ```powershell
+  python -m orchestrator.cli story provision <project_name>
+  ```
+- Supports `--dry-run` for pre-flight verification, `--pattern A|B` overrides, and automatic triple-redundant comment posting.
+
+

@@ -476,7 +476,7 @@ Configuration is loaded once via `load_config()` at the presentation entry point
 8. **Disabled Node Resource Isolation**:
    - When a node is disabled in `config.yaml` (`enabled: false`), the orchestrator cycle must completely bypass its execution, worktree allocation, poller queries, and memory buffer initialization.
 9. **Pure Harness-Agnostic Agent Representation**:
-   - Model and reasoning effort formatting must use `format_node_agent_spec(model, effort)` with zero harness-specific branching or hardcoded strings, rendering `<model> (<effort>)` when effort is specified, `<model>` when omitted, and `—` for idle rows. Rendered in a dedicated 7th column across CLI and TUI tables.
+   - Model and reasoning effort formatting must use `format_node_agent_spec(model, effort)` with zero harness-specific branching or hardcoded strings, rendering `<model> (<effort>)` when effort is specified, `<model>` when omitted, and `—` for idle rows. Rendered in a dedicated 7th column `Agent Model` across CLI and TUI tables.
 10. **Centralized Reload Ownership & Multi-Worker Race Elimination**:
     - The reload signal (`reload_requested`) must be consumed solely by the dedicated `_daemon_reload_watcher` task. Worker loops must never call `hot_reload_runtime` or clear reload flags. Configuration state is shared via the thread/async-safe `ConfigHolder`.
 11. **SDLC Table Column Prioritization & Ellipsis Overflow**:
