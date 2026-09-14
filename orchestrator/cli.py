@@ -68,6 +68,22 @@ app.add_typer(config_app, name="config")
 console = Console(legacy_windows=False)
 
 
+def set_tui_mode(enabled: bool) -> None:
+    """Enables or disables TUI mode globally across cli and harness consoles to prevent stdout stream corruption."""
+    console.quiet = enabled
+    AsyncHarnessAdapter.set_tui_mode(enabled)
+    try:
+        import orchestrator.nodes.architect as ar
+        ar.console.quiet = enabled
+    except Exception:
+        pass
+    try:
+        import orchestrator.nodes.devtest as dt
+        dt.console.quiet = enabled
+    except Exception:
+        pass
+
+
 def version_callback(value: bool):
     if value:
         console.print(f"[bold cyan]Graph Orchestrator[/bold cyan] version [green]{__version__}[/green]")
@@ -1040,6 +1056,8 @@ async def _watch_daemon_tui(
 
     render_node_status_table(config, console_out=console)
 
+    set_tui_mode(True)
+
     quota_manager = QuotaManager(config, state_manager)
     app_instance = DashboardApp(
         config=config_holder,
@@ -1065,6 +1083,7 @@ async def _watch_daemon_tui(
         try:
             await app_instance.run_async()
         finally:
+            set_tui_mode(False)
             watcher_task.cancel()
             await app_instance.teardown()
             await state_manager.unregister_daemon()
@@ -1117,6 +1136,7 @@ async def _watch_daemon_tui(
         sync_task.cancel()
         tui_task.cancel()
     finally:
+        set_tui_mode(False)
         sync_task.cancel()
         watcher_task.cancel()
         for w in workers:
