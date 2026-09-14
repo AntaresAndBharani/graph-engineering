@@ -228,6 +228,7 @@ graph-engineering/
 │   ├── test_cli.py                  # CLI commands, lifecycle drain, and UI diagnostics tests
 │   ├── test_config.py               # Configuration loading and path expansion tests
 │   ├── test_dashboard.py            # Textual dashboard, log handler, offset handoff, and UI tests
+│   ├── test_dashboard_resilience.py # TUI terminal resize storms, zero geometry absorption, and redraw recovery tests
 │   ├── test_db.py                   # State manager, TTL, lowest-ID dispatch, and Blackboard tests
 │   ├── test_harness.py              # Subprocess harness execution and timeout tests
 │   ├── test_housekeeping.py         # 1-pass label sync, case-folding, and purge guard tests

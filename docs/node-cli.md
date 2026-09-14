@@ -77,6 +77,10 @@ When running `orchestrator watch` in an interactive terminal, the daemon launche
 8. **Graceful Teardown & Resource Cleanup**:
    - Pressing `Q` or sending `SIGINT` (`Ctrl+C`) triggers graceful shutdown.
    - Automatically unmounts Textual, cancels worker tasks, terminates all active harness subprocesses via `AsyncHarnessAdapter.terminate_all_active()`, unregisters the daemon PID from SQLite `state.db`, and restores terminal raw mode cleanly.
+9. **TUI Resize Resilience, F5/Ctrl+R Redraw & Watchdog Liveness Heartbeat**:
+   - **Resize Resilience (`on_resize`)**: Automatically handles terminal window resize events and display renegotiation upon docking/undocking. Momentary `0x0` geometry during display shifts is absorbed gracefully without crashing or throwing exceptions. When dimensions stabilize, layout is recalculated and widgets are re-synchronized.
+   - **Manual Display Re-Sync Action (`action_redraw_display`)**: Bound to `F5` and `Ctrl+R` to allow operators to trigger an immediate full layout and repaint refresh (`self.refresh(layout=True, repaint=True)`), clearing visual artifacts and re-synchronizing tables and log panes to current terminal dimensions.
+   - **Watchdog Liveness Heartbeat (`_watchdog_beat`)**: Executes every 1.0s to update internal timestamp (`_last_heartbeat_at`) and record liveness telemetry in SQLite (`StateManager.record_heartbeat`), ensuring clock and Last Updated timestamps continue advancing without blocking.
 
 ---
 
