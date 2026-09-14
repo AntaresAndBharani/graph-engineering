@@ -4836,3 +4836,128 @@ async def test_scenario_issue_191_log_record_and_poll_active_file_scroll_pinning
         assert log_view.is_vertical_scroll_end is False
         assert any("New pinned record" in line.text for line in log_view.lines)
 
+
+@pytest.mark.asyncio
+async def test_scenario_issue_199_resize_handler_and_zero_geometry_absorption(tmp_path: Path):
+    """
+    Scenario: Dashboard smoothly handles display renegotiation upon docking.
+    - Absorbs momentary 0x0 geometry without unhandled exceptions or crashing.
+    - Cleanly recalculates and repaints layout when dimensions return to normal.
+    - Last Updated and clock timestamps continue advancing normally.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="test-project",
+                repo="AntaresAndBharani/test-project",
+                local_path=str(tmp_path),
+            )
+        ]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager, selected_project="test-project")
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        table = app.query_one("#projects_table", DataTable)
+        await pilot.pause()
+
+        assert app._last_resize_size is not None
+        assert app._last_resize_size[0] > 0
+        assert app._last_resize_size[1] > 0
+
+        # Simulate momentary 0x0 geometry during display renegotiation / docking
+        await pilot.resize_terminal(0, 0)
+        await pilot.pause()
+        assert app._last_resize_size == (0, 0)
+        assert app.is_running is True
+
+        # Simulate resize to another geometry
+        await pilot.resize_terminal(120, 40)
+        await pilot.pause()
+        assert app._last_resize_size == (120, 40)
+        assert app.is_running is True
+        assert table.row_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_199_manual_display_resync_f5_and_ctrl_r(tmp_path: Path):
+    """
+    Scenario: Operator manually triggers display re-sync via keybinding.
+    - Pressing "f5" triggers action_redraw_display.
+    - Pressing "ctrl+r" triggers action_redraw_display.
+    - Forces immediate refresh(layout=True, repaint=True), updates table and bottom panes.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="test-project",
+                repo="AntaresAndBharani/test-project",
+                local_path=str(tmp_path),
+            )
+        ]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager, selected_project="test-project")
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+
+        # Press f5 to trigger redraw
+        await pilot.press("f5")
+        await pilot.pause()
+        assert app.is_running is True
+
+        # Press ctrl+r to trigger redraw
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert app.is_running is True
+
+
+@pytest.mark.asyncio
+async def test_scenario_issue_199_watchdog_liveness_heartbeat(tmp_path: Path):
+    """
+    Scenario: Watchdog liveness heartbeat operates periodically.
+    - _watchdog_beat runs every 1.0s and records liveness heartbeat in StateManager.
+    - _last_heartbeat_at advances over time.
+    """
+    db_path = tmp_path / "state.db"
+    state_manager = StateManager(db_path)
+    await state_manager.init_db()
+
+    config = GlobalConfig(
+        projects=[
+            ProjectConfig(
+                name="test-project",
+                repo="AntaresAndBharani/test-project",
+                local_path=str(tmp_path),
+            )
+        ]
+    )
+
+    app = DashboardApp(config=config, state_manager=state_manager, selected_project="test-project")
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        initial_hb = app._last_heartbeat_at
+        assert initial_hb > 0
+
+        # Directly invoke _watchdog_beat or let timer run
+        await app._watchdog_beat()
+        await pilot.pause()
+
+        assert app._last_heartbeat_at >= initial_hb
+
+        # Verify state_manager recorded heartbeat
+        info = await state_manager.get_daemon_info()
+        assert "heartbeat_at" in info
+        recorded_hb = float(info["heartbeat_at"])
+        assert recorded_hb >= initial_hb
+
+

@@ -535,6 +535,26 @@ class StateManager:
             )
             await db.commit()
 
+    async def record_heartbeat(self, epoch: Optional[float] = None) -> float:
+        """
+        Records watchdog liveness heartbeat in daemon_control.
+        Saves 'heartbeat_at' epoch and 'heartbeat_timestamp' formatted string.
+        Returns the recorded epoch timestamp.
+        """
+        now = epoch if epoch is not None else time.time()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            for k, v in [("heartbeat_at", str(now)), ("heartbeat_timestamp", now_str)]:
+                await db.execute(
+                    "INSERT INTO daemon_control (key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;",
+                    (k, v, now),
+                )
+            await db.commit()
+        return now
+
     async def acquire_lock(
         self,
         issue_id: str | int,
