@@ -47,7 +47,7 @@ def parse_decision_plan(plan_content: str, default_pattern: Optional[str] = None
 
     # 1. Extract User Story / Title
     story_match = re.search(
-        r"\*\*As a\*\*\s+(.*?)\s*\n\s*\*\*I want\*\*\s+(.*?)\s*\n\s*\*\*So that\*\*\s+(.*?)(?=\n\s*\n|\n---|---|\Z)",
+        r"\*\*As a(?:n)?\*\*\s+(.*?)\s*\n\s*\*\*I want\*\*\s+(.*?)\s*\n\s*\*\*So that\*\*\s+(.*?)(?=\n\s*\n|\n---|---|\Z)",
         final_text,
         re.DOTALL | re.IGNORECASE,
     )
