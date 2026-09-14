@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import rich.markup
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -82,6 +82,8 @@ class DashboardApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
         Binding("r", "refresh", "Refresh Status"),
+        Binding("f5", "redraw_display", "Redraw Display"),
+        Binding("ctrl+r", "redraw_display", "Redraw Display", show=False),
         Binding("space", "toggle_auto_scroll", "Toggle Auto-Scroll"),
         Binding("ctrl+l", "clear_logs", "Clear Logs"),
     ]
@@ -153,6 +155,9 @@ class DashboardApp(App):
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
         self.auto_scroll: bool = True
+        self._last_heartbeat_at: float = time.time()
+        self._last_resize_size: Optional[Tuple[int, int]] = None
+        self._watchdog_timer: Optional[Any] = None
         self.title = "Graph Orchestrator - TUI Dashboard"
         self._update_sub_title()
 
@@ -224,6 +229,19 @@ class DashboardApp(App):
 
         # Set non-blocking 2.0s refresh interval
         self.set_interval(2.0, self.update_projects_table)
+
+        # Start watchdog liveness heartbeat (1.0s interval)
+        self._watchdog_timer = self.set_interval(1.0, self._watchdog_beat)
+
+    async def _watchdog_beat(self) -> None:
+        """Watchdog liveness heartbeat executed every 1.0s to record liveness and audit responsiveness."""
+        now = time.time()
+        self._last_heartbeat_at = now
+        if self.state_manager:
+            try:
+                await self.state_manager.record_heartbeat(now)
+            except Exception:
+                pass
 
     async def hydrate_project_logs(
         self,
@@ -1150,6 +1168,46 @@ class DashboardApp(App):
         await self.update_projects_table()
         if self.selected_project:
             await self._update_bottom_panes(self.selected_project, force=True)
+
+    async def action_redraw_display(self) -> None:
+        """
+        Operator-triggered manual display re-sync via 'f5' or 'ctrl+r'.
+        Executes immediate full layout recalculation, repainting, and re-syncs
+        all tables and bottom panes to current terminal dimensions.
+        """
+        self.refresh(layout=True, repaint=True)
+        await self.update_projects_table()
+        if self.selected_project:
+            await self._update_bottom_panes(self.selected_project, force=True)
+
+    async def on_resize(self, event: events.Resize) -> None:
+        """
+        Handles terminal resize events and display renegotiation gracefully upon docking/undocking.
+        Absorbs momentary 0x0 geometry without unhandled exceptions or crashes.
+        When geometry is non-zero, triggers full layout recalculation and widget re-sync.
+        """
+        width, height = event.size.width, event.size.height
+        self._last_resize_size = (width, height)
+
+        # Gracefully handle momentary 0x0 geometry during display renegotiation / docking
+        if width <= 0 or height <= 0:
+            return
+
+        try:
+            self.refresh(layout=True, repaint=True)
+        except Exception:
+            pass
+
+        try:
+            await self.update_projects_table()
+        except Exception:
+            pass
+
+        if self.selected_project:
+            try:
+                await self._update_bottom_panes(self.selected_project, force=True)
+            except Exception:
+                pass
 
     async def action_quit(self) -> None:
         """
