@@ -86,11 +86,23 @@ def calculate_backoff_delay(attempt: int, config: HarnessRetryConfig) -> float:
 
 class AsyncHarnessAdapter:
     _active_processes: set[asyncio.subprocess.Process] = set()
+    _tui_mode: bool = False
     _stream_listeners: set[
         Callable[[Optional[str], Optional[str], str], None]
         | Callable[[Optional[str], str], None]
         | Callable[[str], None]
     ] = set()
+
+    @classmethod
+    def is_tui_mode(cls) -> bool:
+        """Returns True if TUI application mode is active, suppressing direct stdout console prints."""
+        return cls._tui_mode
+
+    @classmethod
+    def set_tui_mode(cls, enabled: bool) -> None:
+        """Enables or disables TUI mode, muting module-level console prints to avoid stdout corruption."""
+        cls._tui_mode = enabled
+        _console.quiet = enabled
 
     @classmethod
     def register_stream_listener(
@@ -260,7 +272,8 @@ class AsyncHarnessAdapter:
                             for subline in cleaned.splitlines():
                                 if subline.strip():
                                     formatted_line = f"  [dim cyan]{console_prefix}[/dim cyan] [dim]{subline}[/dim]"
-                                    _console.print(formatted_line)
+                                    if not AsyncHarnessAdapter.is_tui_mode():
+                                        _console.print(formatted_line)
                                     for listener in list(AsyncHarnessAdapter._stream_listeners):
                                         try:
                                             try:
@@ -340,7 +353,7 @@ class AsyncHarnessAdapter:
             err_msg = f"[ERROR] Binary '{self.binary}' for harness '{self.name}' not found in PATH."
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{err_msg}\n")
-            if console_prefix:
+            if console_prefix and not AsyncHarnessAdapter.is_tui_mode():
                 _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
             return 127
 
@@ -416,7 +429,7 @@ class AsyncHarnessAdapter:
             _logger.warning(warn_msg)
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{warn_msg}\n")
-            if console_prefix:
+            if console_prefix and not AsyncHarnessAdapter.is_tui_mode():
                 _console.print(f"  [bold yellow]{console_prefix}[/bold yellow] {warn_msg}")
 
             if eff_state_manager is not None:
@@ -484,7 +497,7 @@ class AsyncHarnessAdapter:
         _logger.error(err_msg)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"\n{err_msg}\n")
-        if console_prefix:
+        if console_prefix and not AsyncHarnessAdapter.is_tui_mode():
             _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
 
         if eff_state_manager is not None:

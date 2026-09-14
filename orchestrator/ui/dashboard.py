@@ -205,7 +205,8 @@ class DashboardApp(App):
         if self.log_handler:
             self.log_handler.callback = self._handle_log_record
 
-        # Register dashboard to receive live harness stream lines
+        # Register dashboard to receive live harness stream lines and ensure TUI stream safety
+        AsyncHarnessAdapter.set_tui_mode(True)
         AsyncHarnessAdapter.register_stream_listener(self._handle_harness_stream_line)
 
         # Initial render of project status table
@@ -1297,6 +1298,7 @@ class DashboardApp(App):
         Unregisters stream listeners and unregisters daemon PID from state.db.
         """
         AsyncHarnessAdapter.unregister_stream_listener(self._handle_harness_stream_line)
+        AsyncHarnessAdapter.set_tui_mode(False)
         if force:
             AsyncHarnessAdapter.terminate_all_active()
         if self.state_manager:
