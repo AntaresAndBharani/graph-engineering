@@ -2173,9 +2173,15 @@ def story_provision_command(
         "-c",
         help="Path to custom config.yaml file.",
     ),
+    parent_issue: Optional[int] = typer.Option(
+        None,
+        "--parent-issue",
+        "-I",
+        help="Existing parent issue number to update with architect-processed label and checklist.",
+    ),
 ):
     """Deterministically provisions upstream requirements to GitHub using Pattern A or Pattern B."""
-    asyncio.run(_run_story_provision(project_name, plan_file, pattern, dry_run, force, config_path))
+    asyncio.run(_run_story_provision(project_name, plan_file, pattern, dry_run, force, config_path, parent_issue))
 
 
 async def _run_story_provision(
@@ -2185,6 +2191,7 @@ async def _run_story_provision(
     dry_run: bool,
     force: bool,
     config_path: Optional[Path],
+    parent_issue: Optional[int] = None,
 ) -> None:
     from orchestrator.provisioning import parse_decision_plan, provision_story
 
@@ -2241,6 +2248,7 @@ async def _run_story_provision(
             state_manager=state_manager,
             dry_run=dry_run,
             force=force,
+            parent_issue_number=parent_issue,
         )
     except RuntimeError as e:
         console.print(f"[bold red]❌ Safety Guard Violation:[/bold red] {e}")

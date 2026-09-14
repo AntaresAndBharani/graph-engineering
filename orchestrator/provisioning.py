@@ -38,12 +38,12 @@ def parse_decision_plan(plan_content: str, default_pattern: Optional[str] = None
     sections = re.split(r"^#\s*📋\s*Implementation Plan", plan_content, flags=re.MULTILINE)
     active_section = sections[-1] if sections else plan_content
 
-    final_match = re.search(
+    final_matches = list(re.finditer(
         r"##\s*🎯\s*Final Decision Plan.*?(?=\n##(?=[^#])|\Z)",
         active_section,
         re.DOTALL,
-    )
-    final_text = final_match.group(0) if final_match else active_section
+    ))
+    final_text = final_matches[-1].group(0) if final_matches else active_section
 
     # 1. Extract User Story / Title
     story_match = re.search(
@@ -70,22 +70,28 @@ def parse_decision_plan(plan_content: str, default_pattern: Optional[str] = None
     # 2. Extract Subtasks / Slices
     slices: List[FunctionalSlice] = []
     
-    # Check for Subtask lines in INVEST or Subtask Breakdown
+    # Check for Subtask/Task/Slice lines in INVEST or Subtask Breakdown
     subtask_matches = re.findall(
-        r"(?:^|\n)\s*(?:\d+\.|\*|-)\s+\*\*Subtask\s+\d+\s*\(([^)]+)\)\s*:\*\*\s*(.+?)(?=\n\s*(?:\d+\.|\*|-)\s+\*\*Subtask|\n---|---|\Z)",
+        r"(?:^|\n)\s*(?:\d+\.|\*|-)\s+(?:\[[\sXx]?\]\s+)?\*\*(?:Subtask|Task|Slice)\s+\d+\s*\(([^)]+)\)\s*:\*\*\s*(.+?)(?=\n\s*(?:\d+\.|\*|-)\s+(?:\[[\sXx]?\]\s+)?\*\*(?:Subtask|Task|Slice)|\n---|---|\Z)",
         final_text,
         re.DOTALL,
     )
 
     if not subtask_matches:
-        # Alternate syntax: - Subtask 1: title
+        # Alternate syntax: - Subtask 1: title or - **Slice 1: title**
         subtask_matches = re.findall(
-            r"(?:^|\n)\s*(?:\d+\.|\*|-)\s+\*\*Subtask\s+\d+:\*\*\s*(.+?)(?=\n\s*(?:\d+\.|\*|-)\s+\*\*Subtask|\n---|---|\Z)",
+            r"(?:^|\n)\s*(?:\d+\.|\*|-)\s+(?:\[[\sXx]?\]\s+)?\*\*(?:Subtask|Task|Slice)\s+\d+:\s*([^*]+?)\*\*\s*(.+?)(?=\n\s*(?:\d+\.|\*|-)\s+(?:\[[\sXx]?\]\s+)?\*\*(?:Subtask|Task|Slice)|\n---|---|\Z)",
             final_text,
             re.DOTALL,
         )
-        if subtask_matches:
-            subtask_matches = [("", sm) for sm in subtask_matches]
+        if not subtask_matches:
+            subtask_matches = re.findall(
+                r"(?:^|\n)\s*(?:\d+\.|\*|-)\s+(?:\[[\sXx]?\]\s+)?\*\*(?:Subtask|Task|Slice)\s+\d+:\*\*\s*(.+?)(?=\n\s*(?:\d+\.|\*|-)\s+(?:\[[\sXx]?\]\s+)?\*\*(?:Subtask|Task|Slice)|\n---|---|\Z)",
+                final_text,
+                re.DOTALL,
+            )
+            if subtask_matches:
+                subtask_matches = [("", sm) for sm in subtask_matches]
 
     if subtask_matches:
         for idx, (bracket_info, detail) in enumerate(subtask_matches, start=1):
@@ -164,13 +170,14 @@ async def provision_story(
     state_manager: StateManager,
     dry_run: bool = False,
     force: bool = False,
+    parent_issue_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Executes Pattern A or Pattern B provisioning for the target project.
     """
     # Pre-Flight Safety Guard
     active_lock = await check_project_active_lock(project.name, state_manager)
-    if active_lock and not force:
+    if active_lock and not force and active_lock != parent_issue_number:
         raise RuntimeError(
             f"Project '{project.name}' currently has an active locked story #{active_lock}. "
             "Provisioning a new feature will cause queue starvation under Invariant 1. "
@@ -196,6 +203,7 @@ async def provision_story(
         else:
             result["parent_issue"] = {
                 "type": "PARENT",
+                "issue_number": parent_issue_number,
                 "title": plan.parent_title,
                 "labels": ["architect-processed"],
             }
@@ -212,12 +220,17 @@ async def provision_story(
     if plan.pattern == "A":
         # Pattern A: Standalone Task
         labels = ["ready-for-dev"]
-        issue_num = create_gh_issue(
-            repo=project.repo,
-            title=plan.parent_title,
-            body=plan.parent_body,
-            labels=labels,
-        )
+        if parent_issue_number:
+            issue_num = parent_issue_number
+            update_gh_issue_body(project.repo, issue_num, plan.parent_body)
+            run_gh_command(["gh", "issue", "edit", str(issue_num), "--repo", project.repo, "--add-label", "ready-for-dev", "--remove-label", "needs-triage"])
+        else:
+            issue_num = create_gh_issue(
+                repo=project.repo,
+                title=plan.parent_title,
+                body=plan.parent_body,
+                labels=labels,
+            )
         result["child_issues"].append({
             "issue_number": issue_num,
             "type": "STANDALONE",
@@ -226,14 +239,19 @@ async def provision_story(
         })
     else:
         # Pattern B: Decomposed Feature Story
-        # 1. Create Parent Issue
+        # 1. Create or Update Parent Issue
         parent_labels = ["architect-processed"]
-        parent_id = create_gh_issue(
-            repo=project.repo,
-            title=plan.parent_title,
-            body=plan.parent_body,
-            labels=parent_labels,
-        )
+        if parent_issue_number:
+            parent_id = parent_issue_number
+            update_gh_issue_body(project.repo, parent_id, plan.parent_body)
+            run_gh_command(["gh", "issue", "edit", str(parent_id), "--repo", project.repo, "--add-label", "architect-processed", "--remove-label", "needs-triage"])
+        else:
+            parent_id = create_gh_issue(
+                repo=project.repo,
+                title=plan.parent_title,
+                body=plan.parent_body,
+                labels=parent_labels,
+            )
         result["parent_issue"] = {
             "issue_number": parent_id,
             "type": "PARENT",
