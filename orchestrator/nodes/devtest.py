@@ -171,7 +171,11 @@ async def _remediate_refactor_pr(
         f"2. Fix the issues, bugs, or failing tests.\n"
         f"3. Run the local unit test suite and confirm that 100% of tests pass.\n"
         f"4. Commit your changes with a descriptive message: `refactor: address feedback for PR #{pr_number}`.\n"
-        f"5. Push the updated branch to `origin {branch_name}`.\n"
+        f"5. Push the updated branch to `origin {branch_name}`.\n\n"
+        f"SPEED & LIFECYCLE DIRECTIVES:\n"
+        f"- Fast local verification only: run local unit/component tests (e.g. pytest, npm test, ./gradlew testDebugUnitTest).\n"
+        f"- DO NOT launch Android emulators, iOS simulators, or full Maestro/E2E UI test suites.\n"
+        f"- DO NOT wait for remote GitHub Actions or poll CI (`gh run watch`). Once pushed, EXIT IMMEDIATELY; the orchestrator daemon will verify CI and auto-merge.\n"
     )
 
     adapter = AsyncHarnessAdapter(
@@ -1263,7 +1267,7 @@ async def run_devtest_node(
     # 4. Resolve Worktree & Pre-Flight Cleanup
     console.print(f"\n  [bold blue]⚡ [{project.name}:devtest][/bold blue] [bold white]Implementing Subtask #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
     console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_prefix}{issue_id} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
-    console.print(f"  [dim]• Scope: 3-Amigos TDD Development, Test Verification & PR Creation[/dim]")
+    console.print("  [dim]• Scope: 3-Amigos TDD Development, Test Verification & PR Creation[/dim]")
 
     exec_cwd = await WorktreeManager.ensure_worktree(project, "devtest")
 
@@ -1311,7 +1315,11 @@ async def run_devtest_node(
         f"3. Implement the minimal clean code required to make all tests pass.\n"
         f"4. Verify that the entire test suite and linter pass cleanly.\n"
         f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
-        f"6. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n"
+        f"6. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n\n"
+        f"SPEED & LIFECYCLE DIRECTIVES:\n"
+        f"- Fast local verification only: run local unit/component tests (e.g. pytest, npm test, ./gradlew testDebugUnitTest).\n"
+        f"- DO NOT launch Android emulators, iOS simulators, or full Maestro/E2E UI test suites (these run in remote CI).\n"
+        f"- DO NOT wait for remote GitHub Actions or poll CI (`gh run watch`). Once your PR is opened, EXIT IMMEDIATELY; the orchestrator daemon will verify CI and auto-merge.\n"
     )
 
     adapter = AsyncHarnessAdapter(
