@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from orchestrator.config import ProjectConfig
@@ -135,13 +134,23 @@ def run_gh_command(cmd: List[str]) -> Tuple[int, str, str]:
 
 
 def create_gh_issue(repo: str, title: str, body: str, labels: List[str]) -> int:
-    """Creates a GitHub issue and returns its issue number."""
-    cmd = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
-    for lbl in labels:
-        cmd.extend(["--label", lbl])
-    code, stdout, stderr = run_gh_command(cmd)
-    if code != 0:
-        raise RuntimeError(f"Failed to create issue in {repo}: {stderr or stdout}")
+    """Creates a GitHub issue and returns its issue number using a temp file to avoid WinError 206."""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as tf:
+        tf.write(body)
+        tf_path = tf.name
+
+    try:
+        cmd = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body-file", tf_path]
+        for lbl in labels:
+            cmd.extend(["--label", lbl])
+        code, stdout, stderr = run_gh_command(cmd)
+        if code != 0:
+            raise RuntimeError(f"Failed to create issue in {repo}: {stderr or stdout}")
+    finally:
+        try:
+            os.unlink(tf_path)
+        except OSError:
+            pass
     
     # stdout is the issue URL, e.g. https://github.com/AntaresAndBharani/graph-engineering/issues/197
     match = re.search(r"/issues/(\d+)", stdout)
@@ -151,17 +160,39 @@ def create_gh_issue(repo: str, title: str, body: str, labels: List[str]) -> int:
 
 
 def update_gh_issue_body(repo: str, issue_number: int, body: str) -> None:
-    cmd = ["gh", "issue", "edit", str(issue_number), "--repo", repo, "--body", body]
-    code, stdout, stderr = run_gh_command(cmd)
-    if code != 0:
-        raise RuntimeError(f"Failed to update issue #{issue_number} body: {stderr or stdout}")
+    """Updates a GitHub issue body using a temp file to avoid WinError 206."""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as tf:
+        tf.write(body)
+        tf_path = tf.name
+
+    try:
+        cmd = ["gh", "issue", "edit", str(issue_number), "--repo", repo, "--body-file", tf_path]
+        code, stdout, stderr = run_gh_command(cmd)
+        if code != 0:
+            raise RuntimeError(f"Failed to update issue #{issue_number} body: {stderr or stdout}")
+    finally:
+        try:
+            os.unlink(tf_path)
+        except OSError:
+            pass
 
 
 def post_gh_issue_comment(repo: str, issue_number: int, comment: str) -> None:
-    cmd = ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body", comment]
-    code, stdout, stderr = run_gh_command(cmd)
-    if code != 0:
-        raise RuntimeError(f"Failed to comment on issue #{issue_number}: {stderr or stdout}")
+    """Posts a GitHub issue comment using a temp file to avoid WinError 206."""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as tf:
+        tf.write(comment)
+        tf_path = tf.name
+
+    try:
+        cmd = ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body-file", tf_path]
+        code, stdout, stderr = run_gh_command(cmd)
+        if code != 0:
+            raise RuntimeError(f"Failed to comment on issue #{issue_number}: {stderr or stdout}")
+    finally:
+        try:
+            os.unlink(tf_path)
+        except OSError:
+            pass
 
 
 async def provision_story(
