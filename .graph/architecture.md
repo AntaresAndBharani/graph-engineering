@@ -16,12 +16,13 @@ The default operational architecture is a **Streamlined 2-Node Parallel Engine**
 
 The architecture is governed by **Zero-Token Idle Gating**: all repository inspections, issue status checks, label audits, pull request evaluations, mergeability scans, and development quiescence gates execute deterministically via local CLI tooling (GitHub CLI `gh`, Git, SQLite WAL) with zero token consumption. External AI harnesses are dispatched strictly when actionable tasks require deep reasoning, code implementation, INVEST story decomposition, semantic conflict resolution, or fail-closed architectural debt auditing during complete development quiescence.
 
-Furthermore, under the **Upstream Functional Slicing & Direct DevTest Assignment Protocol**, pre-refined requirements (whether Standalone Tasks or INVEST-sliced stories) bypass runtime Architect node triage completely, saving 100% of runtime triage and decomposition LLM tokens.
+Furthermore, under the **Upstream Functional Slicing & Direct DevTest Assignment Protocol** and the **Deterministic Story Provisioning Engine (`orchestrator/provisioning.py`)**, pre-refined requirements (whether Standalone Tasks or INVEST-sliced stories) bypass runtime Architect node triage completely, saving 100% of runtime triage and decomposition LLM tokens.
 
 ```mermaid
 flowchart TD
     subgraph Control Plane ["Autonomous Control Plane (graph-orchestrator)"]
         CLI["Typer / Rich CLI Adapter (`orchestrator/cli.py`)"]
+        Provisioner["Story Provisioning Engine (`orchestrator/provisioning.py`)"]
         Core["Worker Engine & Async Scheduler"]
         State[("SQLite WAL State Manager (`orchestrator/db.py`)")]
         Reloader["SourceWatcher & Hot Reloader (`orchestrator/reloader.py`)"]
@@ -55,8 +56,11 @@ flowchart TD
     end
 
     CLI --> Core
+    CLI --> Provisioner
     CLI --> LifecycleMgr
     CLI --> Dashboard
+    Provisioner --> GH
+    Provisioner --> State
     Core <--> State
     Core <--> Reloader
     Core <--> WorktreeMgr
@@ -77,7 +81,7 @@ flowchart TD
 | Node | Name | Default State | Primary Responsibility | Trigger Condition | Harness / Model Tier |
 |---|---|---|---|---|---|
 | **Node 1** | **Architect** (`architect.py`) | **Active / Enabled** (Producer) | Living architecture sync (7-day SLA, configurable via `research_enabled`), INVEST story decomposition, subtask linking, and PR architectural reviews. | Label `needs-triage` or Weekly SLA trigger | Pluggable Research Harness (`antigravity`/`gemini-3.8-flash-high`) / Primary (`claude-sonnet-5`) |
-| **Node 2** | **3-Amigos DevTest** (`devtest.py`) | **Active / Enabled** (Consumer) | Worktree-safe pre-flight git reset, deterministic lowest-ID task pickup (`issue_number ASC`), TDD test suite generation, clean implementation, autonomous PR opening, and auto-merge. | Label `ready-for-dev` or active story `queued` | Primary Implementation Harness (`antigravity` / `claude`) |
+| **Node 2** | **3-Amigos DevTest** (`devtest.py`) | **Active / Enabled** (Consumer) | Worktree-safe pre-flight git reset, deterministic lowest-ID task pickup (`issue_number ASC`), speed-constrained fast local unit verification, TDD implementation, autonomous PR opening, and merged PR discovery / auto-merge. | Label `ready-for-dev` or active story `queued` | Primary Implementation Harness (`antigravity` / `claude`) |
 | **Node 0** | **Supervisor** (`supervisor.py`) | **Optional / Disabled** | Consistency watchdog, proactive PO-proxy requirement evaluation, SHA-256 hash gating, and anomaly self-healing. Open issues remain valid regardless of age (legacy 12h SLA removed). | Scheduled interval (default 1h) or Label `needs-po-review` | Fast PO Evaluation (`antigravity`/`gemini-3.8-flash-high`) + Zero-token audit |
 | **Node 3** | **Reviewer Gatekeeper** (`reviewer.py`) | **Optional / Disabled** | Remote CI quality gate verification (100% green required), autonomous merge conflict resolution, and squash auto-merge. | Label `architect-approved` / `needs-architect-review` | Fast Conflict Harness (`antigravity`/`gemini-3.8-flash-high`) + Deterministic `gh` |
 | **Node 4** | **BAU Maintenance** (`bau.py`) | **Optional / Disabled** | Daily 24h maintenance sweep consolidating `tech-debt` and `enhancement` tickets into structured User Stories. | Daily interval (`bau_interval_seconds`, default 24h) | Cost-effective synthesis (`antigravity`/`gemini-3.8-flash-high`) |
@@ -91,7 +95,7 @@ flowchart TD
 |---|---|---|---|
 | **Runtime & Language** | Python | `>=3.11` | Modern `asyncio` primitives, `TaskGroup`, exception groups, enhanced type hinting (`typing.Self`, union `|`), and high-performance execution. |
 | **Build & Packaging** | Hatchling | PEP 517 / PEP 621 | Modern declarative metadata in `pyproject.toml`, reproducible wheel distribution, zero legacy setup scripts. |
-| **CLI & Terminal UX** | Typer + Rich + Textual | `typer>=0.12.0`, `rich>=13.7.0`, `textual>=0.50.0` | Declarative command routing with type annotations, interactive TUI observability dashboard (`DashboardApp`), bounded log streaming (`TextualLogHandler`), viewport scroll pinning, space-bar toggle, resize storm zero-geometry absorption, watchdog liveness heartbeat, and ANSI-stripped output streaming. |
+| **CLI & Terminal UX** | Typer + Rich + Textual | `typer>=0.12.0`, `rich>=13.7.0`, `textual>=0.50.0` | Declarative command routing with type annotations, sub-typer command hierarchies (`orchestrator story provision`), interactive TUI observability dashboard (`DashboardApp`), bounded log streaming (`TextualLogHandler`), viewport scroll pinning, space-bar toggle, resize storm zero-geometry absorption, watchdog liveness heartbeat, and ANSI-stripped output streaming. |
 | **Configuration & Validation** | Pydantic v2 | `pydantic>=2.6.0` | Rust-backed schema validation, cross-platform path resolution (`~`, `$HOME`, `%USERPROFILE%`), strict runtime validation, and hot-reload model rebuilding (`OrchestratorBaseModel`, `TechDebtConfig`). |
 | **Persistence & State Engine** | aiosqlite (SQLite WAL) | `aiosqlite>=0.20.0` | Asynchronous file-based persistence, Write-Ahead Logging (WAL) concurrency, deterministic TTL distributed locking, idempotent migrations, watchdog heartbeat persistence, and Artifact Blackboard store. |
 | **Process & Subprocess Lifecycle** | psutil | `psutil>=5.9.0` | Cross-platform recursive process tree inspection, child process termination, graceful daemon shutdown, and PID liveness validation. |
@@ -108,7 +112,7 @@ The system follows a strict **Hexagonal Architecture (Ports and Adapters)** / Co
 ```mermaid
 graph TD
     subgraph Layer 4: Presentation & UI Adapters (Inbound Adapters)
-        CLI_Commands["Typer CLI Commands (`orchestrator/cli.py`)"]
+        CLI_Commands["Typer CLI Commands (`orchestrator/cli.py`)\n- daemon/run/start/stop/watch\n- story provision"]
         TUI_Dashboard["Textual TUI Observability Dashboard (`orchestrator/ui/dashboard.py`)"]
         UI_Widgets["Textual Widgets (`orchestrator/ui/widgets.py`)\n- ConfigStatusBanner\n- SDLCProgressWidget\n- HarnessQuotaWidget\n- AnomalyAlertsWidget"]
         Rich_Formatters["Rich Terminal Formatters, Tables & Live Views"]
@@ -121,6 +125,7 @@ graph TD
         ReviewerNode["Reviewer Node (`orchestrator/nodes/reviewer.py`)"]
         BAUNode["BAU Node (`orchestrator/nodes/bau.py`)"]
         TechDebtNode["Tech Debt Node (`orchestrator/nodes/tech_debt.py`)"]
+        ProvisioningEngine["Story Provisioning Engine (`orchestrator/provisioning.py`)"]
         LifecycleRunner["Lifecycle Runner & Drain Engine (`orchestrator/cli.py`)"]
     end
 
@@ -132,12 +137,14 @@ graph TD
         Housekeeping["Label Provisioner (`orchestrator/housekeeping.py`)"]
         ReloaderWatcher["Deterministic Reloader (`orchestrator/reloader.py`)"]
         WorktreeMgr["Worktree Manager (`orchestrator/worktree.py`)"]
+        GHCommandRunner["Safe GitHub CLI Runner (`orchestrator/provisioning.py`)"]
     end
 
     subgraph Layer 1: Domain Core & Configuration (Inward Entities & Protocols)
         ConfigDomain["Configuration Models & Schemas (`orchestrator/config.py`)"]
         LoggingDomain["Logging Protocols, LogQueryResult & ANSI Utilities (`orchestrator/logging.py`)"]
         TokenUsageProtocol["TokenUsageReader Protocol (`orchestrator/quota.py`)"]
+        ProvisioningEntities["Provisioning Entities (`FunctionalSlice`, `ProvisioningPlan`)"]
     end
 
     Layer 4 --> Layer 3
@@ -148,37 +155,41 @@ graph TD
 
 ### Separation of Concerns
 
-1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`, `TokenUsageReader` protocol)**:
-   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), quota configuration structures (`HarnessQuotaConfig`, `WindowLimitConfig`, `QuotaSettings`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `TechDebtConfig`, `SettingsConfig`).
-   - Strictly isolated from concrete execution logic, database calls, and network I/O.
+1. **Domain Core Layer (`orchestrator/config.py`, `orchestrator/logging.py`, `TokenUsageReader` protocol, Provisioning Entities)**:
+   - Holds core immutable entities, taxonomy schemas (`managed_labels`), harness definitions (`HarnessConfig`), quota configuration structures (`HarnessQuotaConfig`, `WindowLimitConfig`, `QuotaSettings`), provisioning entities (`FunctionalSlice`, `ProvisioningPlan`), and configuration data structures (`GlobalConfig`, `ProjectConfig`, `NodeConfig`, `TechDebtConfig`, `SettingsConfig`).
+   - Strictly isolated from concrete execution logic, database calls, subprocesses, and network I/O.
    - Defines the `@runtime_checkable` `TokenUsageReader` Protocol decoupling quota mathematics from SQLite persistence.
    - Provides pure path normalization, cross-platform environment resolution (`resolve_path`), in-memory bounded project-scoped log buffering with `(node_name, line)` tuple storage, compound node family scope matching (`matches_node_scope`), independent node filtering, disk-tailing fallback (`ProjectLogBufferManager`), bounded log streaming (`TextualLogHandler`), and typed result contracts (`LogQueryResult`).
 
-2. **Infrastructure & Outbound Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`, `orchestrator/worktree.py`)**:
+2. **Infrastructure & Outbound Adapters Layer (`orchestrator/db.py`, `orchestrator/harness.py`, `orchestrator/quota.py`, `orchestrator/poller.py`, `orchestrator/housekeeping.py`, `orchestrator/reloader.py`, `orchestrator/worktree.py`, `orchestrator/provisioning.py:run_gh_command`)**:
    - Manages state persistence, idempotent migrations, distributed locking, watchdog heartbeat telemetry (`record_heartbeat`), and Blackboard artifacts via SQLite WAL transactions (`StateManager`).
    - Implements multi-window rolling quota calculations, dual-window (short/weekly) status evaluation, predictive operational runway forecasting, human-readable replenishment countdown formatting, burn velocity tracking, and replenishment ETA projections (`QuotaManager`).
    - Manages creation, synchronization, safe removal, stash protection (`git stash push -u`), and pruning of ephemeral git worktrees per node and project with serial execution fallback (`WorktreeManager`). Hardened with 30.0s subprocess timeout guards and detached HEAD upstream checkout (`checkout_detached_upstream`) to prevent branch collision deadlocks (`fatal: 'main' is already checked out`).
    - Implements asynchronous process execution, process tree lifecycle, ANSI-sanitized log streaming with `(project_name, node_name, line)` listener callbacks, console stream safety during TUI mode (`_tui_mode`, `is_tui_mode`, `set_tui_mode`), and harness-level telemetry anomaly event production (`AsyncHarnessAdapter` writing retry/timeout anomalies to `anomaly_events`).
    - Interacts with GitHub via zero-token subprocess calls (`fetch_issues_with_label`, `fetch_all_open_issues`, `fetch_open_prs`, `fetch_issue_by_number`, `sync_repository_labels`), with dormant node polling bypass.
+   - Implements safe GitHub CLI execution with temporary file `--body-file` redirection (`create_gh_issue`, `update_gh_issue_body`, `post_gh_issue_comment`) to eliminate Windows `WinError 206` command-line length limits.
    - Manages dynamic file modification inspection and module reloading (`SourceWatcher`, `ConfigHolder`, `hot_reload_runtime`).
 
-3. **Application Pipeline Nodes & Use Cases Layer (`orchestrator/nodes/*`, `orchestrator/cli.py:lifecycle`)**:
+3. **Application Pipeline Nodes & Use Cases Layer (`orchestrator/nodes/*`, `orchestrator/provisioning.py`, `orchestrator/cli.py:lifecycle`)**:
    - Houses the discrete workflow engines representing each stage of the engineering lifecycle:
      - **Default Active 2-Node Parallel Engine**:
        - `node-architect` (Node 1: Producer): Story triage, mandatory INVEST decomposition for complex specifications, living architecture plane synchronization (7-day SLA, configurable via `research_enabled`), and PR architectural reviews.
-       - `node-devtest` (Node 2: Consumer): Pre-flight worktree-safe git reset (`git fetch origin main && git reset --hard origin/main`), deterministic lowest-ID task pickup (`StateManager.get_next_devtest_task`), test-driven implementation, local/CI verification, autonomous auto-merge, pull request generation, and sequential parent advancement (`_advance_sequential_subtask`).
+       - `node-devtest` (Node 2: Consumer): Pre-flight worktree-safe git reset (`git fetch origin main && git reset --hard origin/main`), deterministic lowest-ID task pickup (`StateManager.get_next_devtest_task`), speed-constrained fast local unit verification, TDD implementation, autonomous auto-merge, pull request generation, already merged/closed PR discovery, and sequential parent advancement (`_advance_parent_and_unlock_next_subtask`).
      - **Modular Optional Governance Nodes (Disabled by Default)**:
        - `node-supervisor` (Node 0: Watchdog & PO-Proxy): Watchdog auditing, PO-proxy Gherkin evaluation, SHA-256 hash gating, and conflict self-healing. Open issues remain valid regardless of age.
        - `node-reviewer` (Node 3: Quality Gatekeeper): Dedicated remote CI quality gate verification (100% green requirement), autonomous merge conflict resolution, and auto-merge execution.
        - `node-bau` (Node 4: Maintenance Sweep): Daily 24-hour maintenance sweep synthesizing tech debt into structured User Stories.
        - `node-tech-debt` (Node 5: Quality Audit): Fail-closed architectural technical debt and test gap auditor dispatching validated User Stories into the SDLC backlog during development quiescence (`is_project_fully_quiescent`), with decoupled commit SHA caching (`origin/main`) and cooldown interval throttling (`tech_debt_interval_seconds: 14400`).
+     - **Deterministic Upstream Story Provisioning Engine (`orchestrator/provisioning.py`)**:
+       - Deterministic Python engine translating approved implementation plans (`parse_decision_plan`) into GitHub issues and SQLite `sdlc_items` under Pattern A (Standalone) or Pattern B (Decomposed Feature), strictly enforcing the Single Active Feature Invariant (`check_project_active_lock`).
      - **Lifecycle Drain Engine (`orchestrator start`)**:
        - Executes worker passes with `exit_when_idle=True`, evaluating `is_project_queue_drained`. Gated to prevent premature exit while feature-branch PR CI checks are running (`RUNNING`, `PENDING`, `PASS`), continuing through CI verification, auto-merge, and subsequent sequential subtasks. Tracks dedicated `lifecycle_pid` in SQLite `daemon_control`.
 
 4. **Presentation & CLI Layer (`orchestrator/cli.py`, `orchestrator/ui/dashboard.py`, `orchestrator/ui/widgets.py`)**:
    - Pure UI adapter handling command-line arguments, options (`--dashboard/--no-dashboard`, `--headless`), terminal dashboards (`DashboardApp`), and signal handling.
+   - Sub-Typer commands: `orchestrator story provision` (with `--file`, `--pattern`, `--parent-issue`, `--dry-run`, `--force`).
    - Encapsulates modular Textual widgets (`ConfigStatusBanner`, `SDLCProgressWidget`, `AnomalyAlertsWidget`, `HarnessQuotaWidget`) as read-only consumers of the SQLite Blackboard, `ConfigHolder`, and `QuotaManager` via Dependency Injection.
-   - Commands: `run`, `start` (dedicated node lifecycle with queue drain through pending PR CI), `watch` (with interactive Textual TUI dashboard and headless fallback), `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `config reload`, `reload`, `artifact`, `artifacts`, `supervisor`.
+   - Commands: `run`, `start` (dedicated node lifecycle with queue drain through pending PR CI), `watch` (with interactive Textual TUI dashboard and headless fallback), `story provision`, `list`, `init`, `labels`, `doctor`, `ingest`, `clean`, `logs`, `pause`, `resume`, `stop`, `config reload`, `reload`, `artifact`, `artifacts`, `supervisor`.
    - Advanced TUI Observability Architecture:
      - **Resize Storm Resilience & Zero-Geometry Absorption**: Absorbs momentary `0x0` geometry transitions during display renegotiation/docking without unhandled crashes, triggering full layout recalculation and widget re-sync upon non-zero dimension recovery.
      - **Watchdog Liveness Heartbeat**: 1.0s periodic timer recording heartbeat timestamps in SQLite via `record_heartbeat`.
@@ -188,7 +199,7 @@ graph TD
      - **Stream-Disk Coordination Latch**: Debounce latch skipping disk polls if live stream data arrived within 2.0 seconds.
      - **Edge-Triggered Completion Boundary Marker**: Appends `[dim]── Execution completed ──[/dim]` exactly once when a project transitions from `RUNNING` to `IDLE`.
      - **Binary-Mode Incremental Disk Tailer**: Seeks strictly by byte offsets in `"rb"` mode and decodes UTF-8 with error replacement to eliminate line duplication, dropped chunks, or Windows CRLF encoding stalls.
-     - **DataTable Dual-Event Binding**: Dual-bound to both `RowHighlighted` (instant navigation) and `RowSelected` (explicit click/Enter), with deterministic compound lane selection for parent projects vs nested child nodes (`└─ devtest`).
+     - **DataTable Dual-Event Binding & Recency Ordering**: Dual-bound to both `RowHighlighted` (instant navigation) and `RowSelected` (explicit click/Enter), with deterministic compound lane selection and sorting of active jobs by `node_type` and descending `started_at` (`-float(started_at)`).
 
 ---
 
@@ -196,6 +207,11 @@ graph TD
 
 ```text
 graph-engineering/
+├── .agents/                         # Agent instructions and companion skills
+│   └── skills/                      # Custom operational skills
+│       ├── agy-architect-review/    # Tri-Party Review Council skill & orchestrator
+│       ├── provision-story/         # Deterministic upstream story provisioning skill
+│       └── user-story-refining/     # 3-Amigos user story refinement skill
 ├── .github/                         # GitHub Actions CI workflows, issue templates
 │   └── workflows/
 │       └── ci.yml                   # CI pipeline (Python 3.11 & 3.12, pytest, build)
@@ -217,13 +233,14 @@ graph-engineering/
 │   └── node-tech-debt.md            # Node 5 specification (Optional / Disabled)
 ├── orchestrator/                    # Primary Python package root
 │   ├── __init__.py                  # Package metadata and __version__
-│   ├── cli.py                       # Typer CLI application, daemon runner & lifecycle engine
+│   ├── cli.py                       # Typer CLI application, daemon runner, lifecycle & story commands
 │   ├── config.py                    # Pydantic v2 schemas and path resolution utilities
 │   ├── db.py                        # Asynchronous SQLite state, distributed lock & blackboard manager
 │   ├── harness.py                   # Pluggable AI CLI adapter with retry engine and TUI stream safety
 │   ├── housekeeping.py              # GitHub label provisioning and taxonomy synchronization
 │   ├── logging.py                   # Unified file/console logging, ANSI sanitization, LogQueryResult
 │   ├── poller.py                    # Zero-token GitHub CLI/GraphQL query abstraction
+│   ├── provisioning.py              # Deterministic upstream story provisioning engine & gh file runner
 │   ├── quota.py                     # Multi-window rolling token quota, burn velocity & replenishment ETA
 │   ├── reloader.py                  # Hot-reloading watcher, ConfigHolder & module re-importer
 │   ├── worktree.py                  # Ephemeral git worktree manager, detached HEAD checkout & fallback
@@ -260,6 +277,7 @@ graph-engineering/
 │   ├── test_poller.py               # Zero-token GitHub CLI/GraphQL poller tests
 │   ├── test_poller_quota.py         # Poller quota integration tests
 │   ├── test_project_pause.py        # Per-project pause/resume lifecycle tests
+│   ├── test_provisioning.py         # Deterministic upstream story provisioning & regex tests
 │   ├── test_quota.py                # QuotaManager, velocity, runway gating, and token parser tests
 │   ├── test_reloader.py             # Hot reloading, ConfigHolder, and source watcher tests
 │   ├── test_sequential_pipeline.py  # Story locking, ascending dispatch, and advancement tests
@@ -278,7 +296,7 @@ graph-engineering/
 
 - **One Domain Per Node**: Every node in `orchestrator/nodes/` must expose a clear public entry point: `run_<nodename>_node(project, config, state_manager) -> tuple[bool, str]`.
 - **Zero-Token Pre-Gating**: Node entry functions must check deterministic conditions (labels, SLAs, schedule intervals, quiescence states) before performing any state locking or subprocess spawning.
-- **Pure Function Extraction**: Business logic (e.g. anomaly detection, git URL parsing, timestamp parsing, mathematical runway forecasting, CI status rollup derivation) must be separated into pure helper functions to ensure 100% testability with unit mocks.
+- **Pure Function Extraction**: Business logic (e.g. plan parsing, anomaly detection, git URL parsing, timestamp parsing, mathematical runway forecasting, CI status rollup derivation) must be separated into pure helper functions to ensure 100% testability with unit mocks.
 - **Explicit Typing**: All functions must have complete type annotations (`from __future__ import annotations`).
 - **Disabled Node Resource Isolation**: CLI loops, pollers, and schedulers must never allocate resources (memory buffers, git worktrees, network polls) for disabled nodes (`node.enabled == False`).
 - **Startup Node Status Registry**: CLI daemon initialization must render a formatted Rich status table registering all project nodes, their repository, enabled status, harness, concurrency mode, and pure harness-agnostic agent model in a dedicated 7th column.
@@ -333,7 +351,7 @@ The `orchestrator start <project> [-n <node>]` command provides a dedicated, sel
 To prevent multi-agent task competition, pipeline stalls, and out-of-order execution:
 - **Ascending Task Pickup (`issue_number ASC`)**: In `StateManager.get_next_devtest_task`, open child subtasks under the active locked parent story are evaluated strictly by `issue_number ASC` regardless of label (`queued` or `ready-for-dev`), eliminating deadlocks caused by label mismatch.
 - **Fallback 1 Window**: Queries up to `LIMIT 10` standalone tasks and iterates skipping blocked (`_is_blocked`) or in-progress (`_is_in_progress`) items to prevent pipeline stalls.
-- **Sequential Advancement (`_advance_sequential_subtask`)**: Strictly excludes merged, closed, and blocked subtasks and selects `min(number)` for safe sequential parent story advancement.
+- **Sequential Advancement (`_advance_parent_and_unlock_next_subtask`)**: Strictly excludes merged, closed, and blocked subtasks and selects `min(number)` for safe sequential parent story advancement.
 - **Duplicate PR Prevention Guard**: DevTest Phase 3 checks `linked_pr` in `sdlc_items` and open GitHub PR refs (`gh pr list --head feat/issue-<id>`) to prevent redundant LLM harness re-dispatch while waiting for Phase 2 CI verification.
 
 ### 4. Upstream Functional Story Slicing & Direct DevTest Assignment Protocol
@@ -343,14 +361,46 @@ To maximize efficiency and eliminate unnecessary LLM token consumption:
 - **Pattern B (Decomposed Feature Story $> 300$ LOC)**: Parent issue labeled `architect-processed`, immediate parent comment linking child issue IDs for search-lag defense, Child Slice 1 labeled `ready-for-dev`, and Child Slices 2..N labeled `queued`.
 - **Single Active Feature Invariant**: Exactly one parent feature story is actively unlocked per project at any given time, preventing worktree collisions and lock contention.
 
-### 5. Tri-Party Review Council & Claude QA Guardian Protocol (`agy-architect-review`)
+### 5. Deterministic Upstream Story Provisioning Engine (`orchestrator/provisioning.py`)
+To automate the Upstream Functional Story Slicing protocol with zero runtime LLM tokens:
+- **Implementation Plan Parser (`parse_decision_plan`)**: Deterministically extracts user stories and subtasks/slices from the `## 🎯 Final Decision Plan` section of `docs/draft-requisites/implementation-plan.md` using robust regex matching supporting `**Slice N: <title>**`, `**Task N: <title>**`, and `**Subtask N (...)**` syntaxes.
+- **Single Active Feature Invariant Gate (`check_project_active_lock`)**: Inspects SQLite state for existing active locked stories before provisioning. Fails closed with `RuntimeError` and exit code 1 if an active lock is held, unless overridden via `--force` or targeting an existing parent issue via `--parent-issue` / `-I`.
+- **Windows Command Length File Redirection**: All GitHub CLI issue creation, editing, and commenting operations use temporary file `--body-file` redirection (`create_gh_issue`, `update_gh_issue_body`, `post_gh_issue_comment`) with fail-safe unlinking in `finally` blocks, completely eliminating Windows `WinError 206` (filename/command too long).
+- **Triple-Redundancy Linkage Defense**: For Pattern B stories, child IDs are (1) appended as a checklist to the parent body, (2) posted as an immediate comment `Child issues: #...` to defeat GitHub API search lag, and (3) synchronized immediately into SQLite `sdlc_items` via `poller.poll_project_sdlc_items`.
+
+```mermaid
+flowchart TD
+    PlanFile["Approved Plan File\n(`docs/draft-requisites/implementation-plan.md`)"] --> Parser["parse_decision_plan()"]
+    Parser --> InvariantCheck{"check_project_active_lock()\nActive Story Locked?"}
+    InvariantCheck -- Yes (No --force) --> Halt["Raise RuntimeError & Exit Code 1\n(Prevents Lock Starvation)"]
+    InvariantCheck -- No / Overridden --> PatternChoice{"Pattern Decision\n(A or B)"}
+
+    PatternChoice -- Pattern A (<= 300 LOC) --> CreateA["create_gh_issue() via --body-file\nLabel: 'ready-for-dev'"]
+    PatternChoice -- Pattern B (> 300 LOC) --> CreateB["create_gh_issue() Parent\nLabel: 'architect-processed'"]
+    CreateB --> CreateSlices["create_gh_issue() Slices\nSlice 1: 'ready-for-dev'\nSlices 2..N: 'queued'"]
+    CreateSlices --> UpdateParent["update_gh_issue_body()\nAppend Checklist: - [ ] #<id>"]
+    UpdateParent --> PostComment["post_gh_issue_comment()\n'Child issues: #1, #2' (Search-Lag Defense)"]
+
+    CreateA --> SyncDB["poller.poll_project_sdlc_items()\nImmediate SQLite WAL Re-sync"]
+    PostComment --> SyncDB
+    SyncDB --> DevTestReady["DevTest Picks Up Slice 1 on Next Cycle"]
+```
+
+### 6. Autonomous DevTest Speed & Lifecycle Directives
+To accelerate turnaround velocity and prevent resource exhaustion:
+- **Fast Local Verification Only**: Autonomous DevTest prompts explicitly restrict local test execution to fast, headless unit/component test suites (e.g. `pytest`, `npm test`, `./gradlew testDebugUnitTest`).
+- **Heavy UI / Emulator Prohibitions**: Ephemeral worktree agents are strictly prohibited from launching Android emulators, iOS simulators, or full Maestro/E2E UI test suites. These are offloaded entirely to remote GitHub Actions CI.
+- **Immediate Exit on PR Open / Push**: Agents are instructed to exit immediately upon opening a Pull Request or pushing remediated branch commits, strictly prohibiting idle polling on remote GitHub Actions (`gh run watch`). Remote CI verification and auto-merging are delegated asynchronously to the orchestrator daemon's Phase 2 poller and supervisor.
+- **Merged/Closed PR Discovery**: DevTest head-branch PR discovery queries `--state all`. If a PR was already merged or closed during execution, DevTest marks the issue `dev-implemented`, closes it on GitHub, triggers `_advance_parent_and_unlock_next_subtask`, synchronizes SQLite SDLC items, and releases active locks cleanly.
+
+### 7. Tri-Party Review Council & Claude QA Guardian Protocol (`agy-architect-review`)
 For architectural refinement of complex epics:
 - **Tri-Party Council**: Consists of Author Agent (proposal formulation), Gemini Architect (`gemini-3.8-flash-high` via `agy` CLI evaluating concurrency, scalability, and system architecture), and Claude QA Guardian (`sonnet` with `low` effort via `claude` CLI evaluating requirements fidelity, anti-drift, and UX/UI / functional correctness).
 - **Single Medium of Truth**: All debate rounds iterate strictly through `docs/draft-requisites/implementation-plan.md`.
 - **Dual-Consensus Approval Gate**: Requires unanimous agreement (`VERDICT: AGREED` from both Gemini Architect and Claude QA Guardian) before a plan is approved for provisioning.
 - **Persistent Session Continuity**: Native session resumption (`agy -c` / `claude -r`) preserves context across debate rounds while maximizing prompt caching and slashing token costs by ~60–70%.
 
-### 6. Pluggable AI Harness Adapter & Upstream Retry Engine (`AsyncHarnessAdapter`)
+### 8. Pluggable AI Harness Adapter & Upstream Retry Engine (`AsyncHarnessAdapter`)
 All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to a unified interface. The system constructs commands dynamically based on configured flags (`--model`, `--effort`, timeout limits), ensuring that swapping models requires zero code modifications.
 
 `AsyncHarnessAdapter` incorporates an in-memory **Transient Upstream Error Retry Engine**:
@@ -361,35 +411,36 @@ All AI execution engines (Claude Code CLI, Antigravity CLI, Devin CLI) adhere to
 - **Terminal Exhaustion Protection**: Caps retries at `max_retries` before surfacing terminal failures to the calling node.
 - **Harness-Level Blackboard Telemetry Producer**: Interacts directly with `StateManager` (`record_anomaly_event`) to persist categorized transient anomalies and execution timeouts into `anomaly_events`.
 
-### 7. Console Stream Safety & TUI Presentation Mode Isolation
+### 9. Console Stream Safety & TUI Presentation Mode Isolation
 When running the Textual TUI observability dashboard (`orchestrator watch`):
 - **Console Stream Safety**: Activated globally via `set_tui_mode(True)` in `orchestrator/cli.py` and `AsyncHarnessAdapter.set_tui_mode(True)`. Mutes module-level console prints (`_console.quiet = True`) and guards stdout/stderr emissions with `if not AsyncHarnessAdapter.is_tui_mode():`.
 - **Stream Listener Multiplexing**: While raw console output is muted to prevent corrupting the TUI terminal screen, lines continue to be broadcast in real time to registered `_stream_listeners` for live rendering in the Textual `RichLog` pane.
 - **Fail-Safe Mode Reset**: Cleanly resets `set_tui_mode(False)` upon `DashboardApp.teardown()` and within `finally` blocks, restoring normal terminal output.
 
-### 8. Terminal Resize Resilience, Zero Geometry Absorption & Watchdog Heartbeat
+### 10. Terminal Resize Resilience, Zero Geometry Absorption & Watchdog Heartbeat
 - **Zero-Geometry Absorption (`on_resize`)**: Terminal resize events generated by docking/undocking, monitor switching, or tiling window managers often produce momentary `0x0` dimensions. `DashboardApp.on_resize()` intercepts `event.size`, absorbs non-positive dimensions gracefully without crashing or throwing exceptions, and triggers full layout recalculation (`self.refresh(layout=True, repaint=True)`) and widget re-sync once valid geometry returns.
 - **Operator Redraw Action (`action_redraw_display`)**: Bound to `f5` and `ctrl+r`, allowing operators to manually force an immediate display refresh, clearing visual glitches and synchronizing all tables and log panes.
 - **Watchdog Liveness Heartbeat**: A dedicated 1.0s periodic timer (`_watchdog_beat`) updates `_last_heartbeat_at` and persists the epoch timestamp to SQLite via `StateManager.record_heartbeat`, providing an authoritative audit of daemon responsiveness and preventing false stall detections.
 
-### 9. Native RichLog Viewport Pinning & Space-Bar Auto-Scroll Toggle Integration
+### 11. Native RichLog Viewport Pinning & Space-Bar Auto-Scroll Toggle Integration
 - **Native Viewport Pinning**: Live stream writes evaluate Textual's native `log_view.is_vertical_scroll_end`. If the operator scrolls upward to inspect history, incoming lines append without yanking the scrollbar back to the bottom.
 - **Space-Bar Auto-Scroll Toggle**: Pressing `space` toggles `self.auto_scroll`. When auto-scroll is disabled, new lines append silently at the bottom while preserving operator viewport position. When enabled and the operator scrolls to the bottom, automatic pinning resumes seamlessly.
 
-### 10. Stream-Disk Coordination Latch & Edge-Triggered Completion Marker
+### 12. Stream-Disk Coordination Latch & Edge-Triggered Completion Marker
 - **Stream-Disk Coordination Latch**: A debounce dictionary (`_stream_activity`) tracks the last live stream timestamp per `(project_name, node_name)`. Disk polling (`_poll_active_log_file`) skips disk reads if elapsed time is $< 2.0$ seconds, eliminating redundant disk I/O and race conditions during active harness execution while preserving a 2.0s fallback window for purely disk-based updates.
 - **Edge-Triggered Completion Boundary Marker**: When a project transitions from `RUNNING` to `IDLE`, `DashboardApp` appends `[dim]── Execution completed ──[/dim]` exactly once via `_completion_marker_rendered`. Subsequent 2.0s refresh ticks while remaining idle do not duplicate the boundary marker, and new executions reset the latch.
 
-### 11. Binary-Mode Incremental Disk Tailer & Buffer Manager `force_disk` Semantics
+### 13. Binary-Mode Incremental Disk Tailer & Buffer Manager `force_disk` Semantics
 - **Binary-Mode Incremental Tailer**: `_poll_active_log_file` opens log files strictly in binary mode (`"rb"`), seeks to byte offset `_last_tail_offset`, reads raw bytes, updates byte offset via `f.tell()`, and decodes content with `.decode("utf-8", errors="replace")`. This eliminates `UnicodeDecodeError`, handles Windows CRLF translations safely, and prevents multi-byte UTF-8 split character stalls.
 - **Fail-Closed File Lock Resilience**: Catches `PermissionError` caused by active harness file locks, rendering a retry warning without corrupting offsets or crashing the event loop.
 - **Buffer Manager `force_disk` Parameter**: `ProjectLogBufferManager.get_project_logs(force_disk=True)` fetches logs directly from disk via `tail_latest_project_logs()` without polluting or duplicating entries in the in-memory `PROJECT_BUFFERS`.
 
-### 12. DataTable Dual-Event Binding & Deterministic Compound Lane Selection
+### 14. DataTable Dual-Event Binding, Compound Lane Selection & Active Lock Recency
 - **Dual-Binding**: `#projects_table` binds both `DataTable.RowHighlighted` (instant, non-blocking log hydration upon arrow-key navigation) and `DataTable.RowSelected` (explicit clicks or `Enter` key presses forcing a fresh disk re-read with `force_disk=True`).
-- **Deterministic Compound Lane Selection**: Selecting a parent project row deterministically selects the first active running job sorted alphabetically by `node_type` ascending (`matching_jobs.sort(key=lambda j: str(j.get("node_type", "")))`). Selecting a nested child row (`└─ devtest`) explicitly binds and hydrates logs for that child node (`<project>::devtest`).
+- **Deterministic Compound Lane Selection**: Selecting a parent project row deterministically selects the first active running job sorted alphabetically by `node_type` ascending. Selecting a nested child row (`└─ devtest`) explicitly binds and hydrates logs for that child node (`<project>::devtest`).
+- **Active Job Recency Sorting**: Active running jobs in `DashboardApp` are sorted by `node_type` and descending `started_at` (`-float(job.get("started_at", 0) or 0)`), guaranteeing that the most recently started active job is rendered primary rather than stale leaked locks.
 
-### 13. Distributed State Machine & TTL Locking (`StateManager`)
+### 15. Distributed State Machine & TTL Locking (`StateManager`)
 - **Write-Ahead Logging (WAL)**: SQLite runs in WAL mode (`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`) ensuring concurrent non-blocking reads and serialized atomic writes across async workers.
 - **Dynamic TTL Lock Sizing**: Every task execution is bounded by a dynamic Time-To-Live (TTL), calculated dynamically based on harness retry budgets:
   $$\text{lock\_ttl} = \text{timeout\_minutes} \times (1 + \text{max\_retries}) + 5$$
@@ -413,7 +464,7 @@ stateDiagram-v2
     Recovered --> [*]
 ```
 
-### 14. Centralized Config Reload Watcher, Shared ConfigHolder & Reactive 4-Holder Rebind
+### 16. Centralized Config Reload Watcher, Shared ConfigHolder & Reactive 4-Holder Rebind
 - **Centralized Single-Owner Watcher (`_daemon_reload_watcher`)**: A dedicated 1.0s background watcher task in `orchestrator/cli.py` serves as the sole consumer of `reload_requested` signals in SQLite `daemon_control`, completely eliminating worker reload race conditions.
 - **Shared Thread-Safe `ConfigHolder` (`orchestrator/reloader.py`)**: The active configuration is held within a thread/async-safe `ConfigHolder` instance. Project worker loops read from this holder on each cycle without calling `hot_reload_runtime`.
 - **Topological Module & Schema Reload (`hot_reload_runtime`)**: Topologically reloads modified modules in `sys.modules` and parses fresh configuration.
@@ -429,26 +480,26 @@ flowchart LR
     ConfigHolderUpdate --> ActiveWorkers["Active Daemon Workers continue with Updated Config"]
 ```
 
-### 15. Multi-Window Rolling Quota & Velocity Runway Gating Pattern (`QuotaManager` & `TokenUsageReader`)
+### 17. Multi-Window Rolling Quota & Velocity Runway Gating Pattern (`QuotaManager` & `TokenUsageReader`)
 - **Decoupled State Access via Typed Protocol (`TokenUsageReader`)**: `QuotaManager` interacts with the SQLite state engine strictly through the `@runtime_checkable` `TokenUsageReader` Protocol (`get_window_token_usage`, `get_multi_window_usage`, `get_usage_breakdown`, `get_token_usage_events`), ensuring clean architectural decoupling and eliminating runtime duck-typing.
 - **Fail-Fast Composition**: `QuotaManager` strictly validates injected dependencies (`GlobalConfig` | `QuotaSettings` and `TokenUsageReader`), raising `TypeError` on invalid configurations instead of masking errors with silent defaults.
 - **Pure Function Extraction**: Core mathematical calculations (`calculate_required_runway`, `calculate_remaining`, `calculate_velocity`, `calculate_replenishment_eta`, `extract_token_usage`) are isolated as pure functions without database or subprocess side effects.
 - **Global Harness Pooling & Shared Gating**: Gating checks evaluate total consumption across all projects sharing the same execution harness. If the remaining quota within the sliding window ($W_{\text{hours}}$) is insufficient for the required safety runway ($R_{\text{runway}} = \text{avg\_tokens\_per\_hour} \times \frac{\text{buffer\_minutes}}{60}$), the harness is throttled before subprocess dispatch.
 - **Replenishment Countdown ETA**: Computes the exact seconds remaining until aging token usage events roll out of the sliding window, providing real-time telemetry to the dashboard.
 
-### 16. Ephemeral Worktree Isolation, Subprocess Timeout Hardening & Detached HEAD Synchronization
+### 18. Ephemeral Worktree Isolation, Subprocess Timeout Hardening & Detached HEAD Synchronization
 - **Zero-Interference Workspace**: Dedicated worktrees under `.graph/worktrees/<project>/<node>` allow concurrent node execution (e.g. Architect living documentation updates while DevTest implements code) without dirty working directory clashes.
 - **Process Safety & Subprocess Timeout Hardening**: All git commands invoke `run_git_command(args, cwd, timeout=30.0)`. Upon `asyncio.TimeoutError`, `_kill_process_tree(proc)` recursively terminates child processes, calls `proc.kill()`, and awaits `proc.wait()`, preventing orphaned git processes from holding `.git/index.lock` on Windows.
 - **Detached HEAD Upstream Synchronization (`checkout_detached_upstream`)**: Synchronizes worktrees by fetching `origin/<branch>`, detaching HEAD (`git checkout --detach origin/<branch>`), and hard resetting (`git reset --hard origin/<branch>`), completely eliminating branch collision errors (`fatal: '<branch>' is already checked out`).
 - **Non-Destructive Stash Protection**: `clean_worktree` executes `git stash push -u` before checkouts and resets to ensure uncommitted developer work is never permanently lost.
 - **Serial Fallback**: Falls back gracefully to serialized project-level execution if worktrees are unsupported.
 
-### 17. Smart 1-Pass Label Provisioning, Case-Folded Normalization & One-Shot Purge Guard
+### 19. Smart 1-Pass Label Provisioning, Case-Folded Normalization & One-Shot Purge Guard
 - **1-Pass Query & Color Normalization**: Synchronizes managed repository labels using a single `gh label list --json name,color,description --limit 200` query, normalizing colors with `color.lstrip('#').casefold()` to eliminate false-positive drift and redundant creation calls.
 - **One-Shot Purge Guard**: Legacy label purge passes run at most once per repository, recorded as `legacy_purge_done:{repo}` in SQLite `daemon_control`.
 - **Non-Blocking Startup**: Label synchronization runs in the background on startup with an `asyncio.Event` first-cycle worker barrier (timeout 60s), ensuring instant UI mounting.
 
-### 18. Dependency Injection via Composition Root (`cli.py`)
+### 20. Dependency Injection via Composition Root (`cli.py`)
 Configuration is loaded once via `load_config()` at the presentation entry point (`cli.py`), which acts as the **Composition Root**. Dependencies (`config`, `project`, `state_manager`, `quota_manager`, `worktree_manager`, `buffer_manager`) are instantiated and explicitly injected down the call hierarchy into use cases, nodes, and widgets. Modules never rely on global mutable singletons.
 
 ---
@@ -465,6 +516,7 @@ Configuration is loaded once via `load_config()` at the presentation entry point
 3. **No Circular Dependencies**:
    - Modules in `orchestrator/nodes/` must never import `orchestrator/cli.py` or `orchestrator/ui/`.
    - Domain models in `orchestrator/config.py` must never import node handlers, UI widgets, or database adapters.
+   - Application use case modules (e.g. `orchestrator/provisioning.py`) must never import presentation components from `orchestrator/cli.py` or `orchestrator/ui/`.
 4. **No Unsanitized ANSI Streaming**:
    - AI CLI subprocess output contains rich terminal ANSI escape codes. All stdout streams written to disk or parsed for structured JSON must pass through `strip_ansi()` to avoid corruption and log bloat.
 5. **No Orphaned Subprocesses**:
@@ -491,6 +543,14 @@ Configuration is loaded once via `load_config()` at the presentation entry point
     - TUI resize handlers (`on_resize`) must absorb momentary `0x0` dimensions without crashing, triggering layout recalculations upon dimension recovery. Heartbeat telemetry must record periodic timestamps in SQLite via `record_heartbeat` to audit liveness.
 16. **Worktree Branch Collision Elimination via Detached Upstream Synchronization**:
     - Worktrees and DevTest pre-flight checkouts must use detached HEAD synchronization (`git checkout --detach origin/<branch>` / `git reset --hard origin/<branch>`) instead of direct local branch checkout to prevent `fatal: 'main' is already used by worktree at ...` collisions.
+17. **Windows Command-Line Length Safety via File Redirection**:
+    - All GitHub CLI subprocess operations passing large issue bodies or comments (`create_gh_issue`, `update_gh_issue_body`, `post_gh_issue_comment`) must write content to temporary files and use `--body-file` arguments with unlinking in `finally` blocks, avoiding Windows `WinError 206` command buffer overflows.
+18. **Autonomous DevTest Speed Directives & Simulator Prohibition**:
+    - DevTest subagent prompts must explicitly forbid booting Android emulators, iOS simulators, or full Maestro/E2E UI test suites within ephemeral worktrees. Agents must restrict testing to fast local unit suites and exit immediately upon PR creation or push without waiting on remote CI actions.
+19. **Single Active Feature Invariant**:
+    - Upstream story provisioning must fail closed if another story lock is actively held for the target project. Only one active feature story may be unlocked concurrently per project to preserve database lock determinism and eliminate branch collisions.
+20. **Active Lock Telemetry Ordering**:
+    - Active running jobs in observability dashboards must be sorted by `node_type` and descending `started_at` (`-float(started_at)`), ensuring that the most recently initiated execution is rendered primary rather than stale or orphaned locks.
 
 ---
 
@@ -512,6 +572,9 @@ Configuration is loaded once via `load_config()` at the presentation entry point
 | **Raw Console Prints in TUI Mode** | Emitting stdout prints during interactive Textual dashboard sessions. | Guard stdout prints with `if not is_tui_mode():` and stream to registered listeners. |
 | **Unhandled 0x0 Resize Geometry** | Raising layout exceptions or crashing when terminal dimensions momentarily drop to `0x0`. | Guard `on_resize` with dimension checks (`width <= 0 or height <= 0: return`). |
 | **Branch Collision on Worktree Reset** | Running `git checkout main` inside an ephemeral worktree when `main` is checked out on root. | Use detached HEAD checkout (`git checkout --detach origin/main`) and hard reset. |
+| **Command Line Overflows on Windows** | Passing large multiline markdown strings directly in CLI arguments to `gh issue create`. | Write content to a temp file and invoke `gh` with `--body-file <temp_file>`. |
+| **Heavy UI Suite Execution in DevTest** | Launching mobile emulators or full E2E suites inside DevTest subagents. | Constrain DevTest prompts to fast local unit tests; leave heavy E2E/UI suites to remote CI. |
+| **Harness Idle Polling on CI Actions** | Waiting on `gh run watch` or polling remote GitHub Actions in autonomous subagents. | Exit immediately upon PR creation; orchestrator daemon handles CI verification and auto-merging. |
 
 ---
 
