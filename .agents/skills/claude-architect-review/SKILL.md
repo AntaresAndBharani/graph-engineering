@@ -69,7 +69,7 @@ Invoke Claude non-interactively using the provided helper script or direct CLI c
 
 #### Option A: Via Python Helper Script
 ```powershell
-python <skill_path>/scripts/cross_review.py --model sonnet --effort medium --max-rounds 3
+python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\claude-architect-review\scripts\cross_review.py" --model sonnet --effort medium --max-rounds 3
 ```
 The helper script automatically:
 - Resolves the local `docs/draft-requisites/implementation-plan.md`.

@@ -8,6 +8,12 @@ description: >-
 
 Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan. The council reviewers run headless via the `claude` CLI: the **Architect** on **Claude Opus 5.5 (`claude-opus-5-5`, `effort: medium`)** and the **QA Guardian** on **`sonnet`, `effort: low`**. (The skill keeps its historical `agy`/`gemini` trigger names; the Architect seat moved from `gemini-3.8-flash-high` to Opus 5.5.)
 
+> **Global skill — never copy it into a project.** This skill is shared by every project. Its single source of truth is
+> `graph-engineering/.agents/skills/agy-architect-review/`, exposed globally through a directory junction at
+> `$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review` (run `graph-engineering/scripts/link-global-skills.ps1` to recreate it).
+> Always invoke the helper script through that global path from the target project's root; it resolves the target
+> project's `docs/draft-requisites/implementation-plan.md` from the current working directory.
+
 ---
 
 ## 🎯 Purpose & Core Value: The Tri-Party Review Council
@@ -92,7 +98,7 @@ If the file does not exist, prompt the user or run `/refine-story` first to esta
 
 **Starting a new feature:** if the live file still holds a finished plan, archive it first so the new plan starts from a clean file:
 ```powershell
-python .agents/skills/agy-architect-review/scripts/agy_cross_review.py --archive
+python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --archive
 ```
 
 ### Step 2: Pre-Review / Counter-Proposal (Round N)
@@ -112,7 +118,7 @@ Invoke the review council non-interactively using the helper script (recommended
 
 #### Option A: Via Python Helper Script (Recommended)
 ```powershell
-python .agents/skills/agy-architect-review/scripts/agy_cross_review.py --max-rounds 3
+python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --max-rounds 3
 ```
 The helper script automatically:
 - Resolves the local `docs/draft-requisites/implementation-plan.md`.

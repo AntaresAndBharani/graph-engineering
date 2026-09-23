@@ -5,6 +5,12 @@ Across all tasks, skills (`/user-story-refining`, `/quick-fix`), and node execut
 - **Default Model:** **Gemini 3.8 Flash (High)** (`gemini-3.8-flash-high`)
 - Provides highest speed, deep architectural reasoning, and robust tool-calling accuracy.
 
+## 🌐 Global Skills: Single Source of Truth
+The shared SDLC skills (`agy-architect-review`, `claude-architect-review`, `provision-story`, `quick-fix`, `user-story-refining`) live **only** in `graph-engineering/.agents/skills/`. They are exposed to every project through directory junctions in `$HOME\.gemini\config\plugins\swarm-dev-core\skills` (recreate with `scripts/link-global-skills.ps1`).
+- **Never copy these skills (or `.agents/skills`) into another project repo.** A copy silently forks the skill and stops receiving fixes.
+- Invoke skill helper scripts through the global path (e.g. `python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py"`) from the target project's root, never via a project-relative `.agents/skills/...` path.
+- Project-specific skills (e.g. `darwin-trader`'s `trading-committee`) stay in their own repo's `.agents/skills/`.
+
 ## Direct Fix Shortcut (`/quick-fix`)
 When the user prefixes their instruction with `/quick-fix` or explicitly requests a direct fix on `main`:
 1. **Bypass the standard multi-step lifecycle** (no User Story decomposition, no feature branch, no remote PR gate).
@@ -16,7 +22,7 @@ When the user prefixes their instruction with `/quick-fix` or explicitly request
 ## User Story Refining Protocol (`/refine-story`, `/user-story-refining`, `--boost`)
 When the user prefixes their instruction with `/refine-story`, `/user-story-refining`, `/refine-story --boost`, `/boost`, or asks to refine/review a draft specification:
 1. **Maintain Living Audit Trail in `docs/draft-requisites/implementation-plan.md`:** Never overwrite previous iterations. Preserve the initial plan, append each new review iteration (`## 🔍 Review Iteration N`), incorporate operator feedback iterations (`## 💬 Review Iteration N`), incorporate multi-perspective boost evaluations (`## 🚀 Boost Review Iteration N`), and maintain exactly **one** consolidated `## 🎯 Final Decision Plan & User Story Specification` at the bottom — replace it in place when revising (it is the only mutable section) instead of appending another full copy.
-   - **One active plan per live file:** Before starting a new feature plan, archive the finished one with `python .agents/skills/agy-architect-review/scripts/agy_cross_review.py --archive` (moves it verbatim to `docs/draft-requisites/archive/`). The audit trail lives in the archive; the live file must only hold the active plan so reviewers do not re-read finished features.
+   - **One active plan per live file:** Before starting a new feature plan, archive the finished one with `python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --archive` (moves it verbatim to `docs/draft-requisites/archive/`). The audit trail lives in the archive; the live file must only hold the active plan so reviewers do not re-read finished features.
 2. **Inspect Ground Truth Codebase:** View live schemas, models, and classes in `orchestrator/` before evaluating.
 3. **Point-by-Point Critical Verdict Matrix:** Scrutinize every proposal point for data duplication, class redundancy, backward compatibility, and anti-patterns.
 4. **Boost Mode Deep Evaluation (When `--boost` or `/boost` is Triggered):**
@@ -30,7 +36,7 @@ When the user prefixes their instruction with `/refine-story`, `/user-story-refi
 ## Cross-Architectural Review Protocol (`/cross-review`, `/claude-review`, `/claude-architect-review`)
 When the user prefixes their instruction with `/cross-review`, `/claude-review`, or asks to cross-examine an implementation plan between Gemini and Claude:
 1. **Single Communication Medium:** All exchanges happen strictly via `docs/draft-requisites/implementation-plan.md`. Never use temporary buffers.
-2. **Headless Claude Sonnet Execution:** Invoke Claude CLI (`--model sonnet --effort medium --dangerously-skip-permissions -p`) or run `scripts/cross_review.py`.
+2. **Headless Claude Sonnet Execution:** Invoke Claude CLI (`--model sonnet --effort medium --dangerously-skip-permissions -p`) or run `python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\claude-architect-review\scripts\cross_review.py"`.
 3. **Hard 3-Round Cap:** Gemini and Claude debate for a maximum of 3 iterations (`## 🔍 Review Iteration N` and `## 🏛️ Claude Sonnet Review Iteration N`).
 4. **Early Exit on Consensus:** If Claude issues `VERDICT: AGREED`, mark the plan as approved and present the consensus plan to the operator.
 5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution immediately, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and surface a structured Dispute Matrix to the user highlighting the contested points, risks, and trade-offs for final human decision.
