@@ -1,15 +1,16 @@
 """
 Unit test suite for Antigravity Tri-Party Architect & QA Cross-Review Script.
 Tests:
-  - Iteration counting (Author, Gemini Architect, Claude QA)
-  - Prompt construction with QA mandates (Anti-drift, UX/UI, functional correctness, BDD)
-  - Dual verdict parsing (Gemini & Claude QA)
+  - Iteration counting (Author, Architect incl. legacy Gemini headings, Claude QA)
+  - Plan archiving and scoped reading guides
+  - Prompt construction with QA mandates and BLOCKING/NON-BLOCKING verdict rules
+  - Dual verdict parsing (Architect & Claude QA)
   - Disagreement extraction
-  - Subprocess invocation flags for agy and claude
+  - Subprocess invocation flags for claude (fresh, non-persisted sessions)
 """
 
-import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
@@ -40,15 +41,15 @@ QA critique.
 ## 🔍 Review Iteration 2 (Author Response)
 Addressed concerns.
 
-## 🏛️ Gemini Architect Review Iteration 2
+## 🏛️ Architect Review Iteration 2
 Second architect critique.
 
 ## 🧪 Claude QA Review Iteration 2 (Requirements & UX/UI Guardian)
 Second QA critique.
 """
-        author, gemini, qa = agy_cross_review.count_iterations(sample_plan)
+        author, architect, qa = agy_cross_review.count_iterations(sample_plan)
         assert author == 2
-        assert gemini == 2
+        assert architect == 2
         assert qa == 2
 
     def test_count_iterations_partial_rounds(self):
@@ -58,19 +59,32 @@ Second QA critique.
 ## 🔍 Review Iteration 1 (Author Perspective)
 Initial.
 
-## 🏛️ Gemini Architect Review Iteration 1
-Gemini reviewed first.
+## 🏛️ Architect Review Iteration 1
+Architect reviewed first.
 """
-        author, gemini, qa = agy_cross_review.count_iterations(sample_plan)
+        author, architect, qa = agy_cross_review.count_iterations(sample_plan)
         assert author == 1
-        assert gemini == 1
+        assert architect == 1
         assert qa == 0
+
+    def test_count_iterations_active_plan_only(self):
+        plan = """
+# 📋 Implementation Plan: Old Feature
+## 🏛️ Gemini Architect Review Iteration 1
+## 🏛️ Gemini Architect Review Iteration 2
+
+# 📋 Implementation Plan: New Feature
+## 🔍 Review Iteration 1 (Author Perspective)
+## 🏛️ Architect Review Iteration 1
+## 🧪 Claude QA Review Iteration 1 (Requirements & UX/UI Guardian)
+"""
+        assert agy_cross_review.count_iterations(plan) == (1, 1, 1)
 
     def test_build_qa_prompt_mandates(self, tmp_path):
         dummy_plan = tmp_path / "implementation-plan.md"
         dummy_plan.write_text("# Plan", encoding="utf-8")
 
-        prompt = agy_cross_review.build_qa_prompt(round_num=2, plan_path=dummy_plan)
+        prompt = agy_cross_review.build_qa_prompt(round_num=2, plan_path=dummy_plan, guide=["- Active plan: lines 1-1"])
 
         # Verify key mandates are present
         assert "QA Lead & Requirements Guardian" in prompt
@@ -82,32 +96,111 @@ Gemini reviewed first.
         assert "## 🧪 Claude QA Review Iteration 2 (Requirements & UX/UI Guardian)" in prompt
         assert "VERDICT: AGREED" in prompt
         assert "VERDICT: DISAGREED" in prompt
+        assert "[BLOCKING]" in prompt
+        assert "[NON-BLOCKING]" in prompt
+        assert "- Active plan: lines 1-1" in prompt
 
-    def test_build_gemini_prompt_structure(self, tmp_path):
+    def test_build_architect_prompt_structure(self, tmp_path):
         dummy_plan = tmp_path / "implementation-plan.md"
         dummy_plan.write_text("# Plan", encoding="utf-8")
 
-        prompt = agy_cross_review.build_gemini_prompt(round_num=1, plan_path=dummy_plan)
+        prompt = agy_cross_review.build_architect_prompt(
+            round_num=1, plan_path=dummy_plan, guide=["- Latest author iteration: lines 3-9"]
+        )
 
         assert "Principal Architect" in prompt
         assert "Round 1" in prompt
-        assert "## 🏛️ Gemini Architect Review Iteration 1" in prompt
+        assert "## 🏛️ Architect Review Iteration 1" in prompt
         assert "VERDICT: AGREED" in prompt
+        assert "no BLOCKING objections" in prompt
+        assert "Read ONLY these line ranges" in prompt
+        assert "- Latest author iteration: lines 3-9" in prompt
+        # The old framing forced a DISAGREED verdict on every round
+        assert "hyper-critical" not in prompt
+        assert "zero reservations" not in prompt
 
-    def test_parse_gemini_verdict(self):
+    def test_reading_guide_targets_active_plan_sections(self):
+        plan = "\n".join([
+            "# 📋 Implementation Plan: Old",          # 1
+            "## 🎯 Final Decision Plan (old)",        # 2
+            "old",                                    # 3
+            "# 📋 Implementation Plan: New",          # 4
+            "## 📝 Initial Draft Proposal",           # 5
+            "operator request",                       # 6
+            "## 🔍 Review Iteration 1 (Author)",      # 7
+            "```",                                    # 8
+            "## not a heading inside a fence",        # 9
+            "```",                                    # 10
+            "## 🏛️ Architect Review Iteration 1",     # 11
+            "VERDICT: DISAGREED",                     # 12
+            "## 🔍 Review Iteration 2 (Author)",      # 13
+            "response",                               # 14
+            "## 🎯 Final Decision Plan",              # 15
+            "spec",                                   # 16
+        ])
+        guide = "\n".join(agy_cross_review.reading_guide(plan, "architect", round_num=2))
+        assert "original proposal / requirements: lines 5-6" in guide
+        assert "Current Final Decision Plan: lines 15-16" in guide
+        assert "Latest author iteration: lines 13-14" in guide
+        assert "previous review (round 1): lines 11-12" in guide
+        assert "lines 2-" not in guide
+
+        qa_guide = "\n".join(agy_cross_review.reading_guide(plan, "qa", round_num=1))
+        assert "previous review" not in qa_guide
+
+    def test_reading_guide_falls_back_to_active_plan(self):
+        guide = agy_cross_review.reading_guide("# 📋 Implementation Plan: X\nfree text\n", "architect", round_num=1)
+        assert guide == ["- Active plan: lines 1-2"]
+
+    def test_archive_plans_keeps_only_active_plan(self, tmp_path):
+        plan_path = tmp_path / "implementation-plan.md"
+        plan_path.write_text(
+            "# 📋 Implementation Plan & Refinement Lifecycle: Config Reload\nold one\n"
+            "```\n# 📋 Implementation Plan inside a fence\n```\n"
+            "# 📋 Implementation Plan: TUI Streaming\nold two\n"
+            "# 📋 Implementation Plan: Active Feature\ncurrent\n",
+            encoding="utf-8",
+        )
+        written = agy_cross_review.archive_plans(plan_path, keep_active=True, now=datetime(2026, 9, 23, 10, 0, 0))
+
+        assert [p.name for p in written] == [
+            "20260923-100000-01-config-reload.md",
+            "20260923-100000-02-tui-streaming.md",
+        ]
+        assert all(p.parent == tmp_path / "archive" for p in written)
+        assert "inside a fence" in written[0].read_text(encoding="utf-8")
+        assert "old two" in written[1].read_text(encoding="utf-8")
+        assert plan_path.read_text(encoding="utf-8") == "# 📋 Implementation Plan: Active Feature\ncurrent\n"
+
+        # A single active plan is never archived implicitly
+        assert agy_cross_review.archive_plans(plan_path, keep_active=True) == []
+        assert "current" in plan_path.read_text(encoding="utf-8")
+
+    def test_archive_plans_all(self, tmp_path):
+        plan_path = tmp_path / "implementation-plan.md"
+        plan_path.write_text("# 📋 Implementation Plan: Done Feature\nbody\n", encoding="utf-8")
+
+        written = agy_cross_review.archive_plans(plan_path, keep_active=False)
+
+        assert len(written) == 1
+        assert "body" in written[0].read_text(encoding="utf-8")
+        assert plan_path.read_text(encoding="utf-8") == ""
+
+    def test_parse_architect_verdict(self):
         agreed_plan = """
-## 🏛️ Gemini Architect Review Iteration 1
-Everything is sound.
+## 🏛️ Architect Review Iteration 1
+- [NON-BLOCKING] Consider an index.
 VERDICT: AGREED
 """
-        assert agy_cross_review.parse_gemini_verdict(agreed_plan, "", 1) == "AGREED"
+        assert agy_cross_review.parse_architect_verdict(agreed_plan, "", 1) == "AGREED"
 
-        disagreed_plan = """
+        legacy_disagreed_plan = """
 ## 🏛️ Gemini Architect Review Iteration 1
 Critical race condition found.
 VERDICT: DISAGREED
 """
-        assert agy_cross_review.parse_gemini_verdict(disagreed_plan, "", 1) == "DISAGREED"
+        assert agy_cross_review.parse_architect_verdict(legacy_disagreed_plan, "", 1) == "DISAGREED"
+        assert agy_cross_review.parse_architect_verdict("no review section", "", 1) == "DISAGREED"
 
     def test_parse_qa_verdict(self):
         agreed_plan = """
@@ -126,7 +219,7 @@ VERDICT: DISAGREED
 
     def test_extract_disagreement_points(self):
         plan = """
-## 🏛️ Gemini Architect Review Iteration 1
+## 🏛️ Architect Review Iteration 1
 ### ⚖️ Critical Architecture & Drawbacks Critique
 - Subprocess timeout retains index lock on Windows.
 - SQLite column missing foreign key constraint.
@@ -140,63 +233,43 @@ VERDICT: DISAGREED
 ### 🏁 Verdict
 VERDICT: DISAGREED
 """
-        gemini_points = agy_cross_review.extract_disagreement_points(plan, 1, header_prefix="🏛️")
-        assert len(gemini_points) == 2
-        assert "Subprocess timeout" in gemini_points[0]
+        architect_points = agy_cross_review.extract_disagreement_points(plan, 1, header_prefix="🏛️")
+        assert len(architect_points) == 2
+        assert "Subprocess timeout" in architect_points[0]
 
         qa_points = agy_cross_review.extract_disagreement_points(plan, 1, header_prefix="🧪")
         assert len(qa_points) == 2
         assert "Operator constraint" in qa_points[0]
 
+    def test_extract_disagreement_points_prefers_blocking(self):
+        plan = """
+## 🏛️ Architect Review Iteration 2
+- [NON-BLOCKING] Rename the helper for clarity.
+- [BLOCKING] Lock is never released on timeout.
+VERDICT: DISAGREED
+"""
+        points = agy_cross_review.extract_disagreement_points(plan, 2, header_prefix="🏛️")
+        assert points == ["[BLOCKING] Lock is never released on timeout."]
+
     @patch("subprocess.run")
     def test_invoke_claude_arguments(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
 
-        # Test initial round
-        agy_cross_review.invoke_claude(
-            prompt="QA Prompt",
-            model="sonnet",
-            effort="low",
-            session_id="qa-1234",
-            is_resume=False,
-        )
+        agy_cross_review.invoke_claude(prompt="Architect Prompt", model="claude-opus-5-5", effort="medium")
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "claude"
-        assert "-p" in cmd
-        assert "--session-id" in cmd
-        assert "qa-1234" in cmd
-        assert "--model" in cmd
-        assert "sonnet" in cmd
-        assert "--effort" in cmd
-        assert "low" in cmd
+        assert cmd[cmd.index("-p") + 1] == "Architect Prompt"
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
+        assert cmd[cmd.index("--effort") + 1] == "medium"
+        assert "--no-session-persistence" in cmd
         assert "--dangerously-skip-permissions" in cmd
+        # Every round is a fresh session: no resume and no fixed session id
+        assert "-r" not in cmd
+        assert "-c" not in cmd
+        assert "--session-id" not in cmd
 
-        # Test resume round
-        agy_cross_review.invoke_claude(
-            prompt="QA Prompt Round 2",
-            session_id="qa-1234",
-            is_resume=True,
-        )
-        cmd_resume = mock_run.call_args[0][0]
-        assert cmd_resume[0] == "claude"
-        assert "-r" in cmd_resume
-        assert "qa-1234" in cmd_resume
-        assert "--dangerously-skip-permissions" in cmd_resume
-
-    @patch("subprocess.run")
-    def test_invoke_agy_arguments(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
-
-        # Round 1 (no -c)
-        agy_cross_review.invoke_agy("Gemini Prompt", model="gemini-3.8-flash-high", is_resume=False)
-        cmd1 = mock_run.call_args[0][0]
-        assert cmd1[0] == "agy"
-        assert "-c" not in cmd1
-        assert "--model" in cmd1
-        assert "gemini-3.8-flash-high" in cmd1
-
-        # Round 2 (with -c)
-        agy_cross_review.invoke_agy("Gemini Prompt 2", model="gemini-3.8-flash-high", is_resume=True)
-        cmd2 = mock_run.call_args[0][0]
-        assert cmd2[0] == "agy"
-        assert "-c" in cmd2
+    def test_default_models(self):
+        assert agy_cross_review.DEFAULT_ARCHITECT_MODEL == "claude-opus-5-5"
+        assert agy_cross_review.DEFAULT_ARCHITECT_EFFORT == "medium"
+        assert agy_cross_review.DEFAULT_QA_MODEL == "sonnet"
+        assert agy_cross_review.DEFAULT_QA_EFFORT == "low"

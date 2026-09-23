@@ -15,7 +15,8 @@ When the user prefixes their instruction with `/quick-fix` or explicitly request
 
 ## User Story Refining Protocol (`/refine-story`, `/user-story-refining`, `--boost`)
 When the user prefixes their instruction with `/refine-story`, `/user-story-refining`, `/refine-story --boost`, `/boost`, or asks to refine/review a draft specification:
-1. **Maintain Living Audit Trail in `docs/draft-requisites/implementation-plan.md`:** Never overwrite previous iterations. Preserve the initial plan, append each new review iteration (`## 🔍 Review Iteration N`), incorporate operator feedback iterations (`## 💬 Review Iteration N`), incorporate multi-perspective boost evaluations (`## 🚀 Boost Review Iteration N`), and maintain the consolidated `## 🎯 Final Decision Plan & User Story Specification` at the bottom.
+1. **Maintain Living Audit Trail in `docs/draft-requisites/implementation-plan.md`:** Never overwrite previous iterations. Preserve the initial plan, append each new review iteration (`## 🔍 Review Iteration N`), incorporate operator feedback iterations (`## 💬 Review Iteration N`), incorporate multi-perspective boost evaluations (`## 🚀 Boost Review Iteration N`), and maintain exactly **one** consolidated `## 🎯 Final Decision Plan & User Story Specification` at the bottom — replace it in place when revising (it is the only mutable section) instead of appending another full copy.
+   - **One active plan per live file:** Before starting a new feature plan, archive the finished one with `python .agents/skills/agy-architect-review/scripts/agy_cross_review.py --archive` (moves it verbatim to `docs/draft-requisites/archive/`). The audit trail lives in the archive; the live file must only hold the active plan so reviewers do not re-read finished features.
 2. **Inspect Ground Truth Codebase:** View live schemas, models, and classes in `orchestrator/` before evaluating.
 3. **Point-by-Point Critical Verdict Matrix:** Scrutinize every proposal point for data duplication, class redundancy, backward compatibility, and anti-patterns.
 4. **Boost Mode Deep Evaluation (When `--boost` or `/boost` is Triggered):**
@@ -36,14 +37,15 @@ When the user prefixes their instruction with `/cross-review`, `/claude-review`,
 
 ## Antigravity Architect Review Protocol (`/agy-architect-review`, `/agy-review`, `/gemini-architect-review`)
 When the user prefixes their instruction with `/agy-architect-review`, `/agy-review`, or asks for an architectural cross-review via Antigravity (`agy`):
-1. **Single Communication Medium:** All exchanges happen strictly via `docs/draft-requisites/implementation-plan.md`. Never use temporary buffers.
+1. **Single Communication Medium:** All exchanges happen strictly via `docs/draft-requisites/implementation-plan.md`. Never use temporary buffers. Completed plans are archived to `docs/draft-requisites/archive/` so the live file only holds the active plan.
 2. **Tri-Party Review Council:**
    - **Author Agent:** Formulates the implementation proposal and synthesizes revisions in response to council critiques.
-   - **Gemini Architect (`gemini-3.8-flash-high`):** Headless execution via `agy` CLI (`--model gemini-3.8-flash-high --dangerously-skip-permissions -p`, using `-c` for Rounds 2 & 3). Scrutinizes technical architecture, concurrency, pipe safety, DB schema integrity, and performance.
-   - **Claude QA Guardian (`sonnet`, `effort: low`):** Headless execution via `claude` CLI (`--model sonnet --effort low --dangerously-skip-permissions -p`). Acts as the **Requirements & UX/UI Guardian**—enforces 100% fidelity to the operator's original prompt and constraints (anti-drift), audits UX/UI ergonomics (or functional correctness if backend only), and verifies Gherkin BDD testability.
-3. **Hard 3-Round Cap:** Council debates for a maximum of 3 iterations (`## 🔍 Review Iteration N`, `## 🏛️ Gemini Architect Review Iteration N`, and `## 🧪 Claude QA Review Iteration N`).
-4. **Dual Consensus Gate:** Approval requires **both** Gemini Architect AND Claude QA to issue `VERDICT: AGREED`. If either party objects, the plan is not approved and the author must address their feedback.
-5. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and present a consolidated Dispute Matrix to the operator.
+   - **Architect (Claude Opus 5.5, `claude-opus-5-5`, `effort: medium`):** Headless execution via `claude` CLI (`--model claude-opus-5-5 --effort medium --no-session-persistence --dangerously-skip-permissions -p`). Scrutinizes technical architecture, concurrency, pipe safety, DB schema integrity, and performance.
+   - **Claude QA Guardian (`sonnet`, `effort: low`):** Headless execution via `claude` CLI (`--model sonnet --effort low --no-session-persistence --dangerously-skip-permissions -p`). Acts as the **Requirements & UX/UI Guardian**—enforces 100% fidelity to the operator's original prompt and constraints (anti-drift), audits UX/UI ergonomics (or functional correctness if backend only), and verifies Gherkin BDD testability.
+3. **Token Discipline:** Every round is a fresh session (never resume with `-c`/`-r`; the plan file already carries the history). Reviewers read only the line ranges the helper script gives them (original proposal, current Final Decision Plan, latest author iteration, their own previous review) and inspect only the codebase files the plan names.
+4. **Hard 3-Round Cap:** Council debates for a maximum of 3 iterations (`## 🔍 Review Iteration N`, `## 🏛️ Architect Review Iteration N`, and `## 🧪 Claude QA Review Iteration N`).
+5. **Dual Consensus Gate:** Reviewers tag each objection `[BLOCKING]` or `[NON-BLOCKING]` and issue `VERDICT: AGREED` when no BLOCKING objections remain. Approval requires **both** Architect AND Claude QA to agree; otherwise the author must address the BLOCKING feedback.
+6. **Operator Escalation Gate (No Agreement after Round 3):** If after 3 rounds disagreement remains, halt execution, append `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`, and present a consolidated Dispute Matrix to the operator.
 
 ## Upstream Functional Slicing & Direct DevTest Assignment Protocol
 When pre-refining requirements using `/refine-story` or `/agy-architect-review`:
