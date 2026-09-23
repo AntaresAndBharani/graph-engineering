@@ -19,7 +19,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Dict, Any, Tuple, List
+from typing import List, Tuple
 
 
 def find_plan_file(custom_path: str | None = None) -> Path:
@@ -65,7 +65,7 @@ def build_gemini_prompt(round_num: int, plan_path: Path, model_title: str = "Gem
         "",
         "CRITICAL OPERATIONAL RULES:",
         f"1. EXACT TARGET FILE: The target file is strictly '{abs_path}'. Open and read '{abs_path}' directly, focusing on the latest, active implementation plan section at the bottom of the document.",
-        "2. GROUND TRUTH CODEBASE INSPECTION: Inspect the relevant codebase files mentioned in the plan using view_file or grep_search to verify classes, methods, and schemas.",
+        "2. GROUND TRUTH CODEBASE INSPECTION: Inspect the relevant codebase files mentioned in the plan using view_file or grep_search. DO NOT execute test suites or background commands; evaluate static code and architecture directly.",
         "3. UNCOMPROMISING ARCHITECTURAL SCRUTINY: Scrutinize the proposal for all drawbacks, race conditions, edge cases, performance bottlenecks, and backward-compatibility hazards.",
         f"4. APPEND REVIEW ITERATION: Using your Edit or Write tool, append a new section at the very end of '{abs_path}' titled exactly:",
         "",
