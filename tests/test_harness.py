@@ -1068,6 +1068,116 @@ async def test_stream_listener_legacy_signatures_compatibility(tmp_path: Path):
         AsyncHarnessAdapter.unregister_stream_listener(legacy_1arg_listener)
 
 
+AGY_KILLED_OUTPUT = (
+    "I will wait for the pytest run to finish.\n"
+    "root agent idle; waiting up to 5s for 2 background task(s)\n"
+    "terminating 2 background task(s) on exit\n"
+)
+
+
+def test_find_premature_exit_marker():
+    from orchestrator.config import HarnessRetryConfig
+    from orchestrator.harness import find_premature_exit_marker
+
+    patterns = HarnessRetryConfig().premature_exit_patterns
+    assert find_premature_exit_marker(AGY_KILLED_OUTPUT, patterns) == "terminating 2 background task(s) on exit"
+    assert find_premature_exit_marker("PR #91 opened. Exiting.", patterns) is None
+    assert find_premature_exit_marker("", patterns) is None
+    assert find_premature_exit_marker(AGY_KILLED_OUTPUT, []) is None
+
+
+@pytest.mark.asyncio
+async def test_harness_resumes_after_premature_exit(tmp_path: Path, monkeypatch):
+    """
+    Given the CLI exits 0 while background tasks were killed
+    When the harness detects the premature-exit marker
+    Then it immediately re-runs with a resume notice and returns 0 once a run completes cleanly
+    And records a premature_exit anomaly
+    """
+    from unittest.mock import AsyncMock
+    from orchestrator.config import HarnessConfig
+    from orchestrator.harness import AsyncHarnessAdapter
+
+    sm = AsyncMock()
+    cfg = HarnessConfig(binary="agy", args=["-p", "{prompt}"])
+    adapter = AsyncHarnessAdapter("antigravity", cfg, state_manager=sm, project_name="p", node_name="devtest", issue_number=85)
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    prompts: list[str] = []
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        prompts.append(cmd[-1])
+        if len(prompts) == 1:
+            return 0, AGY_KILLED_OUTPUT
+        return 0, "PR #91 opened."
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+
+    log_file = tmp_path / "resume.log"
+    exit_code = await adapter.execute("Implement issue #85", tmp_path, log_file)
+
+    assert exit_code == 0
+    assert len(prompts) == 2
+    assert "RESUME NOTICE" not in prompts[0]
+    assert prompts[1].startswith("Implement issue #85")
+    assert "RESUME NOTICE (attempt 2/3)" in prompts[1]
+    assert "git status" in prompts[1]
+    assert "Premature exit detected" in log_file.read_text(encoding="utf-8")
+    error_types = [c.kwargs["error_type"] for c in sm.record_anomaly_event.call_args_list]
+    assert error_types == ["premature_exit"]
+
+
+@pytest.mark.asyncio
+async def test_harness_premature_exit_resumes_exhausted(tmp_path: Path, monkeypatch):
+    """Every run is killed mid-flight: after max resumes the harness fails with PREMATURE_EXIT_CODE."""
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter, PREMATURE_EXIT_CODE
+
+    cfg = HarnessConfig(binary="agy", args=["-p", "{prompt}"], retry=HarnessRetryConfig(max_premature_exit_resumes=2))
+    adapter = AsyncHarnessAdapter("antigravity", cfg)
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        return 0, AGY_KILLED_OUTPUT
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+
+    log_file = tmp_path / "exhausted.log"
+    exit_code = await adapter.execute("Implement issue #85", tmp_path, log_file)
+
+    assert exit_code == PREMATURE_EXIT_CODE
+    assert call_count == 3
+    assert "resumes exhausted (2/2)" in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_harness_premature_exit_disabled(tmp_path: Path, monkeypatch):
+    """With max_premature_exit_resumes=0 a killed run fails immediately without re-running."""
+    from orchestrator.config import HarnessConfig, HarnessRetryConfig
+    from orchestrator.harness import AsyncHarnessAdapter, PREMATURE_EXIT_CODE
+
+    cfg = HarnessConfig(binary="agy", args=["-p", "{prompt}"], retry=HarnessRetryConfig(max_premature_exit_resumes=0))
+    adapter = AsyncHarnessAdapter("antigravity", cfg)
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    call_count = 0
+
+    async def mock_execute_once(cmd, cwd, env, log_file, console_prefix=None):
+        nonlocal call_count
+        call_count += 1
+        return 0, AGY_KILLED_OUTPUT
+
+    monkeypatch.setattr(adapter, "_execute_once", mock_execute_once)
+
+    exit_code = await adapter.execute("prompt", tmp_path, tmp_path / "disabled.log")
+    assert exit_code == PREMATURE_EXIT_CODE
+    assert call_count == 1
+
+
 
 
 

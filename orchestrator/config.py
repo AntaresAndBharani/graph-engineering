@@ -21,6 +21,13 @@ class HarnessRetryConfig(OrchestratorBaseModel):
         "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "502", "504",
         "rate limit", "quota exceeded", "connection reset", "server disconnected", "fetch failed"
     ])
+    # Regexes marking a run whose CLI exited while the agent's background tasks were still
+    # running (e.g. agy print mode killing a backgrounded pytest). Such runs report exit 0
+    # but did not finish, so they are resumed immediately in the same worktree.
+    premature_exit_patterns: list[str] = Field(default_factory=lambda: [
+        r"terminating \d+ background task\(s\) on exit",
+    ])
+    max_premature_exit_resumes: int = Field(default=2, ge=0)
 
 
 class HarnessConfig(OrchestratorBaseModel):

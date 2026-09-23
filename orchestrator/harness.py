@@ -71,6 +71,30 @@ def get_matched_retryable_pattern(output: str, retryable_patterns: list[str]) ->
     return None
 
 
+PREMATURE_EXIT_CODE = 75  # EX_TEMPFAIL: harness exited before finishing, resumes exhausted
+
+PREMATURE_EXIT_RESUME_NOTICE = (
+    "\n\nRESUME NOTICE (attempt {attempt}/{max_attempts}):\n"
+    "A previous attempt at this exact task was terminated because the session went idle while "
+    "background commands were still running, which kills them in non-interactive batch mode.\n"
+    "- The working tree may already contain partial work from that attempt: inspect `git status` "
+    "and `git diff` first and continue from there instead of starting over.\n"
+    "- Run EVERY command (tests, linters, git, gh) in the FOREGROUND and block until it finishes. "
+    "Never start a command in the background and then wait for it.\n"
+)
+
+
+def find_premature_exit_marker(output: str, patterns: list[str]) -> Optional[str]:
+    """Returns the matched text if output shows the CLI exited while background tasks were still running."""
+    if not output or not patterns:
+        return None
+    for pattern in patterns:
+        match = re.search(pattern, output, re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return None
+
+
 def calculate_backoff_delay(attempt: int, config: HarnessRetryConfig) -> float:
     """
     Calculates exponential backoff delay with randomized jitter:
@@ -357,10 +381,84 @@ class AsyncHarnessAdapter:
                 _console.print(f"  [bold red]{console_prefix}[/bold red] {err_msg}")
             return 127
 
-        cmd = self.build_command(prompt, model=model, effort=effort)
         env = self.build_env(extra_env)
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
+        retry_cfg = self.retry_config
+        max_resumes = retry_cfg.max_premature_exit_resumes
+        attempt_prompt = prompt
+        for resume_num in range(max_resumes + 1):
+            cmd = self.build_command(attempt_prompt, model=model, effort=effort)
+            returncode, captured_output = await self._execute_with_transient_retry(
+                cmd=cmd,
+                cwd=cwd,
+                env=env,
+                log_file=log_file,
+                prompt=attempt_prompt,
+                model=model,
+                console_prefix=console_prefix,
+                eff_project_name=eff_project_name,
+                eff_node_name=eff_node_name,
+                eff_issue_number=eff_issue_number,
+                eff_state_manager=eff_state_manager,
+            )
+            if returncode != 0:
+                return returncode
+
+            marker = find_premature_exit_marker(captured_output, retry_cfg.premature_exit_patterns)
+            if marker is None:
+                return 0
+
+            if resume_num < max_resumes:
+                msg = (
+                    f"[WARN] [harness:{self.name}] Premature exit detected ('{marker}'): the CLI exited while "
+                    f"background tasks were still running. Resuming in the same worktree "
+                    f"({resume_num + 1}/{max_resumes})..."
+                )
+                _logger.warning(msg)
+            else:
+                msg = (
+                    f"[ERROR] [harness:{self.name}] Premature exit detected ('{marker}') and resumes exhausted "
+                    f"({max_resumes}/{max_resumes}). Failing run with exit code {PREMATURE_EXIT_CODE}."
+                )
+                _logger.error(msg)
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{msg}\n")
+            if console_prefix and not AsyncHarnessAdapter.is_tui_mode():
+                _console.print(f"  [bold yellow]{console_prefix}[/bold yellow] {msg}")
+            if eff_state_manager is not None:
+                try:
+                    await eff_state_manager.record_anomaly_event(
+                        project_name=eff_project_name,
+                        node_name=eff_node_name,
+                        error_type="premature_exit",
+                        error_message=msg,
+                        issue_number=eff_issue_number,
+                    )
+                except Exception as e:
+                    _logger.warning("Failed to record anomaly event in state manager: %s", e)
+
+            attempt_prompt = prompt + PREMATURE_EXIT_RESUME_NOTICE.format(
+                attempt=resume_num + 2, max_attempts=max_resumes + 1
+            )
+
+        return PREMATURE_EXIT_CODE
+
+    async def _execute_with_transient_retry(
+        self,
+        cmd: List[str],
+        cwd: Path,
+        env: Dict[str, str],
+        log_file: Path,
+        prompt: str,
+        model: Optional[str],
+        console_prefix: Optional[str],
+        eff_project_name: str,
+        eff_node_name: str,
+        eff_issue_number: Optional[int],
+        eff_state_manager: Optional[StateManager],
+    ) -> tuple[int, str]:
+        """Runs one harness invocation with the transient upstream-error retry engine; returns (exit_code, output)."""
         try:
             returncode, captured_output = await self._execute_once(
                 cmd,
@@ -385,7 +483,7 @@ class AsyncHarnessAdapter:
             eff_issue_number=eff_issue_number,
         )
         if returncode == 0:
-            return 0
+            return 0, captured_output
 
         if returncode == 124 and eff_state_manager is not None:
             try:
@@ -416,7 +514,7 @@ class AsyncHarnessAdapter:
                     )
                 except Exception as e:
                     _logger.warning("Failed to record anomaly event in state manager: %s", e)
-            return returncode
+            return returncode, captured_output
 
         for attempt_num in range(1, retry_cfg.max_retries + 1):
             error_snippet = get_matched_retryable_pattern(captured_output, retry_cfg.retryable_patterns) or "transient error"
@@ -470,7 +568,7 @@ class AsyncHarnessAdapter:
                 eff_issue_number=eff_issue_number,
             )
             if returncode == 0:
-                return 0
+                return 0, captured_output
 
             if returncode == 124 and eff_state_manager is not None:
                 try:
@@ -485,7 +583,7 @@ class AsyncHarnessAdapter:
                     _logger.warning("Failed to record anomaly event in state manager: %s", e)
 
             if not is_retryable_error(captured_output, retry_cfg.retryable_patterns):
-                return returncode
+                return returncode, captured_output
 
         # Retries exhausted
         err_snippet = get_matched_retryable_pattern(captured_output, retry_cfg.retryable_patterns) or "transient error"
@@ -512,7 +610,7 @@ class AsyncHarnessAdapter:
             except Exception as e:
                 _logger.warning("Failed to record anomaly event in state manager: %s", e)
 
-        return returncode
+        return returncode, captured_output
 
     async def _record_tokens(
         self,

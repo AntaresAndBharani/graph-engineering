@@ -321,3 +321,13 @@ harnesses:
 ### Exponential Backoff with Jitter Formula
 $$\text{delay} = \min(\text{max\_delay}, \text{initial\_delay} \times \text{backoff\_factor}^{\text{attempt}}) \times (0.8 + 0.4 \times \text{random}())$$
 
+### Premature-Exit Resume (Background Tasks Killed)
+Headless CLIs in print mode (notably `agy -p`) exit as soon as the root agent goes idle. If the agent started a command in the background (e.g. `pytest`) and then "waits" for it, the CLI logs `terminating N background task(s) on exit`, kills the command and exits **0** without finishing (no commit, no PR). Previously the orchestrator did not notice this; the next poll ran the pre-flight `git reset` and started the same issue over, which in practice cost 2-6 full runs per issue.
+
+The harness now matches `retry.premature_exit_patterns` (regexes) against the output of every exit-0 run:
+- **Match with resumes left** → logs `[WARN] ... Premature exit detected`, records a `premature_exit` anomaly, and immediately re-runs the same prompt in the **same worktree** (no reset), with a `RESUME NOTICE` telling the agent to inspect `git status`/`git diff`, continue from the partial work, and run every command in the foreground.
+- **Match after `max_premature_exit_resumes` (default 2)** → fails with exit code `75` (`PREMATURE_EXIT_CODE`), so the node reports an explicit failure instead of a silent retry.
+
+`agy -c` is intentionally not used to resume: it continues the *most recent* conversation, which is not safe when several projects run at the same time.
+
+The DevTest prompts also instruct the agent to run every command in the foreground, which prevents this failure mode in the first place.

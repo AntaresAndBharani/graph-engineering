@@ -85,6 +85,11 @@ harnesses:
       initial_delay_seconds: 5.0
       backoff_factor: 2.0
       max_delay_seconds: 60.0
+      # agy print mode exits once the agent goes idle, killing backgrounded commands (e.g. pytest).
+      # Such runs exit 0 without finishing; they are resumed immediately in the same worktree.
+      premature_exit_patterns:
+        - 'terminating \d+ background task\(s\) on exit'
+      max_premature_exit_resumes: 2
 
   devin:
     binary: "devin"
