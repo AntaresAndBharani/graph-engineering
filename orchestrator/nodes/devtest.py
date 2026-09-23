@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from rich.console import Console
 
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
@@ -107,7 +107,7 @@ async def _remediate_refactor_pr(
 
     console.print(f"\n  [bold yellow]🔧 [{project.name}:devtest][/bold yellow] [bold white]Remediating PR #{pr_number} ('needs-refactor'):[/bold white] [cyan]'{pr_title}'[/cyan]")
     console.print(f"  [dim]• Target: {project.repo} | Branch: {branch_name} | Harness: {harness_name} ({node_cfg.model or 'default'})[/dim]")
-    console.print(f"  [dim]• Scope: Autonomous Refactoring, Test Verification & PR CI Auto-Merge[/dim]")
+    console.print("  [dim]• Scope: Autonomous Refactoring, Test Verification & PR CI Auto-Merge[/dim]")
 
     env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
 
@@ -170,7 +170,7 @@ async def _remediate_refactor_pr(
         f"1. Inspect the codebase and current implementation on branch '{branch_name}'.\n"
         f"2. Fix the issues, bugs, or failing tests.\n"
         f"3. Run the local unit test suite and confirm that 100% of tests pass.\n"
-        f"4. Commit your changes with a descriptive message: `refactor: address feedback for PR #{pr_number}`.\n"
+        f"4. Check that all changes are committed: run `git status` and verify that 100% of modified, added, and untracked files are committed: `refactor: address feedback for PR #{pr_number}`.\n"
         f"5. Push the updated branch to `origin {branch_name}`.\n\n"
         f"SPEED & LIFECYCLE DIRECTIVES:\n"
         f"- Fast local verification only: run local unit/component tests (e.g. pytest, npm test, ./gradlew testDebugUnitTest).\n"
@@ -1270,11 +1270,13 @@ async def run_devtest_node(
     console.print("  [dim]• Scope: 3-Amigos TDD Development, Test Verification & PR Creation[/dim]")
 
     exec_cwd = await WorktreeManager.ensure_worktree(project, "devtest")
+    branch_name = f"{branch_prefix}{issue_id}"
 
     try:
         await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         await (await asyncio.create_subprocess_exec("git", "fetch", "origin", "main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, "origin/main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         await (await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
     except Exception as e:
         await state_manager.fail_job(
@@ -1314,8 +1316,9 @@ async def run_devtest_node(
         f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
         f"3. Implement the minimal clean code required to make all tests pass.\n"
         f"4. Verify that the entire test suite and linter pass cleanly.\n"
-        f"5. Commit changes with a descriptive message and push your branch ('{branch_prefix}{issue_id}').\n"
-        f"6. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n\n"
+        f"5. Check that all changes are committed: run `git status` and verify that 100% of modified, added, and untracked files are staged and committed (`git status --porcelain` must be completely empty). Never open a Pull Request with uncommitted or untracked changes.\n"
+        f"6. Push your branch ('{branch_name}') to `origin {branch_name}`.\n"
+        f"7. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n\n"
         f"SPEED & LIFECYCLE DIRECTIVES:\n"
         f"- Fast local verification only: run local unit/component tests (e.g. pytest, npm test, ./gradlew testDebugUnitTest).\n"
         f"- DO NOT launch Android emulators, iOS simulators, or full Maestro/E2E UI test suites (these run in remote CI).\n"
@@ -1446,6 +1449,22 @@ async def run_devtest_node(
 
             await state_manager.release_lock(issue_id, project.repo, "devtest")
             return True, f"DevTest subtask #{issue_id} verified: PR #{pr_num} already {pr_state}. Parent advance triggered."
+
+        # Programmatic Guardrail: Ensure model did not leave uncommitted changes after opening PR
+        if pr_state not in ("MERGED", "CLOSED"):
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "status", "--porcelain",
+                cwd=str(exec_cwd),
+                stdout=asyncio.subprocess.PIPE,
+            )
+            diff_out, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=10.0)
+            if diff_out.strip():
+                _logger.info("DevTest model opened PR #%s but left uncommitted files. Auto-committing and pushing...", pr_num)
+                await (await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(exec_cwd))).wait()
+                await (await asyncio.create_subprocess_exec(
+                    "git", "commit", "-m", f"fix(devtest): commit remaining changes for #{issue_id}", cwd=str(exec_cwd)
+                )).wait()
+                await (await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(exec_cwd))).wait()
 
         ran, msg = await _verify_and_auto_merge_pr(
             project=project,
