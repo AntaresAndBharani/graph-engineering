@@ -1,7 +1,7 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and Claude QA Guardian (sonnet with low effort via claude CLI). Iterates up to a maximum of 3 rounds exclusively via docs/draft-requisites/implementation-plan.md. The Architect evaluates system architecture, concurrency, and performance, while Claude QA guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review, /agy-review, or /gemini-architect-review.
+  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and Claude QA Guardian (sonnet with low effort via claude CLI). Iterates up to a maximum of 3 rounds exclusively via the implementation plan file (pass --plan <path>; defaults to docs/draft-requisites/implementation-plan.md). The Architect evaluates system architecture, concurrency, and performance, while Claude QA guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
 ---
 
 # Tri-Party Architect & QA Cross-Review Workflow (/agy-architect-review)
@@ -11,8 +11,16 @@ Use this workflow whenever the user explicitly issues `/agy-architect-review`, `
 > **Global skill — never copy it into a project.** This skill is shared by every project. Its single source of truth is
 > `graph-engineering/.agents/skills/agy-architect-review/`, exposed globally through a directory junction at
 > `$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review` (run `graph-engineering/scripts/link-global-skills.ps1` to recreate it).
-> Always invoke the helper script through that global path from the target project's root; it resolves the target
-> project's `docs/draft-requisites/implementation-plan.md` from the current working directory.
+> Always invoke the helper script through that global path from the target project's root and pass `--plan "<PLAN>"`.
+
+---
+
+## 📄 Plan File Argument (`--plan <path>`)
+Usage: `/agy-architect-review [--plan <path>]` (also `/agy-review`, `/gemini-architect-review`).
+- **`<PLAN>`** in this document means the plan file for the current run: the path the operator passed with `--plan` (absolute, or relative to the target project's root), or `docs/draft-requisites/implementation-plan.md` when no path is given.
+- Resolve `<PLAN>` once at the start and use it for **every** read, append, and helper call in this workflow. Never fall back to the default path when the operator supplied one.
+- `<PLAN>` must already exist for a council review; if it does not, stop and ask the operator, or run `/refine-story --plan <path>` first to create it.
+- Completed plans are archived to an `archive/` folder **next to `<PLAN>`**.
 
 ---
 
@@ -26,8 +34,8 @@ To solve this, the review protocol establishes a **Tri-Party Review Council**:
 3. **Claude QA Guardian (`sonnet`, `effort: low`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
 
 ### Key Invariants:
-1. **Single Medium of Truth:** All communication happens **exclusively** through `docs/draft-requisites/implementation-plan.md` in the target project workspace.
-2. **Live File Holds Only the Active Plan:** Completed plans are moved verbatim to `docs/draft-requisites/archive/<timestamp>-NN-<slug>.md` (one file per plan). The audit trail is preserved in the archive; the live file stays small so no reviewer re-reads finished features.
+1. **Single Medium of Truth:** All communication happens **exclusively** through `<PLAN>` in the target project workspace.
+2. **Live File Holds Only the Active Plan:** Completed plans are moved verbatim to `archive/<timestamp>-NN-<slug>.md` next to `<PLAN>` (one file per plan). The audit trail is preserved in the archive; the live file stays small so no reviewer re-reads finished features.
 3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new, non-persisted `claude -p` session. The plan file already carries the full debate history, so resuming sessions (`-c` / `-r`) only re-sends stale context and multiplies token cost round over round.
 4. **Scoped Reading:** The helper script hands each reviewer exact line ranges to read — the operator's original proposal, the current Final Decision Plan, the latest author iteration, and the reviewer's own previous review — instead of the whole file. Codebase inspection is limited to files the plan names (~8 files max) and targeted greps.
 5. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` is given when no BLOCKING objections remain. BLOCKING is reserved for correctness bugs, data loss, race conditions, security holes, requirement drift, or untestable acceptance criteria.
@@ -41,7 +49,7 @@ To solve this, the review protocol establishes a **Tri-Party Review Council**:
 ```mermaid
 stateDiagram-v2
     [*] --> CheckPlan: Trigger /agy-architect-review
-    CheckPlan --> InitialReview: docs/draft-requisites/implementation-plan.md exists
+    CheckPlan --> InitialReview: <PLAN> exists
     InitialReview --> AppendAuthor: Author evaluates codebase & appends Review Iteration N
 
     AppendAuthor --> CouncilReview: Launch Dual Council Review (Round N)
@@ -90,21 +98,21 @@ stateDiagram-v2
 ## 🛠️ Step-by-Step Execution Protocol
 
 ### Step 1: Target Plan Verification
-Ensure the target project has an existing implementation plan:
+Resolve `<PLAN>` (the `--plan` argument, or the default path) and ensure it exists:
 ```powershell
-<project_root>/docs/draft-requisites/implementation-plan.md
+<PLAN>   # e.g. docs/specs/checkout-redesign.md, or the default docs/draft-requisites/implementation-plan.md
 ```
-If the file does not exist, prompt the user or run `/refine-story` first to establish the initial proposal.
+If the file does not exist, prompt the user or run `/refine-story --plan <PLAN>` first to establish the initial proposal.
 
 **Starting a new feature:** if the live file still holds a finished plan, archive it first so the new plan starts from a clean file:
 ```powershell
-python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --archive
+python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>" --archive
 ```
 
 ### Step 2: Pre-Review / Counter-Proposal (Round N)
 Before council review:
 1. Inspect the live codebase (`grep_search`, `view_file`) to verify ground truth — only the files the plan touches.
-2. Append the author's iteration to `docs/draft-requisites/implementation-plan.md`:
+2. Append the author's iteration to `<PLAN>`:
    ```markdown
    ## 🔍 Review Iteration N (Author Perspective)
    ### 1. Ground Truth Codebase Inspection
@@ -118,11 +126,11 @@ Invoke the review council non-interactively using the helper script (recommended
 
 #### Option A: Via Python Helper Script (Recommended)
 ```powershell
-python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --max-rounds 3
+python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>" --max-rounds 3
 ```
 The helper script automatically:
-- Resolves the local `docs/draft-requisites/implementation-plan.md`.
-- Archives every completed plan except the active one into `docs/draft-requisites/archive/`.
+- Uses the plan file given by `--plan` (without it, it searches upward from the current directory for `docs/draft-requisites/implementation-plan.md`).
+- Archives every completed plan except the active one into `archive/` next to the plan file.
 - Builds a per-reviewer reading guide (exact line ranges) for the active plan.
 - Runs the Architect (`claude --model claude-opus-5-5 --effort medium`) and then Claude QA (`claude --model sonnet --effort low`), each as a fresh `--no-session-persistence` session.
 - Parses both verdicts, surfaces `[BLOCKING]` objections, and enforces the dual consensus gate.
@@ -136,7 +144,7 @@ Only when the script cannot be used. Give each reviewer the line ranges to read 
 **1. Architect Invocation:**
 ```powershell
 $architect_prompt = @"
-You are the Principal Architect conducting Round N of the Architectural Review of 'docs/draft-requisites/implementation-plan.md'.
+You are the Principal Architect conducting Round N of the Architectural Review of '<PLAN>'.
 1. Read ONLY: the original proposal, the current Final Decision Plan, the latest author iteration, and your previous review (line ranges: ...).
 2. Inspect only the codebase files the plan names. Do not run tests.
 3. Tag every objection [BLOCKING] or [NON-BLOCKING]; BLOCKING = correctness bugs, data loss, races, security, requirement drift, untestable AC.
@@ -150,7 +158,7 @@ claude -p $architect_prompt --model claude-opus-5-5 --effort medium --no-session
 **2. Claude QA Guardian Invocation:**
 ```powershell
 $qa_prompt = @"
-You are the QA Lead & Requirements Guardian conducting Round N of the Review of 'docs/draft-requisites/implementation-plan.md'.
+You are the QA Lead & Requirements Guardian conducting Round N of the Review of '<PLAN>'.
 1. Read ONLY: the original proposal, the current Final Decision Plan, the latest author iteration, and your previous review (line ranges: ...).
 2. Anti-Drift Check: Ensure the plan remains 100% faithful to original requirements without scope creep or dropped invariants.
 3. UX/UI & Functional Check: If UI exists, audit UX ergonomics and user feedback; if backend only, audit functional correctness and error handling.
@@ -178,7 +186,7 @@ Read the new review sections (not the whole file).
 
 #### Case 3: Cap Reached (Round == 3 with Disagreement)
 - **DO NOT INVOKE COUNCIL AGAIN.**
-- Append escalation marker in `docs/draft-requisites/implementation-plan.md`:
+- Append escalation marker in `<PLAN>`:
   ```markdown
   ## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies (Round 3 Cap Reached)
   ```
@@ -191,7 +199,7 @@ Read the new review sections (not the whole file).
 ```markdown
 ### ⚠️ Tri-Party Cross-Review Round 3 Escalation: Unresolved Disagreements
 
-The Author, Architect, and Claude QA Guardian have completed 3 iterative debate rounds via `implementation-plan.md` without resolving all BLOCKING objections. Execution has halted to request your architectural decision.
+The Author, Architect, and Claude QA Guardian have completed 3 iterative debate rounds via `<PLAN>` without resolving all BLOCKING objections. Execution has halted to request your architectural decision.
 
 #### 📊 Points of Contention Matrix
 | Role | Contested Item | Stance & Objections | Proposed Alternative / Risk |
@@ -211,7 +219,7 @@ Please select how you wish to proceed:
 
 ## 📋 Document Section Naming Standards
 
-In `docs/draft-requisites/implementation-plan.md`, sections MUST strictly use these headers:
+In `<PLAN>`, sections MUST strictly use these headers:
 - Plan title (one per feature): `# 📋 Implementation Plan: <feature>`
 - Initial plan: `## 📋 Initial Implementation Proposal` (or `## 📝 Initial Draft Proposal`)
 - Author reviews: `## 🔍 Review Iteration N (Author Perspective)`

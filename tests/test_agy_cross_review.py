@@ -9,6 +9,7 @@ Tests:
   - Subprocess invocation flags for claude (fresh, non-persisted sessions)
 """
 
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -267,6 +268,79 @@ VERDICT: DISAGREED
         assert "-r" not in cmd
         assert "-c" not in cmd
         assert "--session-id" not in cmd
+
+    def test_find_plan_file_custom_path(self, tmp_path, monkeypatch):
+        custom = tmp_path / "specs" / "checkout-redesign.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Checkout\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        assert agy_cross_review.find_plan_file("specs/checkout-redesign.md") == custom.resolve()
+        assert agy_cross_review.find_plan_file(str(custom)) == custom.resolve()
+        with pytest.raises(FileNotFoundError, match="Specified plan file not found"):
+            agy_cross_review.find_plan_file("specs/missing.md")
+
+    def test_find_plan_file_default_searches_upward(self, tmp_path, monkeypatch):
+        default = tmp_path / "docs" / "draft-requisites" / "implementation-plan.md"
+        default.parent.mkdir(parents=True)
+        default.write_text("# 📋 Implementation Plan: X\n", encoding="utf-8")
+        nested = tmp_path / "orchestrator" / "nodes"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        assert agy_cross_review.find_plan_file(None) == default.resolve()
+
+    def _run_main(self, monkeypatch, capsys, *argv):
+        monkeypatch.setattr(sys, "argv", ["agy_cross_review.py", *argv])
+        with pytest.raises(SystemExit) as exc:
+            agy_cross_review.main()
+        return exc.value.code, json.loads(capsys.readouterr().out)
+
+    def test_main_check_status_uses_custom_plan(self, tmp_path, monkeypatch, capsys):
+        # A default plan exists too; --plan must win over it.
+        default = tmp_path / "docs" / "draft-requisites" / "implementation-plan.md"
+        default.parent.mkdir(parents=True)
+        default.write_text("# 📋 Implementation Plan: Default\n## 🏛️ Architect Review Iteration 1\n", encoding="utf-8")
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text(
+            "# 📋 Implementation Plan: Feature\n## 🔍 Review Iteration 1 (Author)\n"
+            "## 🏛️ Architect Review Iteration 1\n## 🏛️ Architect Review Iteration 2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", "specs/feature.md", "--check-status")
+
+        assert code == 0
+        assert Path(out["plan_path"]) == custom.resolve()
+        assert out["architect_rounds"] == 2
+        assert out["author_rounds"] == 1
+
+    def test_main_archive_writes_next_to_custom_plan(self, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Done Feature\nbody\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--archive")
+
+        assert code == 0
+        archived = [Path(p) for p in out["archived_files"]]
+        assert len(archived) == 1
+        assert archived[0].parent == custom.parent / "archive"
+        assert "body" in archived[0].read_text(encoding="utf-8")
+        assert custom.read_text(encoding="utf-8") == ""
+        assert not (tmp_path / "docs").exists()
+
+    def test_main_missing_custom_plan_fails_fast(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", "specs/nope.md", "--check-status")
+
+        assert code == 1
+        assert out["status"] == "error"
+        assert "nope.md" in out["message"]
 
     def test_default_models(self):
         assert agy_cross_review.DEFAULT_ARCHITECT_MODEL == "claude-opus-5-5"

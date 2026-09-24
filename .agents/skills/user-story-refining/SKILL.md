@@ -1,7 +1,7 @@
 ---
 name: user-story-refining
 description: >-
-  Critical 3-Amigos architectural refinement workflow for draft user stories, requirements, and implementation plans. Supports standard refinement and Boost Mode (--boost / /boost) for 360-degree multi-perspective deep analysis, sequential thinking state simulation, and adversarial red-teaming. Maintains a persistent evolutionary audit trail in docs/draft-requisites/implementation-plan.md tracking the initial plan, agent reviews, operator reviews, and the final decision plan. Thoroughly inspects technical implementation, identifies anti-patterns, demands robust BDD acceptance criteria and INVEST decomposition, and withholds approval until the design is pristine, resilient, and well-documented. Trigger with /refine-story, /user-story-refining, /refine-story --boost, or /boost.
+  Critical 3-Amigos architectural refinement workflow for draft user stories, requirements, and implementation plans. Supports standard refinement and Boost Mode (--boost / /boost) for 360-degree multi-perspective deep analysis, sequential thinking state simulation, and adversarial red-teaming. Maintains a persistent evolutionary audit trail in the implementation plan file (pass --plan <path>; defaults to docs/draft-requisites/implementation-plan.md) tracking the initial plan, agent reviews, operator reviews, and the final decision plan. Thoroughly inspects technical implementation, identifies anti-patterns, demands robust BDD acceptance criteria and INVEST decomposition, and withholds approval until the design is pristine, resilient, and well-documented. Trigger with /refine-story [--plan <path>], /user-story-refining, /refine-story --boost, or /boost.
 ---
 
 # User Story Refining Workflow (/refine-story, /user-story-refining, --boost)
@@ -13,7 +13,16 @@ Use this workflow whenever the user issues `/refine-story`, `/user-story-refinin
 - **Profile:** Deep analytical reasoning for 3-Amigos critical review, Boost swarm evaluation, edge-case vulnerability detection, and pristine BDD Gherkin synthesis.
 
 ## 🎯 Purpose
-Serves as an uncompromising, hyper-critical 3-Amigos and Architectural Review Gate. It maintains a persistent, multi-iteration audit trail inside `docs/draft-requisites/implementation-plan.md`—capturing the initial plan, successive agent reviews, operator reviews, multi-perspective boost analyses, and the consolidated **Final Decision Plan** from which GitHub Epic stories are produced.
+Serves as an uncompromising, hyper-critical 3-Amigos and Architectural Review Gate. It maintains a persistent, multi-iteration audit trail inside `<PLAN>`—capturing the initial plan, successive agent reviews, operator reviews, multi-perspective boost analyses, and the consolidated **Final Decision Plan** from which GitHub Epic stories are produced.
+
+---
+
+## 📄 Plan File Argument (`--plan <path>`)
+Usage: `/refine-story [--plan <path>] [--boost]` (also `/user-story-refining`, `/boost`). The flags can be combined in any order.
+- **`<PLAN>`** in this document means the plan file for the current run: the path the operator passed with `--plan` (absolute, or relative to the target project's root), or `docs/draft-requisites/implementation-plan.md` when no path is given.
+- Resolve `<PLAN>` once at the start and use it for **every** read, append, and helper call in this workflow. Never fall back to the default path when the operator supplied one.
+- If `<PLAN>` does not exist yet, create it (including parent folders) and start it with the `# 📋 Implementation Plan` heading from the Living Document Standard below.
+- Completed plans are archived to an `archive/` folder **next to `<PLAN>`**.
 
 ---
 
@@ -36,7 +45,7 @@ Activates a deep **360° Multi-Perspective & Adversarial Analysis Swarm**:
 ## 🛡️ Core Principles & Golden Rules
 
 1. **Persistent Evolutionary Audit Trail:**
-   - Never overwrite or erase prior review iterations in `docs/draft-requisites/implementation-plan.md`.
+   - Never overwrite or erase prior review iterations in `<PLAN>`.
    - Append each review as a distinct `## 🔍 Review Iteration N` or `## 🚀 Boost Review Iteration N` section and keep the `## 🎯 Final Decision Plan` updated at the bottom as the single source of truth for GitHub issue creation.
 
 2. **Uncompromising Critical Scrutiny:**
@@ -51,9 +60,9 @@ Activates a deep **360° Multi-Perspective & Adversarial Analysis Swarm**:
 
 ---
 
-## 📂 Living Document Standard: `docs/draft-requisites/implementation-plan.md`
+## 📂 Living Document Standard: `<PLAN>`
 
-Every refined user story must be tracked in `docs/draft-requisites/implementation-plan.md` following this structure:
+Every refined user story must be tracked in `<PLAN>` following this structure:
 
 ```markdown
 # 📋 Implementation Plan & Refinement Lifecycle: [Topic / Feature]
@@ -101,7 +110,7 @@ Every refined user story must be tracked in `docs/draft-requisites/implementatio
 ## 📋 Execution Procedure
 
 ### Step 1: Ingestion & Ground Truth Research
-1. Locate and view `docs/draft-requisites/implementation-plan.md` (or the draft prompt/issue).
+1. Resolve `<PLAN>` and view it (or the draft prompt/issue). If a finished plan is still in it, archive it first with `python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>" --archive`.
 2. Cross-reference proposed tables, models, and classes against existing files in `orchestrator/` to detect:
    - **Data Duplication:** Existing tables or ledger structures that already capture the requested telemetry.
    - **Class Duplication:** Existing managers or engines that should be extended rather than duplicated.
@@ -113,10 +122,10 @@ Every refined user story must be tracked in `docs/draft-requisites/implementatio
    - Execute the **4 Analytical Lenses** (Architecture, Adversarial QA, Security, INVEST).
    - Trace sequential state transitions and simulate edge-case failure loops.
    - Formulate the **Adversarial Red-Team Critique**.
-3. Append a new section `## 🔍 Review Iteration N` or `## 🚀 Boost Review Iteration N` to `docs/draft-requisites/implementation-plan.md`.
+3. Append a new section `## 🔍 Review Iteration N` or `## 🚀 Boost Review Iteration N` to `<PLAN>`.
 
 ### Step 3: Synthesize or Update the Final Decision Plan
-1. Update `## 🎯 Final Decision Plan & User Story Specification` at the bottom of `docs/draft-requisites/implementation-plan.md`.
+1. Update `## 🎯 Final Decision Plan & User Story Specification` at the bottom of `<PLAN>`.
 2. Ensure it contains:
    - User Story (*As a... I want... So that...*).
    - System Architecture & Data Flow sequence.
@@ -134,10 +143,10 @@ Once the user explicitly approves:
 1. **Deterministic CLI Provisioning (`/provision-story`):**
    - Execute deterministic provisioning using the companion skill `/provision-story` or directly via CLI:
      ```powershell
-     python -m orchestrator.cli story provision <project_name>
+     python -m orchestrator.cli story provision <project_name> --file "<PLAN>"
      ```
    - Pre-flight dry run is available via `--dry-run`.
-   - The CLI parses `docs/draft-requisites/implementation-plan.md`, verifies the Single Active Feature Invariant, creates issues via `gh` CLI, posts the triple-redundancy comment, and synchronizes SQLite `state.db` with 0 runtime LLM tokens.
+   - The CLI parses `<PLAN>` (always pass `--file "<PLAN>"`; without it the CLI falls back to the default path), verifies the Single Active Feature Invariant, creates issues via `gh` CLI, posts the triple-redundancy comment, and synchronizes SQLite `state.db` with 0 runtime LLM tokens.
 2. **Zero-Token Runtime Architect Bypass:** Pre-refined requirements do NOT use `needs-triage` (saving 100% of runtime Architect LLM tokens).
 3. **Provisioning Pattern Selection:**
    - **Pattern A (Standalone Task, $\le 300$ LOC, $\le 4$ files):** Single issue labeled `ready-for-dev` directly (no parent, no child). DevTest executes directly via Fallback 1.

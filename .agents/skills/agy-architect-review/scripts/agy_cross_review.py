@@ -346,7 +346,13 @@ def _append_from_stdout_if_missing(plan_path: Path, stdout: str, heading_re: str
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Tri-Party Cross-Review Council (Author, Architect, Claude QA Guardian)")
-    parser.add_argument("--plan", type=str, default=None, help="Path to implementation-plan.md")
+    parser.add_argument(
+        "--plan",
+        type=str,
+        default=None,
+        help="Path to the implementation plan file, absolute or relative to the current directory "
+        "(default: search upward from the current directory for docs/draft-requisites/implementation-plan.md)",
+    )
     parser.add_argument("--architect-model", type=str, default=DEFAULT_ARCHITECT_MODEL, help=f"Architect model (default: {DEFAULT_ARCHITECT_MODEL})")
     parser.add_argument("--architect-effort", type=str, default=DEFAULT_ARCHITECT_EFFORT, help=f"Architect effort (default: {DEFAULT_ARCHITECT_EFFORT})")
     parser.add_argument("--qa-model", type=str, default=DEFAULT_QA_MODEL, help=f"Claude QA model (default: {DEFAULT_QA_MODEL})")
