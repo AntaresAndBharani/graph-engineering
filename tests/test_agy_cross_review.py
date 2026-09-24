@@ -317,6 +317,35 @@ VERDICT: DISAGREED
         assert out["architect_rounds"] == 2
         assert out["author_rounds"] == 1
 
+    @pytest.mark.parametrize("flag", ["--plan", "--path", "--file"])
+    def test_main_accepts_plan_flag_aliases(self, flag, tmp_path, monkeypatch, capsys):
+        # A default plan exists too; every alias must select the custom file, never the default.
+        default = tmp_path / "docs" / "draft-requisites" / "implementation-plan.md"
+        default.parent.mkdir(parents=True)
+        default.write_text("# 📋 Implementation Plan: Default\n", encoding="utf-8")
+        custom = tmp_path / "docs" / "draft-requisites" / "archive" / "impl_mobile_removal.md"
+        custom.parent.mkdir()
+        custom.write_text("I want to remove everything related to the mobile app.\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, flag, str(custom), "--check-status")
+
+        assert code == 0
+        assert Path(out["plan_path"]) == custom.resolve()
+
+    def test_main_archive_raw_requirement_is_noop(self, tmp_path, monkeypatch, capsys):
+        """A raw requirement file (no plan heading) must never be moved or emptied by --archive."""
+        custom = tmp_path / "impl_explorer_filters.md"
+        custom.write_text("I want to create filters in asset explorer.\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, "--path", str(custom), "--archive")
+
+        assert code == 0
+        assert out["archived_files"] == []
+        assert custom.read_text(encoding="utf-8") == "I want to create filters in asset explorer.\n"
+        assert not (tmp_path / "archive").exists()
+
     def test_main_archive_writes_next_to_custom_plan(self, tmp_path, monkeypatch, capsys):
         custom = tmp_path / "specs" / "feature.md"
         custom.parent.mkdir()

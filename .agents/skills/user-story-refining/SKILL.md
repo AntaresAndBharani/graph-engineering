@@ -18,11 +18,17 @@ Serves as an uncompromising, hyper-critical 3-Amigos and Architectural Review Ga
 ---
 
 ## 📄 Plan File Argument (`--plan <path>`)
-Usage: `/refine-story [--plan <path>] [--boost]` (also `/user-story-refining`, `/boost`). The flags can be combined in any order.
-- **`<PLAN>`** in this document means the plan file for the current run: the path the operator passed with `--plan` (absolute, or relative to the target project's root), or `docs/draft-requisites/implementation-plan.md` when no path is given.
-- Resolve `<PLAN>` once at the start and use it for **every** read, append, and helper call in this workflow. Never fall back to the default path when the operator supplied one.
+Usage: `/refine-story [--plan <path>] [--boost]` (also `/user-story-refining`, `/boost`). The flags can be combined in any order; `--path` and `--file` are accepted as aliases of `--plan`.
+- **`<PLAN>`** in this document means the plan file for the current run: the file the operator named for this run (see *Resolving `<PLAN>`* below; absolute, or relative to the target project's root), or `docs/draft-requisites/implementation-plan.md` when no path is given.
 - If `<PLAN>` does not exist yet, create it (including parent folders) and start it with the `# 📋 Implementation Plan` heading from the Living Document Standard below.
 - Completed plans are archived to an `archive/` folder **next to `<PLAN>`**.
+
+### Resolving `<PLAN>` (mandatory, before any other step)
+1. **Any file the operator names for this run IS `<PLAN>`** — whether passed as `--plan <path>`, `--path <path>`, `--file <path>`, or mentioned in the request text (e.g. "review the requirement in `docs/.../impl_x.md`"). That file is both the input and the output: refine it **in place**.
+2. Use the default `docs/draft-requisites/implementation-plan.md` **only when the operator names no file at all**.
+3. **Hard rule:** when `<PLAN>` is not the default file, never create, write, append to, or archive `docs/draft-requisites/implementation-plan.md` (or any other plan file). Every helper-script call gets `--plan "<PLAN>"` with exactly that path.
+4. **Raw requirement files:** if `<PLAN>` has no `# 📋 Implementation Plan` heading (e.g. it only holds the operator's free-text request), convert it in place: add `# 📋 Implementation Plan: <feature title>` at the top, keep the operator's original text verbatim under `## 📝 Initial Draft Proposal`, then append review iterations and the Final Decision Plan to the same file. Only archive `<PLAN>` when it already holds a *finished* plan and the operator starts a new feature in that same file.
+5. State the resolved `<PLAN>` path at the start of your first reply, and confirm the exact file you wrote at the end.
 
 ---
 

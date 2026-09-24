@@ -348,6 +348,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Tri-Party Cross-Review Council (Author, Architect, Claude QA Guardian)")
     parser.add_argument(
         "--plan",
+        "--path",
+        "--file",
+        dest="plan",
         type=str,
         default=None,
         help="Path to the implementation plan file, absolute or relative to the current directory "
