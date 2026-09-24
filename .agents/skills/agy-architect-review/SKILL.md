@@ -1,12 +1,12 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and Claude QA Guardian (sonnet with low effort via claude CLI). Iterates up to a maximum of 3 rounds exclusively via the implementation plan file (the file the operator names via --plan/--path/--file or in the request, edited in place; defaults to docs/draft-requisites/implementation-plan.md only when no file is named). The Architect evaluates system architecture, concurrency, and performance, while Claude QA guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
+  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and QA Guardian (Gemini 3.8 Flash Medium via agy CLI). Iterates up to a maximum of 3 rounds exclusively via the implementation plan file (the file the operator names via --plan/--path/--file or in the request, edited in place; defaults to docs/draft-requisites/implementation-plan.md only when no file is named). The Architect evaluates system architecture, concurrency, and performance, while the QA Guardian guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
 ---
 
 # Tri-Party Architect & QA Cross-Review Workflow (/agy-architect-review)
 
-Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan. The council reviewers run headless via the `claude` CLI: the **Architect** on **Claude Opus 5.5 (`claude-opus-5-5`, `effort: medium`)** and the **QA Guardian** on **`sonnet`, `effort: low`**. (The skill keeps its historical `agy`/`gemini` trigger names; the Architect seat moved from `gemini-3.8-flash-high` to Opus 5.5.)
+Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan. The council reviewers run headless: the **Architect** on **Claude Opus 5.5 (`claude-opus-5-5`, `effort: medium`)** via the `claude` CLI, and the **QA Guardian** on **Gemini 3.8 Flash Medium (`gemini-3.8-flash-medium`)** via the `agy` CLI. (The skill keeps its historical `agy`/`gemini` trigger names; the Architect seat moved from `gemini-3.8-flash-high` to Opus 5.5.)
 
 > **Global skill — never copy it into a project.** This skill is shared by every project. Its single source of truth is
 > `graph-engineering/.agents/skills/agy-architect-review/`, exposed globally through a directory junction at
@@ -37,15 +37,15 @@ In complex software design, deep architectural debates between author and system
 To solve this, the review protocol establishes a **Tri-Party Review Council**:
 1. **Author Agent (Synthesizer):** Drafts the initial proposal and synthesizes revisions in response to critiques.
 2. **Architect (`claude-opus-5-5`, `effort: medium`):** Scrutinizes systems architecture, concurrency, pipe/lock safety, DB schema integrity, performance, and failure modes.
-3. **Claude QA Guardian (`sonnet`, `effort: low`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
+3. **QA Guardian (`gemini-3.8-flash-medium` via `agy`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
 
 ### Key Invariants:
 1. **Single Medium of Truth:** All communication happens **exclusively** through `<PLAN>` in the target project workspace.
 2. **Live File Holds Only the Active Plan:** Completed plans are moved verbatim to `archive/<timestamp>-NN-<slug>.md` next to `<PLAN>` (one file per plan). The audit trail is preserved in the archive; the live file stays small so no reviewer re-reads finished features.
-3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new, non-persisted `claude -p` session. The plan file already carries the full debate history, so resuming sessions (`-c` / `-r`) only re-sends stale context and multiplies token cost round over round.
+3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new session (`claude -p --no-session-persistence` for the Architect, `agy -p` without `-c` for QA). The plan file already carries the full debate history, so resuming sessions (`-c` / `-r`) only re-sends stale context and multiplies token cost round over round.
 4. **Scoped Reading:** The helper script hands each reviewer exact line ranges to read — the operator's original proposal, the current Final Decision Plan, the latest author iteration, and the reviewer's own previous review — instead of the whole file. Codebase inspection is limited to files the plan names (~8 files max) and targeted greps.
 5. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` is given when no BLOCKING objections remain. BLOCKING is reserved for correctness bugs, data loss, race conditions, security holes, requirement drift, or untestable acceptance criteria.
-6. **Dual Consensus Gate:** Approval requires **both** Architect and Claude QA to issue `VERDICT: AGREED`.
+6. **Dual Consensus Gate:** Approval requires **both** Architect and QA Guardian to issue `VERDICT: AGREED`.
 7. **Hard 3-Round Cap & Guaranteed Operator Escalation:** If after 3 rounds dual agreement is not achieved, execution halts and surfaces a consolidated dispute matrix to the human operator.
 
 ---
@@ -62,8 +62,8 @@ stateDiagram-v2
     state CouncilReview {
         [*] --> ArchivePlans: Archive completed plans (keep active plan only)
         ArchivePlans --> InvokeArchitect: Fresh claude session (Opus 5.5, medium) with reading guide
-        InvokeArchitect --> InvokeClaudeQA: Fresh claude session (sonnet, low) with reading guide
-        InvokeClaudeQA --> [*]
+        InvokeArchitect --> InvokeQA: Fresh agy session (gemini-3.8-flash-medium) with reading guide
+        InvokeQA --> [*]
     }
 
     CouncilReview --> CheckDualVerdict: Evaluate Both Verdicts
@@ -90,14 +90,14 @@ stateDiagram-v2
   - Backward compatibility, regression risks on existing pipelines.
 - **Section Appended:** `## 🏛️ Architect Review Iteration N` (legacy `## 🏛️ Gemini Architect Review Iteration N` headings are still recognized)
 
-### 🧪 Party 2: Claude QA Guardian (`sonnet`, `effort: low`)
+### 🧪 Party 2: QA Guardian (`gemini-3.8-flash-medium` via `agy`)
 - **Lens:** Requirements Fidelity, UX/UI Experience & Functional Correctness
 - **Core Checks:**
   - **Anti-Drift Requirement Guardian:** Cross-checks the proposal against the **user's original prompt and stated constraints**. Disallows dropping, over-abstracting, or altering the user's intent.
   - **UX/UI Experience Audit (If UI exists):** Audits layout ergonomics, interactive states (loading, empty, error, active cursor), visual hierarchy, Rich tables, and user feedback.
   - **Functional Correctness Audit (If no UI exists):** Audits behavioral correctness, input validation, error messages returned to user/logs, edge cases (cold-start, network drop, zero-division), and fail-closed safety.
   - **BDD Acceptance Criteria & Testability:** Confirms Gherkin scenarios are complete, unambiguous, and cover nominal and adversarial paths.
-- **Section Appended:** `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)`
+- **Section Appended:** `## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)` (legacy `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)` headings are still recognized)
 
 ---
 
@@ -125,7 +125,7 @@ Before council review:
    ```
 3. Keep **exactly one** `## 🎯 Final Decision Plan & User Story Specification` section in the active plan. When revising it, replace that section (and move it to the end of the file) instead of appending another full copy. It is the only section that may be edited in place; all iteration and review sections stay append-only, so the history of what changed lives in the iterations.
 
-### Step 3: Council Execution (Architect + Claude QA)
+### Step 3: Council Execution (Architect + QA Guardian)
 Invoke the review council non-interactively using the helper script (recommended) or direct CLI commands.
 
 #### Option A: Via Python Helper Script (Recommended)
@@ -136,7 +136,7 @@ The helper script automatically:
 - Uses exactly the file given by `--plan` (aliases `--path`, `--file`). Always pass it: without it, the script falls back to searching upward for `docs/draft-requisites/implementation-plan.md`, warns on stderr, and reports `"plan_source": "default"`. If the JSON `plan_path` is not the resolved `<PLAN>`, stop and report it; do not keep working on the other file.
 - Archives every completed plan except the active one into `archive/` next to the plan file.
 - Builds a per-reviewer reading guide (exact line ranges) for the active plan.
-- Runs the Architect (`claude --model claude-opus-5-5 --effort medium`) and then Claude QA (`claude --model sonnet --effort low`), each as a fresh `--no-session-persistence` session.
+- Runs the Architect (`claude --model claude-opus-5-5 --effort medium`) and then the QA Guardian (`agy --model gemini-3.8-flash-medium`), each as a fresh session.
 - Parses both verdicts, surfaces `[BLOCKING]` objections, and enforces the dual consensus gate.
 - Emits a structured JSON summary (`plan_path`, `plan_source`, `council_verdict`, `architect_verdict`, `qa_verdict`, `unresolved_points`, `archived_files`).
 
@@ -159,7 +159,7 @@ Conclude with VERDICT: AGREED if there are no BLOCKING objections, otherwise VER
 claude -p $architect_prompt --model claude-opus-5-5 --effort medium --no-session-persistence --dangerously-skip-permissions
 ```
 
-**2. Claude QA Guardian Invocation:**
+**2. QA Guardian Invocation:**
 ```powershell
 $qa_prompt = @"
 You are the QA Lead & Requirements Guardian conducting Round N of the Review of '<PLAN>'.
@@ -168,10 +168,10 @@ You are the QA Lead & Requirements Guardian conducting Round N of the Review of 
 3. UX/UI & Functional Check: If UI exists, audit UX ergonomics and user feedback; if backend only, audit functional correctness and error handling.
 4. Testability Check: Confirm Gherkin BDD criteria cover edge cases and failure modes.
 5. Tag every objection [BLOCKING] or [NON-BLOCKING], then append a new section titled:
-## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)
+## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)
 Conclude with VERDICT: AGREED if there are no BLOCKING objections, otherwise VERDICT: DISAGREED.
 "@
-claude -p $qa_prompt --model sonnet --effort low --no-session-persistence --dangerously-skip-permissions
+agy -p $qa_prompt --model gemini-3.8-flash-medium --dangerously-skip-permissions --print-timeout 15m
 ```
 
 ### Step 4: Verdict Analysis & Convergence Check
@@ -183,7 +183,7 @@ Read the new review sections (not the whole file).
 - Report completion and present the approved Final Decision Plan to the user.
 
 #### Case 2: Disagreement & Round < 3
-- Address the `[BLOCKING]` objections under `## 🏛️ Architect Review Iteration N` and `## 🧪 Claude QA Review Iteration N`. NON-BLOCKING notes may be adopted or explicitly declined in one line each.
+- Address the `[BLOCKING]` objections under `## 🏛️ Architect Review Iteration N` and `## 🧪 QA Review Iteration N`. NON-BLOCKING notes may be adopted or explicitly declined in one line each.
 - Increment the round count (N → N+1).
 - Append `## 🔍 Review Iteration N+1 (Author Response)` and replace the Final Decision Plan section.
 - Return to **Step 3** to re-invoke the council for Round N+1.
@@ -203,19 +203,19 @@ Read the new review sections (not the whole file).
 ```markdown
 ### ⚠️ Tri-Party Cross-Review Round 3 Escalation: Unresolved Disagreements
 
-The Author, Architect, and Claude QA Guardian have completed 3 iterative debate rounds via `<PLAN>` without resolving all BLOCKING objections. Execution has halted to request your architectural decision.
+The Author, Architect, and QA Guardian have completed 3 iterative debate rounds via `<PLAN>` without resolving all BLOCKING objections. Execution has halted to request your architectural decision.
 
 #### 📊 Points of Contention Matrix
 | Role | Contested Item | Stance & Objections | Proposed Alternative / Risk |
 | :--- | :--- | :--- | :--- |
 | **Architect** | [System/Technical Item] | ... | ... |
-| **Claude QA** | [Requirement/UX Item] | ... | ... |
+| **QA Guardian** | [Requirement/UX Item] | ... | ... |
 | **Author** | [Proposed Synthesis] | ... | ... |
 
 #### 🎯 Action Required from Operator
 Please select how you wish to proceed:
 - **Option 1:** Adopt the Author proposal.
-- **Option 2:** Adopt the Architect's recommendation on technical points and Claude QA's recommendation on requirements/UX.
+- **Option 2:** Adopt the Architect's recommendation on technical points and the QA Guardian's recommendation on requirements/UX.
 - **Option 3:** Provide specific compromise or custom guidance.
 ```
 
@@ -228,7 +228,7 @@ In `<PLAN>`, sections MUST strictly use these headers:
 - Initial plan: `## 📋 Initial Implementation Proposal` (or `## 📝 Initial Draft Proposal`)
 - Author reviews: `## 🔍 Review Iteration N (Author Perspective)`
 - Architect reviews: `## 🏛️ Architect Review Iteration N`
-- Claude QA reviews: `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)`
+- QA reviews: `## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)`
 - Final decision (exactly one, replaced in place): `## 🎯 Final Decision Plan & User Story Specification`
 - Escalation: `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`
 

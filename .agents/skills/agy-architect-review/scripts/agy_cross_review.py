@@ -4,7 +4,7 @@ agy_cross_review.py - Tri-Party Cross-Review Orchestration Script.
 Coordinates the Tri-Party Review Council:
   1. Author (Synthesizer via the plan file)
   2. Architect (Claude Opus 5.5, medium effort, via claude CLI)
-  3. QA Guardian (Claude Sonnet, low effort, via claude CLI)
+  3. QA Guardian (Gemini 3.8 Flash Medium, via agy CLI)
 Enforces up to 3 iterative debate rounds exclusively mediated via the plan file passed with --plan
 (aliases --path/--file; default: docs/draft-requisites/implementation-plan.md, found by searching upward).
 
@@ -28,12 +28,13 @@ from typing import List, Optional, Tuple
 
 DEFAULT_ARCHITECT_MODEL = "claude-opus-5-5"
 DEFAULT_ARCHITECT_EFFORT = "medium"
-DEFAULT_QA_MODEL = "sonnet"
-DEFAULT_QA_EFFORT = "low"
+# agy encodes the reasoning effort in the model name (gemini-3.8-flash-{low,medium,high}).
+DEFAULT_QA_MODEL = "gemini-3.8-flash-medium"
+DEFAULT_QA_EFFORT: Optional[str] = None
 
 PLAN_HEADING_RE = re.compile(r"^#\s*📋\s*Implementation Plan")
 ARCHITECT_HEADING_RE = r"##\s*🏛️\s*(?:Gemini\s+)?Architect\s+Review Iteration"
-QA_HEADING_RE = r"##\s*🧪\s*Claude\s+QA\s+Review Iteration"
+QA_HEADING_RE = r"##\s*🧪\s*(?:Claude\s+)?QA\s+Review Iteration"
 AUTHOR_HEADING_RE = r"##\s*(?:🔍|🚀|💬)\s*(?:Boost\s*)?Review Iteration"
 FINAL_PLAN_HEADING_RE = r"##\s*🎯\s*Final Decision Plan"
 PROPOSAL_HEADING_RE = r"##\s*(?:📝|📋)\s*Initial"
@@ -234,7 +235,7 @@ def build_qa_prompt(round_num: int, plan_path: Path, guide: List[str]) -> str:
         f"You are the QA Lead & Requirements Guardian conducting Round {round_num} of the Review of the active implementation plan in '{abs_path}'.",
         "",
         "OPERATIONAL RULES:",
-        *_common_rules(abs_path, guide, f"## 🧪 Claude QA Review Iteration {round_num} (Requirements & UX/UI Guardian)"),
+        *_common_rules(abs_path, guide, f"## 🧪 QA Review Iteration {round_num} (Requirements & UX/UI Guardian)"),
         "QA MANDATE:",
         "- MANDATE 1 - REQUIREMENTS FIDELITY (ANTI-DRIFT GUARDIAN): Cross-check the plan against the operator's original request and constraints. "
         "Verify that optimizations, abstractions, or architect debates have NOT dropped, diluted, or altered the operator's core deliverables and invariants.",
@@ -270,6 +271,29 @@ def invoke_claude(prompt: str, model: str, effort: str) -> Tuple[int, str, str]:
     env = os.environ.copy()
     env["GH_PROMPT_DISABLED"] = "1"
     env["CLAUDE_NON_INTERACTIVE"] = "1"
+
+    process = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return process.returncode, process.stdout, process.stderr
+
+
+def invoke_agy(prompt: str, model: str, effort: Optional[str] = None) -> Tuple[int, str, str]:
+    """Runs one fresh headless agy session (never `-c`: the plan file carries the history)."""
+    cmd = ["agy", "-p", prompt, "--model", model]
+    if effort:
+        cmd.extend(["--effort", effort])
+    cmd.extend(["--dangerously-skip-permissions", "--print-timeout", "15m"])
+
+    env = os.environ.copy()
+    env["GH_PROMPT_DISABLED"] = "1"
+    env["AGY_NON_INTERACTIVE"] = "1"
 
     process = subprocess.run(
         cmd,
@@ -345,7 +369,7 @@ def _append_from_stdout_if_missing(plan_path: Path, stdout: str, heading_re: str
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Tri-Party Cross-Review Council (Author, Architect, Claude QA Guardian)")
+    parser = argparse.ArgumentParser(description="Tri-Party Cross-Review Council (Author, Architect, QA Guardian)")
     parser.add_argument(
         "--plan",
         "--path",
@@ -358,10 +382,10 @@ def main() -> None:
     )
     parser.add_argument("--architect-model", type=str, default=DEFAULT_ARCHITECT_MODEL, help=f"Architect model (default: {DEFAULT_ARCHITECT_MODEL})")
     parser.add_argument("--architect-effort", type=str, default=DEFAULT_ARCHITECT_EFFORT, help=f"Architect effort (default: {DEFAULT_ARCHITECT_EFFORT})")
-    parser.add_argument("--qa-model", type=str, default=DEFAULT_QA_MODEL, help=f"Claude QA model (default: {DEFAULT_QA_MODEL})")
-    parser.add_argument("--qa-effort", type=str, default=DEFAULT_QA_EFFORT, help=f"Claude QA effort (default: {DEFAULT_QA_EFFORT})")
+    parser.add_argument("--qa-model", type=str, default=DEFAULT_QA_MODEL, help=f"QA model, run via agy (default: {DEFAULT_QA_MODEL})")
+    parser.add_argument("--qa-effort", type=str, default=DEFAULT_QA_EFFORT, help="Optional agy --effort for QA (default: none; the effort is part of the model name)")
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum number of debate rounds")
-    parser.add_argument("--skip-qa", action="store_true", help="Skip Claude QA review and run the Architect only")
+    parser.add_argument("--skip-qa", action="store_true", help="Skip the QA review and run the Architect only")
     parser.add_argument("--check-status", action="store_true", help="Only check status and round count")
     parser.add_argument("--archive", action="store_true", help="Archive ALL plans in the live file (use before starting a new feature) and exit")
 
@@ -433,13 +457,13 @@ def main() -> None:
     updated_plan_content = _append_from_stdout_if_missing(plan_path, architect_stdout, ARCHITECT_HEADING_RE, next_round, count_index=1)
     architect_verdict = parse_architect_verdict(updated_plan_content, architect_stdout, next_round)
 
-    # 2. Claude QA Guardian (unless skipped)
+    # 2. QA Guardian via agy (unless skipped)
     qa_verdict = "AGREED"
     qa_code = 0
     qa_stdout = ""
     if not args.skip_qa:
         qa_prompt = build_qa_prompt(next_round, plan_path, reading_guide(updated_plan_content, "qa", next_round))
-        qa_code, qa_stdout, _ = invoke_claude(qa_prompt, model=args.qa_model, effort=args.qa_effort)
+        qa_code, qa_stdout, _ = invoke_agy(qa_prompt, model=args.qa_model, effort=args.qa_effort)
         updated_plan_content = _append_from_stdout_if_missing(plan_path, qa_stdout, QA_HEADING_RE, next_round, count_index=2)
         qa_verdict = parse_qa_verdict(updated_plan_content, qa_stdout, next_round)
 
@@ -450,7 +474,7 @@ def main() -> None:
     if architect_verdict != "AGREED":
         unresolved.extend([f"[Architect] {p}" for p in extract_disagreement_points(updated_plan_content, next_round, header_prefix="🏛️")])
     if qa_verdict != "AGREED":
-        unresolved.extend([f"[Claude QA] {p}" for p in extract_disagreement_points(updated_plan_content, next_round, header_prefix="🧪")])
+        unresolved.extend([f"[QA] {p}" for p in extract_disagreement_points(updated_plan_content, next_round, header_prefix="🧪")])
 
     result = {
         "status": "completed",

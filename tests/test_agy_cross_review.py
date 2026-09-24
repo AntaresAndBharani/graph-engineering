@@ -1,12 +1,12 @@
 """
 Unit test suite for Antigravity Tri-Party Architect & QA Cross-Review Script.
 Tests:
-  - Iteration counting (Author, Architect incl. legacy Gemini headings, Claude QA)
+  - Iteration counting (Author, Architect incl. legacy Gemini headings, QA incl. legacy Claude QA headings)
   - Plan archiving and scoped reading guides
   - Prompt construction with QA mandates and BLOCKING/NON-BLOCKING verdict rules
-  - Dual verdict parsing (Architect & Claude QA)
+  - Dual verdict parsing (Architect & QA)
   - Disagreement extraction
-  - Subprocess invocation flags for claude (fresh, non-persisted sessions)
+  - Subprocess invocation flags for claude (Architect) and agy (QA), always fresh sessions
 """
 
 import json
@@ -94,7 +94,8 @@ Architect reviewed first.
         assert "UX/UI EXPERIENCE AUDIT" in prompt
         assert "FUNCTIONAL RIGOR AUDIT" in prompt
         assert "BDD ACCEPTANCE CRITERIA COMPLETENESS" in prompt
-        assert "## 🧪 Claude QA Review Iteration 2 (Requirements & UX/UI Guardian)" in prompt
+        assert "## 🧪 QA Review Iteration 2 (Requirements & UX/UI Guardian)" in prompt
+        assert "Claude QA" not in prompt
         assert "VERDICT: AGREED" in prompt
         assert "VERDICT: DISAGREED" in prompt
         assert "[BLOCKING]" in prompt
@@ -394,8 +395,43 @@ VERDICT: DISAGREED
         assert out["status"] == "error"
         assert "nope.md" in out["message"]
 
+    def test_count_and_parse_new_qa_heading(self):
+        plan = """
+# 📋 Implementation Plan: Feature Z
+## 🔍 Review Iteration 1 (Author Perspective)
+## 🏛️ Architect Review Iteration 1
+VERDICT: AGREED
+## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)
+- [BLOCKING] Missing empty-state scenario.
+VERDICT: DISAGREED
+"""
+        assert agy_cross_review.count_iterations(plan) == (1, 1, 1)
+        assert agy_cross_review.parse_qa_verdict(plan, "", 1) == "DISAGREED"
+        assert agy_cross_review.extract_disagreement_points(plan, 1, header_prefix="🧪") == [
+            "[BLOCKING] Missing empty-state scenario."
+        ]
+
+    @patch("subprocess.run")
+    def test_invoke_agy_arguments(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+
+        agy_cross_review.invoke_agy(prompt="QA Prompt", model="gemini-3.8-flash-medium")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "agy"
+        assert cmd[cmd.index("-p") + 1] == "QA Prompt"
+        assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-medium"
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--effort" not in cmd
+        # Fresh session every round: never continue the most recent conversation
+        assert "-c" not in cmd
+        assert "--continue" not in cmd
+
+        agy_cross_review.invoke_agy(prompt="QA Prompt", model="gemini-3.8-flash-high", effort="low")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--effort") + 1] == "low"
+
     def test_default_models(self):
         assert agy_cross_review.DEFAULT_ARCHITECT_MODEL == "claude-opus-5-5"
         assert agy_cross_review.DEFAULT_ARCHITECT_EFFORT == "medium"
-        assert agy_cross_review.DEFAULT_QA_MODEL == "sonnet"
-        assert agy_cross_review.DEFAULT_QA_EFFORT == "low"
+        assert agy_cross_review.DEFAULT_QA_MODEL == "gemini-3.8-flash-medium"
+        assert agy_cross_review.DEFAULT_QA_EFFORT is None
