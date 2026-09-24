@@ -1,7 +1,7 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and Claude QA Guardian (sonnet with low effort via claude CLI). Iterates up to a maximum of 3 rounds exclusively via the implementation plan file (pass --plan <path>; defaults to docs/draft-requisites/implementation-plan.md). The Architect evaluates system architecture, concurrency, and performance, while Claude QA guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
+  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and Claude QA Guardian (sonnet with low effort via claude CLI). Iterates up to a maximum of 3 rounds exclusively via the implementation plan file (the file the operator names via --plan/--path/--file or in the request, edited in place; defaults to docs/draft-requisites/implementation-plan.md only when no file is named). The Architect evaluates system architecture, concurrency, and performance, while Claude QA guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
 ---
 
 # Tri-Party Architect & QA Cross-Review Workflow (/agy-architect-review)
@@ -104,16 +104,14 @@ stateDiagram-v2
 ## 🛠️ Step-by-Step Execution Protocol
 
 ### Step 1: Target Plan Verification
-Resolve `<PLAN>` (the `--plan` argument, or the default path) and ensure it exists:
+Resolve `<PLAN>` following *Resolving `<PLAN>`* above (a file named via `--plan`, `--path`, `--file`, or in the request text; the default path only when no file is named) and ensure it exists:
 ```powershell
 <PLAN>   # e.g. docs/specs/checkout-redesign.md, or the default docs/draft-requisites/implementation-plan.md
 ```
-If the file does not exist, prompt the user or run `/refine-story --plan <PLAN>` first to establish the initial proposal.
+If the file does not exist, prompt the user or run `/refine-story --plan "<PLAN>"` first to establish the initial proposal.
+If it has no `# 📋 Implementation Plan` heading, it is still a raw requirement: run `/refine-story --plan "<PLAN>"` first.
 
-**Starting a new feature:** if the live file still holds a finished plan, archive it first so the new plan starts from a clean file:
-```powershell
-python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>" --archive
-```
+**Never run `--archive` in this workflow.** `--archive` moves *every* plan out of the file, including the one you are about to review. Starting a new feature (and archiving the previous one) belongs to `/refine-story`. The council run below already archives older, finished plans automatically while keeping the active one.
 
 ### Step 2: Pre-Review / Counter-Proposal (Round N)
 Before council review:
@@ -135,12 +133,12 @@ Invoke the review council non-interactively using the helper script (recommended
 python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>" --max-rounds 3
 ```
 The helper script automatically:
-- Uses the plan file given by `--plan` (without it, it searches upward from the current directory for `docs/draft-requisites/implementation-plan.md`).
+- Uses exactly the file given by `--plan` (aliases `--path`, `--file`). Always pass it: without it, the script falls back to searching upward for `docs/draft-requisites/implementation-plan.md`, warns on stderr, and reports `"plan_source": "default"`. If the JSON `plan_path` is not the resolved `<PLAN>`, stop and report it; do not keep working on the other file.
 - Archives every completed plan except the active one into `archive/` next to the plan file.
 - Builds a per-reviewer reading guide (exact line ranges) for the active plan.
 - Runs the Architect (`claude --model claude-opus-5-5 --effort medium`) and then Claude QA (`claude --model sonnet --effort low`), each as a fresh `--no-session-persistence` session.
 - Parses both verdicts, surfaces `[BLOCKING]` objections, and enforces the dual consensus gate.
-- Emits a structured JSON summary (`council_verdict`, `architect_verdict`, `qa_verdict`, `unresolved_points`, `archived_files`).
+- Emits a structured JSON summary (`plan_path`, `plan_source`, `council_verdict`, `architect_verdict`, `qa_verdict`, `unresolved_points`, `archived_files`).
 
 Overrides: `--architect-model`, `--architect-effort`, `--qa-model`, `--qa-effort`, `--skip-qa`, `--check-status`.
 

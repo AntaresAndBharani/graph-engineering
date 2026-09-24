@@ -2,14 +2,14 @@
 """
 agy_cross_review.py - Tri-Party Cross-Review Orchestration Script.
 Coordinates the Tri-Party Review Council:
-  1. Author (Synthesizer via implementation-plan.md)
+  1. Author (Synthesizer via the plan file)
   2. Architect (Claude Opus 5.5, medium effort, via claude CLI)
   3. QA Guardian (Claude Sonnet, low effort, via claude CLI)
-Enforces up to 3 iterative debate rounds exclusively mediated via
-docs/draft-requisites/implementation-plan.md.
+Enforces up to 3 iterative debate rounds exclusively mediated via the plan file passed with --plan
+(aliases --path/--file; default: docs/draft-requisites/implementation-plan.md, found by searching upward).
 
 Token discipline:
-  - Completed plans are archived to docs/draft-requisites/archive/ so the live file only holds the active plan.
+  - Completed plans are archived to an archive/ folder next to the plan file so it only holds the active plan.
   - Every round is a fresh, non-persisted session; reviewers read only the line ranges they need
     (the file itself already carries the full debate history, so session resumption is redundant).
 """
@@ -107,7 +107,7 @@ def _slugify(title: str) -> str:
 
 def archive_plans(plan_path: Path, keep_active: bool = True, now: Optional[datetime] = None) -> List[Path]:
     """
-    Moves completed plans out of the live implementation-plan.md into docs/draft-requisites/archive/,
+    Moves completed plans out of the plan file into an archive/ folder next to it,
     one file per plan, preserving the audit trail verbatim.
     keep_active=True archives every plan except the latest; keep_active=False archives all of them.
     Returns the archive files written.
@@ -373,9 +373,23 @@ def main() -> None:
         print(json.dumps({"status": "error", "message": str(e)}))
         sys.exit(1)
 
+    # Callers must verify they are working on the file the operator named, not a silently chosen default.
+    plan_source = "argument" if args.plan else "default"
+    if plan_source == "default":
+        print(
+            f"WARNING: no --plan given; using default plan file {plan_path}. "
+            "Pass --plan with the file the operator named.",
+            file=sys.stderr,
+        )
+
     if args.archive:
         written = archive_plans(plan_path, keep_active=False)
-        print(json.dumps({"status": "archived", "archived_files": [str(p) for p in written]}, indent=2))
+        print(json.dumps({
+            "status": "archived",
+            "plan_path": str(plan_path),
+            "plan_source": plan_source,
+            "archived_files": [str(p) for p in written],
+        }, indent=2))
         sys.exit(0)
 
     # Keep only the active plan in the live file so reviewers never re-read finished features.
@@ -388,6 +402,7 @@ def main() -> None:
         print(json.dumps({
             "status": "ok",
             "plan_path": str(plan_path),
+            "plan_source": plan_source,
             "author_rounds": author_rounds,
             "architect_rounds": architect_rounds,
             "qa_rounds": qa_rounds,
@@ -408,6 +423,7 @@ def main() -> None:
             "author_rounds": author_rounds,
             "unresolved_points": points[:10],
             "plan_path": str(plan_path),
+            "plan_source": plan_source,
         }, indent=2))
         sys.exit(2)
 
@@ -444,6 +460,7 @@ def main() -> None:
         "qa_verdict": qa_verdict,
         "max_rounds": args.max_rounds,
         "plan_path": str(plan_path),
+        "plan_source": plan_source,
         "archived_files": [str(p) for p in archived],
         "unresolved_points": unresolved,
         "architect_returncode": architect_code,

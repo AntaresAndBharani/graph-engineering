@@ -333,6 +333,29 @@ VERDICT: DISAGREED
         assert code == 0
         assert Path(out["plan_path"]) == custom.resolve()
 
+    def test_main_reports_plan_source(self, tmp_path, monkeypatch, capsys):
+        default = tmp_path / "docs" / "draft-requisites" / "implementation-plan.md"
+        default.parent.mkdir(parents=True)
+        default.write_text("# 📋 Implementation Plan: Default\n", encoding="utf-8")
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Feature\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--check-status")
+        assert code == 0
+        assert out["plan_source"] == "argument"
+        assert Path(out["plan_path"]) == custom.resolve()
+
+        monkeypatch.setattr(sys, "argv", ["agy_cross_review.py", "--check-status"])
+        with pytest.raises(SystemExit):
+            agy_cross_review.main()
+        captured = capsys.readouterr()
+        out_default = json.loads(captured.out)
+        assert out_default["plan_source"] == "default"
+        assert Path(out_default["plan_path"]) == default.resolve()
+        assert "WARNING: no --plan given" in captured.err
+
     def test_main_archive_raw_requirement_is_noop(self, tmp_path, monkeypatch, capsys):
         """A raw requirement file (no plan heading) must never be moved or emptied by --archive."""
         custom = tmp_path / "impl_explorer_filters.md"
