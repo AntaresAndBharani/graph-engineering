@@ -1,18 +1,16 @@
 <#
 .SYNOPSIS
-    Exposes graph-engineering's SDLC skills globally without copying them.
+    Exposes graph-engineering's SDLC skills globally without copying them to individual project repos.
 
 .DESCRIPTION
-    graph-engineering/.agents/skills/ is the single source of truth for the shared SDLC skills.
-    This script replaces each skill folder under the Antigravity plugin
-    (~/.gemini/config/plugins/swarm-dev-core/skills/<name>) with a directory junction pointing
-    back at the repo, so every project sees the same, versioned files. Junctions need no admin rights.
+    graph-engineering/skills/ is the single source of truth for the shared SDLC skills.
+    This script mirrors each skill folder into the global Antigravity plugin
+    (~/.gemini/config/plugins/swarm-dev-core/skills/<name>) so every project and chat sees the same skills.
 
-    An existing real folder is moved to a timestamped backup next to the plugin, never deleted.
-    Re-running the script is safe: correct junctions are left untouched.
+    IMPORTANT: Real directories are required. NTFS Directory Junctions (reparse points) must NOT
+    be used because Antigravity's filesystem crawler ignores reparse points during skill discovery.
 
-    Never copy these skills into project repos. Their scripts are invoked through the global path
-    (e.g. $HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py).
+    Re-running the script is safe and idempotent.
 #>
 [CmdletBinding()]
 param(
@@ -29,11 +27,10 @@ $SharedSkills = @(
     "user-story-refining"
 )
 
-$RepoSkillsDir = (Resolve-Path (Join-Path $PSScriptRoot "..\.agents\skills")).Path
+$RepoSkillsDir = (Resolve-Path (Join-Path $PSScriptRoot "..\skills")).Path
 if (-not (Test-Path $PluginSkillsDir)) {
-    New-Item -ItemType Directory -Path $PluginSkillsDir | Out-Null
+    New-Item -ItemType Directory -Path $PluginSkillsDir -Force | Out-Null
 }
-$BackupDir = Join-Path (Split-Path $PluginSkillsDir -Parent) ("skills-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 
 foreach ($name in $SharedSkills) {
     $source = Join-Path $RepoSkillsDir $name
@@ -45,20 +42,13 @@ foreach ($name in $SharedSkills) {
     $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
     if ($existing) {
         $isLink = [bool]($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)
-        if ($isLink -and (@($existing.Target) -contains $source)) {
-            Write-Host "ok       $name -> $source"
-            continue
-        }
         if ($isLink) {
-            # A junction pointing elsewhere: removing it does not touch the files it points to.
+            # Legacy junction pointing elsewhere: remove reparse point without touching target
             [IO.Directory]::Delete($target)
-        } else {
-            if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir | Out-Null }
-            Move-Item -LiteralPath $target -Destination (Join-Path $BackupDir $name)
-            Write-Host "backup   $name -> $BackupDir"
         }
     }
 
-    New-Item -ItemType Junction -Path $target -Target $source | Out-Null
-    Write-Host "linked   $name -> $source"
+    # Mirror directory contents, excluding temporary cache files
+    robocopy $source $target /MIR /XD __pycache__ /NJH /NJS /NDL /NC /NS | Out-Null
+    Write-Host "synced   $name -> $target"
 }
