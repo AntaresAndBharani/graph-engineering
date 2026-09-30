@@ -17,7 +17,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Add skill script directory to sys.path
-SKILL_SCRIPT_DIR = Path(__file__).resolve().parent.parent / ".agents" / "skills" / "agy-architect-review" / "scripts"
+_repo_root = Path(__file__).resolve().parent.parent
+SKILL_SCRIPT_DIR = _repo_root / "skills" / "agy-architect-review" / "scripts"
+if not SKILL_SCRIPT_DIR.exists():
+    SKILL_SCRIPT_DIR = _repo_root / ".agents" / "skills" / "agy-architect-review" / "scripts"
 if str(SKILL_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPT_DIR))
 

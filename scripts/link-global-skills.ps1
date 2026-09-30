@@ -3,7 +3,7 @@
     Exposes graph-engineering's SDLC skills globally without copying them to individual project repos.
 
 .DESCRIPTION
-    graph-engineering/.agents/skills/ is the single source of truth for the shared SDLC skills.
+    graph-engineering/skills/ is the single source of truth for the shared SDLC skills.
     This script mirrors each skill folder into the global Antigravity plugin
     (~/.gemini/config/plugins/swarm-dev-core/skills/<name>) so every project and chat sees the same skills.
 
@@ -27,7 +27,7 @@ $SharedSkills = @(
     "user-story-refining"
 )
 
-$RepoSkillsDir = (Resolve-Path (Join-Path $PSScriptRoot "..\.agents\skills")).Path
+$RepoSkillsDir = (Resolve-Path (Join-Path $PSScriptRoot "..\skills")).Path
 if (-not (Test-Path $PluginSkillsDir)) {
     New-Item -ItemType Directory -Path $PluginSkillsDir -Force | Out-Null
 }
