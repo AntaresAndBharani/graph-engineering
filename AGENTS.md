@@ -52,7 +52,7 @@ When the user prefixes their instruction with `/agy-architect-review` (optionall
 2. **Two-Tier Review Council Architecture:**
    - **Tier 1: Tri-Party Working Council:**
      - **Author Agent:** Formulates the implementation proposal and synthesizes revisions in response to council critiques.
-     - **Principal Architect (Claude Opus 5.5, `claude-opus-5-5`, `effort: medium`):** Headless execution via `claude` CLI (`--model claude-opus-5-5 --effort medium --no-session-persistence --dangerously-skip-permissions -p`). Scrutinizes technical architecture, concurrency, pipe safety, DB schema integrity, and performance.
+     - **System Architect (Gemini 3.8 Flash High, `gemini-3.8-flash-high`):** Headless execution via `agy` CLI (`-p --model gemini-3.8-flash-high --dangerously-skip-permissions`, never `-c`). Scrutinizes technical architecture, concurrency, pipe safety, DB schema integrity, and performance.
      - **QA Guardian (Gemini 3.8 Flash Medium, `gemini-3.8-flash-medium`):** Headless execution via `agy` CLI (`-p --model gemini-3.8-flash-medium --dangerously-skip-permissions`, never `-c`). Acts as the **Requirements & UX/UI Guardian**—enforces 100% fidelity to the operator's original prompt and constraints (anti-drift), audits UX/UI ergonomics (or functional correctness if backend only), and verifies Gherkin BDD testability.
    - **Tier 2: Chief Functional Architect Validation Gate:**
      - **Chief Functional Architect (Claude Opus 5.5, `claude-opus-5-5`, `effort: max`):** Headless execution via `claude` CLI (`--model claude-opus-5-5 --effort max --no-session-persistence --dangerously-skip-permissions -p`). Scrutinizes the proposal in the *most critical way possible*:
