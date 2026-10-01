@@ -13,6 +13,7 @@ settings:
   bau_interval_seconds: 86400         # 1 day / 24 hours interval for BAU maintenance
   tech_debt_interval_seconds: 14400   # 4 hours interval for technical debt audit
   max_concurrent_jobs: 4              # Concurrency threshold to prevent RAM exhaustion
+  max_concurrent_developing_projects: 2 # Limit parallel developing projects across orchestrator
   db_path: "~/.config/orchestrator/state.db"
   log_dir: "~/.config/orchestrator/logs"
   log_level: "INFO"

@@ -58,6 +58,30 @@ async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool,
     return True, "Safety verified."
 
 
+async def _release_slot_if_idle(project: ProjectConfig, state_manager: StateManager) -> None:
+    """
+    Releases the project's development slot if there are no further actionable tasks
+    and no in-flight PRs awaiting CI or remediation.
+    """
+    try:
+        next_task = await state_manager.get_next_devtest_task(project.name)
+        if next_task is None:
+            open_prs = await fetch_open_prs(project.repo, limit=10)
+            has_dev_pr = any(
+                "dev-implemented" in [l.get("name") if isinstance(l, dict) else str(l) for l in p.get("labels", [])]
+                or "needs-refactor" in [l.get("name") if isinstance(l, dict) else str(l) for l in p.get("labels", [])]
+                or p.get("headRefName", "").startswith("feat/issue-")
+                or "issue-" in p.get("headRefName", "")
+                for p in open_prs
+            )
+            if not has_dev_pr:
+                released = await state_manager.release_development_slot(project.name)
+                if released:
+                    _logger.info("[%s:devtest] Released development slot (idle/finished).", project.name)
+    except Exception as e:
+        _logger.debug("[%s:devtest] Failed to check/release development slot: %s", project.name, e)
+
+
 async def _remediate_refactor_pr(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -255,6 +279,7 @@ async def _remediate_refactor_pr(
                     await _advance_parent_and_unlock_next_subtask(project, state_manager, pr_number)
                 except Exception:
                     pass
+                await _release_slot_if_idle(project, state_manager)
                 return True, f"DevTest node remediated PR #{pr_number}, verified CI 100% Green, and merged into main."
 
     if shutil.which("gh"):
@@ -269,6 +294,7 @@ async def _remediate_refactor_pr(
         )
         await asyncio.wait_for(p_edit.communicate(), timeout=10.0)
 
+    await state_manager.touch_development_slot(project.name)
     return True, f"DevTest node remediated PR #{pr_number} and updated branch '{branch_name}' (awaiting CI completion)."
 
 
@@ -825,6 +851,7 @@ async def _verify_and_auto_merge_pr(
                 except Exception as ex:
                     console.print(f"  [{project.name}:devtest] [dim yellow]Parent sequential advance notice: {ex}[/dim yellow]")
 
+                await _release_slot_if_idle(project, state_manager)
                 return True, f"DevTest node implemented issue #{issue_id}, verified CI 100% Green, and auto-merged PR #{pr_number} into main."
             else:
                 err_text = (stderr_m or b"").decode("utf-8", errors="replace").strip()
@@ -921,6 +948,7 @@ async def _verify_and_auto_merge_pr(
             "linked_pr": pr_number,
         }],
     )
+    await state_manager.touch_development_slot(project.name)
     return True, f"DevTest node implemented issue #{issue_id} and opened PR #{pr_number} (CI checks pending)."
 
 
@@ -985,6 +1013,20 @@ async def run_devtest_node(
     # Phase 1: Remediate PRs with 'needs-refactor'
     refactor_prs = await fetch_open_prs(project.repo, label="needs-refactor", limit=1)
     if refactor_prs:
+        max_dev_projects = getattr(getattr(config, "settings", None), "max_concurrent_developing_projects", 2)
+        acquired, active_slots = await state_manager.acquire_development_slot(
+            project.name, project.repo, max_slots=max_dev_projects
+        )
+        if not acquired:
+            _logger.info(
+                "[%s:devtest] Development concurrency limit reached (%d/%d active: %s). Deferring needs-refactor remediation.",
+                project.name,
+                len(active_slots),
+                max_dev_projects,
+                ", ".join(active_slots),
+            )
+            return False, f"Development concurrency limit reached ({len(active_slots)}/{max_dev_projects} active: {', '.join(active_slots)}). Project '{project.name}' deferred."
+
         harness_name = node_cfg.harness or "antigravity"
         allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager, harness_name=harness_name)
         if not allowed:
@@ -1065,6 +1107,8 @@ async def run_devtest_node(
                 issue_number=pr_number,
             )
             return False, f"PR #{pr_number} failed CI checks ({ci_details}). Tagged 'needs-refactor'."
+        else:
+            await state_manager.touch_development_slot(project.name)
 
     # Phase 3: Deterministic Gating for New Implementation Issues via Story Lock (0 Tokens)
     try:
@@ -1078,7 +1122,24 @@ async def run_devtest_node(
             "[%s:devtest] Project is locked on active story or no actionable task found. Idling (0 tokens).",
             project.name,
         )
+        await _release_slot_if_idle(project, state_manager)
         return False, f"No PRs awaiting CI and no actionable task for project '{project.name}' (story lock active or idle). Idle (0 tokens)."
+
+    # Concurrency Slot Gating: Limit parallel developing projects (0 LLM tokens)
+    max_dev_projects = getattr(getattr(config, "settings", None), "max_concurrent_developing_projects", 2)
+    acquired, active_slots = await state_manager.acquire_development_slot(
+        project.name, project.repo, max_slots=max_dev_projects
+    )
+    if not acquired:
+        _logger.info(
+            "[%s:devtest] Development concurrency limit reached (%d/%d active: %s). Deferring task #%s.",
+            project.name,
+            len(active_slots),
+            max_dev_projects,
+            ", ".join(active_slots),
+            target_issue_id,
+        )
+        return False, f"Development concurrency limit reached ({len(active_slots)}/{max_dev_projects} active: {', '.join(active_slots)}). Project '{project.name}' deferred."
 
     # Pre-Flight Quota Gating (Pure local SQLite calculation, 0 LLM tokens)
     harness_name = node_cfg.harness or "antigravity"
@@ -1089,6 +1150,7 @@ async def run_devtest_node(
     # Targeted Fetch of the specific issue payload via fetch_issue_by_number (0 LLM tokens)
     target_issue = await fetch_issue_by_number(project.repo, target_issue_id)
     if not target_issue:
+        await _release_slot_if_idle(project, state_manager)
         return False, f"Target issue #{target_issue_id} could not be fetched from GitHub."
 
     # Guard against already-closed or merged issues
@@ -1130,6 +1192,7 @@ async def run_devtest_node(
             }],
         )
         await state_manager.release_lock(target_issue_id, project.repo, "devtest")
+        await _release_slot_if_idle(project, state_manager)
         return False, f"Target issue #{target_issue_id} is already closed on GitHub. Synchronized state and skipped."
 
     issue_id = target_issue["number"]
@@ -1393,6 +1456,7 @@ async def run_devtest_node(
                 await asyncio.wait_for(p2.communicate(), timeout=10.0)
             except Exception:
                 pass
+        await _release_slot_if_idle(project, state_manager)
         return False, f"DevTest execution failed on issue #{issue_id} (exit code {exit_code})."
 
     # 6. Verify if PR was created by the harness (exact head-branch ref query)
@@ -1465,6 +1529,7 @@ async def run_devtest_node(
                 _logger.debug("Parent advance after merged PR error: %s", ex)
 
             await state_manager.release_lock(issue_id, project.repo, "devtest")
+            await _release_slot_if_idle(project, state_manager)
             return True, f"DevTest subtask #{issue_id} verified: PR #{pr_num} already {pr_state}. Parent advance triggered."
 
         # Programmatic Guardrail: Ensure model did not leave uncommitted changes after opening PR
@@ -1518,6 +1583,7 @@ async def run_devtest_node(
             issue_number=issue_id,
         )
         await state_manager.release_lock(issue_id, project.repo, "devtest")
+        await _release_slot_if_idle(project, state_manager)
         return False, f"DevTest finished with 0 file changes for issue #{issue_id}."
 
     # 8. Branch, Commit, Push & PR Lifecycle (if uncommitted changes exist)
@@ -1565,6 +1631,7 @@ async def run_devtest_node(
             issue_number=issue_id,
         )
         await state_manager.release_lock(issue_id, project.repo, "devtest")
+        await _release_slot_if_idle(project, state_manager)
         return False, f"Git / PR creation failed: {e}"
 
     if created_pr_num:

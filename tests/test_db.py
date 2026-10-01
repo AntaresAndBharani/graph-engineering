@@ -2658,6 +2658,62 @@ async def test_tech_debt_audits_blackboard_lifecycle(tmp_path: Path):
     assert audit_after_reinit["issue_number"] == 180
 
 
+@pytest.mark.asyncio
+async def test_active_development_slots_lifecycle(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    manager = StateManager(db_path)
+    await manager.init_db()
+
+    # 1. Project 1 acquires slot
+    acq1, slots1 = await manager.acquire_development_slot("proj-a", "org/repo-a", max_slots=2)
+    assert acq1 is True
+    assert slots1 == ["proj-a"]
+    assert await manager.count_active_development_slots() == 1
+
+    # 2. Project 1 re-acquires (refreshes slot)
+    acq1_refresh, slots1_refresh = await manager.acquire_development_slot("proj-a", "org/repo-a", max_slots=2)
+    assert acq1_refresh is True
+    assert slots1_refresh == ["proj-a"]
+    assert await manager.count_active_development_slots() == 1
+
+    # 3. Project 2 acquires second slot
+    acq2, slots2 = await manager.acquire_development_slot("proj-b", "org/repo-b", max_slots=2)
+    assert acq2 is True
+    assert "proj-a" in slots2 and "proj-b" in slots2
+    assert await manager.count_active_development_slots() == 2
+
+    # 4. Project 3 attempts to acquire when max_slots=2 is reached -> rejected
+    acq3, slots3 = await manager.acquire_development_slot("proj-c", "org/repo-c", max_slots=2)
+    assert acq3 is False
+    assert len(slots3) == 2
+    assert "proj-c" not in slots3
+
+    # 5. Touch slot for Project 1
+    touched = await manager.touch_development_slot("proj-a")
+    assert touched is True
+
+    # 6. Release slot for Project 1
+    released = await manager.release_development_slot("proj-a")
+    assert released is True
+    assert await manager.count_active_development_slots() == 1
+    assert await manager.get_active_development_slots() == ["proj-b"]
+
+    # 7. Now Project 3 can acquire the freed slot
+    acq3_retry, slots3_retry = await manager.acquire_development_slot("proj-c", "org/repo-c", max_slots=2)
+    assert acq3_retry is True
+    assert "proj-c" in slots3_retry
+    assert await manager.count_active_development_slots() == 2
+
+    # 8. Stale slot cleanup via cleanup_expired_locks
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("UPDATE active_development_slots SET updated_at = ? WHERE project_name = 'proj-b';", (time.time() - 10000,))
+        await db.commit()
+
+    await manager.cleanup_expired_locks()
+    assert await manager.get_active_development_slots() == ["proj-c"]
+
+
+
 
 
 

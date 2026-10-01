@@ -137,6 +137,16 @@ class StateManager:
             )
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS active_development_slots (
+                    project_name TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL,
+                    acquired_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                """
+            )
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS pr_artifacts (
                     repo TEXT NOT NULL,
                     pr_number INTEGER NOT NULL,
@@ -700,6 +710,7 @@ class StateManager:
                 """
             )
             count = cursor.rowcount
+            await db.execute("DELETE FROM active_development_slots;")
             await db.commit()
             return count if count > 0 else 0
 
@@ -718,6 +729,10 @@ class StateManager:
                 (now,),
             )
             count = cursor.rowcount
+            await db.execute(
+                "DELETE FROM active_development_slots WHERE updated_at <= ?;",
+                (now - 7200.0,),
+            )
             await db.commit()
             return count if count > 0 else 0
 
@@ -794,6 +809,10 @@ class StateManager:
                 """,
                 (project_name, now),
             )
+            await db.execute(
+                "DELETE FROM active_development_slots WHERE project_name = ?;",
+                (project_name,),
+            )
             await db.commit()
 
     async def resume_project(self, project_name: str) -> None:
@@ -834,6 +853,115 @@ class StateManager:
             )
             rows = await cursor.fetchall()
             return {row[0] for row in rows}
+
+    async def acquire_development_slot(
+        self,
+        project_name: str,
+        repo: str,
+        max_slots: int = 2,
+        ttl_seconds: float = 7200.0,
+    ) -> tuple[bool, list[str]]:
+        """
+        Attempts to acquire or retain a concurrent development slot for project_name.
+        Returns (acquired: bool, active_project_names: list[str]).
+        If project_name already holds a slot, refreshes updated_at and returns (True, active_projects).
+        If slots are full (>= max_slots), returns (False, active_projects).
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+
+            # 1. Purge stale slots older than TTL
+            await db.execute(
+                "DELETE FROM active_development_slots WHERE updated_at <= ?;",
+                (now - ttl_seconds,),
+            )
+
+            # 2. Check if this project already holds an active slot
+            cursor = await db.execute(
+                "SELECT project_name FROM active_development_slots WHERE project_name = ?;",
+                (project_name,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                await db.execute(
+                    "UPDATE active_development_slots SET updated_at = ? WHERE project_name = ?;",
+                    (now, project_name),
+                )
+                await db.commit()
+                cur_all = await db.execute(
+                    "SELECT project_name FROM active_development_slots ORDER BY acquired_at ASC;"
+                )
+                all_rows = await cur_all.fetchall()
+                return True, [r[0] for r in all_rows]
+
+            # 3. Check current held slots
+            cur_active = await db.execute(
+                "SELECT project_name FROM active_development_slots ORDER BY acquired_at ASC;"
+            )
+            active_rows = await cur_active.fetchall()
+            active_names = [r[0] for r in active_rows]
+
+            if len(active_names) < max_slots:
+                await db.execute(
+                    "INSERT INTO active_development_slots (project_name, repo, acquired_at, updated_at) "
+                    "VALUES (?, ?, ?, ?);",
+                    (project_name, repo, now, now),
+                )
+                await db.commit()
+                return True, active_names + [project_name]
+
+            return False, active_names
+
+    async def release_development_slot(self, project_name: str) -> bool:
+        """Releases the concurrent development slot held by project_name."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "DELETE FROM active_development_slots WHERE project_name = ?;",
+                (project_name,),
+            )
+            count = cursor.rowcount
+            await db.commit()
+            return count > 0
+
+    async def get_active_development_slots(self) -> list[str]:
+        """Returns the list of project names currently holding active development slots."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "SELECT project_name FROM active_development_slots ORDER BY acquired_at ASC;"
+            )
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    async def touch_development_slot(self, project_name: str) -> bool:
+        """Refreshes updated_at timestamp for a held development slot."""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "UPDATE active_development_slots SET updated_at = ? WHERE project_name = ?;",
+                (now, project_name),
+            )
+            count = cursor.rowcount
+            await db.commit()
+            return count > 0
+
+    async def count_active_development_slots(self) -> int:
+        """Returns the count of active development slots."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM active_development_slots;"
+            )
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
 
     async def update_idle_sweep_timestamp(self, project_name: str, timestamp: Optional[float] = None) -> None:
         """

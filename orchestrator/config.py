@@ -167,6 +167,7 @@ class SettingsConfig(OrchestratorBaseModel):
     bau_interval_seconds: int = 86400  # 1 day / 24 hours interval for BAU maintenance
     tech_debt_interval_seconds: int = 14400  # 4 hours interval for technical debt audit sweep
     max_concurrent_jobs: int = 4
+    max_concurrent_developing_projects: int = Field(default=2, ge=1)
     db_path: str = "~/.config/orchestrator/state.db"
     log_dir: str = "~/.config/orchestrator/logs"
     log_level: str = "INFO"

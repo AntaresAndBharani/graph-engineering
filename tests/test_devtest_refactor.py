@@ -412,4 +412,79 @@ async def test_devtest_oversized_issue_body_offloaded_to_file(tmp_path: Path, mo
     assert len(captured_prompt) < 4000
 
 
+@pytest.mark.asyncio
+async def test_devtest_development_concurrency_limit(tmp_path: Path, monkeypatch):
+    """Verifies that DevTest defers a project when max_concurrent_developing_projects is reached."""
+    from orchestrator import poller
+    from orchestrator.nodes import devtest
+    from orchestrator.config import SettingsConfig
+
+    async def mock_fetch_prs(repo, label=None, limit=20):
+        return []
+
+    async def mock_fetch_issue(repo, num):
+        return {"number": 105, "title": "Subtask 105", "state": "OPEN", "labels": [{"name": "ready-for-dev"}]}
+
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(devtest, "fetch_issue_by_number", mock_fetch_issue)
+
+    config = GlobalConfig(settings=SettingsConfig(max_concurrent_developing_projects=2))
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    # Pre-occupy 2 development slots with other projects
+    await state_manager.acquire_development_slot("proj-1", "org/repo-1", max_slots=2)
+    await state_manager.acquire_development_slot("proj-2", "org/repo-2", max_slots=2)
+
+    # Setup project 3 with a ready-for-dev subtask
+    project3 = ProjectConfig(name="proj-3", repo="org/repo-3", local_path=str(tmp_path))
+    await state_manager.sync_project_sdlc_items(
+        "proj-3",
+        [{
+            "issue_number": 105,
+            "title": "Subtask 105",
+            "state": "OPEN",
+            "labels": ["ready-for-dev"],
+            "item_type": "SUBTASK",
+            "sequence_order": 1,
+        }],
+    )
+
+    # 1. Project 3 runs devtest -> Concurrency limit reached, ignored/deferred
+    ran, msg = await run_devtest_node(project3, config, state_manager)
+    assert ran is False
+    assert "Development concurrency limit reached" in msg
+    assert "2/2 active" in msg
+    assert "Project 'proj-3' deferred" in msg
+
+    # 2. Release slot for proj-1 (simulating finished development)
+    await state_manager.release_development_slot("proj-1")
+
+    # 3. Project 3 should now acquire the slot
+    # Mock adapter & git status to exit cleanly
+    class DummyAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def execute(self, *args, **kwargs):
+            return 0
+
+    monkeypatch.setattr(devtest, "AsyncHarnessAdapter", DummyAdapter)
+    monkeypatch.setattr(devtest, "verify_git_safety", AsyncMock(return_value=(True, "ok")))
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.wait = AsyncMock(return_value=0)
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+
+    await run_devtest_node(project3, config, state_manager)
+    # Slot is acquired by proj-3
+    assert "proj-3" in await state_manager.get_active_development_slots()
+
+
+
 
