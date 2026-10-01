@@ -1,7 +1,7 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative Two-Tier Architectural Review Council between Author, Principal Architect (Claude Opus 5.5, medium effort via claude CLI), QA Guardian (Gemini 3.8 Flash Medium via agy CLI), and Chief Functional Architect (Claude Opus 5.5, max effort via claude CLI). Council iterates up to 3 rounds before passing to the Chief Functional Architect, who audits problem-solution root cause and industry standards in the most critical way possible. If changes are required, amendments are sent back to the council for a fresh 3-iteration cycle (capped at 3 Chief FA iterations, after which the Chief FA unilaterally dictates the final solution). Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
+  Collaborative Two-Tier Architectural Review Council between Author, System Architect (Gemini 3.8 Flash High via agy CLI), QA Guardian (Gemini 3.8 Flash Medium via agy CLI), and Chief Functional Architect (Claude Opus 5.5, max effort via claude CLI). Council iterates up to 3 rounds before passing to the Chief Functional Architect, who audits problem-solution root cause and industry standards in the most critical way possible. If changes are required, amendments are sent back to the council for a fresh 3-iteration cycle (capped at 3 Chief FA iterations, after which the Chief FA unilaterally dictates the final solution). Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
 ---
 
 # Two-Tier Architect & QA Cross-Review Workflow (/agy-architect-review)
@@ -9,7 +9,7 @@ description: >-
 Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan. The review protocol is structured into a **Two-Tier Review Council**:
 1. **Tier 1: Tri-Party Council:**
    - **Author Agent:** Synthesizes revisions in the plan.
-   - **Principal Architect:** **Claude Opus 5.5 (`claude-opus-5-5`, `effort: medium`)** via headless `claude` CLI.
+   - **System Architect:** **Gemini 3.8 Flash High (`gemini-3.8-flash-high`)** via headless `agy` CLI.
    - **QA Guardian:** **Gemini 3.8 Flash Medium (`gemini-3.8-flash-medium`)** via headless `agy` CLI.
 2. **Tier 2: Chief Functional Architect Validation Gate:**
    - **Chief Functional Architect:** **Claude Opus 5.5 (`claude-opus-5-5`, `effort: max`)** via headless `claude` CLI.
@@ -45,7 +45,7 @@ To solve this, the review protocol establishes a **Two-Tier Review Council**:
 
 ### Tier 1: Tri-Party Council (Working Group)
 1. **Author Agent (Synthesizer):** Drafts the initial proposal and synthesizes revisions in response to critiques.
-2. **Principal Architect (`claude-opus-5-5`, `effort: medium`):** Scrutinizes systems architecture, concurrency, pipe/lock safety, DB schema integrity, performance, and failure modes.
+2. **System Architect (`gemini-3.8-flash-high` via `agy`):** Scrutinizes systems architecture, concurrency, pipe/lock safety, DB schema integrity, performance, and failure modes.
 3. **QA Guardian (`gemini-3.8-flash-medium` via `agy`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
 
 ### Tier 2: Chief Functional Architect Validation Gate (Executive Validation)
@@ -57,7 +57,7 @@ To solve this, the review protocol establishes a **Two-Tier Review Council**:
 ### Key Invariants:
 1. **Single Medium of Truth:** All communication happens **exclusively** through `<PLAN>` in the target project workspace.
 2. **Live File Holds Only the Active Plan:** Completed plans are moved verbatim to `archive/<timestamp>-NN-<slug>.md` next to `<PLAN>` (one file per plan). The audit trail is preserved in the archive; the live file stays small so no reviewer re-reads finished features.
-3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new session (`claude -p --no-session-persistence` for Architect and Chief FA, `agy -p` without `-c` for QA).
+3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new session (`agy -p` without `-c` for System Architect and QA, `claude -p --no-session-persistence` for Chief FA).
 4. **Scoped Reading:** The helper script hands each reviewer exact line ranges to read instead of the whole file. Codebase inspection is limited to files the plan names (~8 files max) and targeted greps.
 5. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` or `VERDICT: APPROVED` is given when no BLOCKING objections remain.
 6. **Two-Tier Cadence Gate:** Council debates up to 3 rounds per cycle. Every 3 council rounds (or upon dual council consensus), the proposal advances to the Chief Functional Architect.
@@ -76,7 +76,7 @@ stateDiagram-v2
     AppendAuthor --> CouncilReview: Launch Dual Council Review (Round N)
     state CouncilReview {
         [*] --> ArchivePlans: Archive completed plans (keep active plan only)
-        ArchivePlans --> InvokeArchitect: Fresh claude session (Opus 5.5, medium) with reading guide
+        ArchivePlans --> InvokeArchitect: Fresh agy session (gemini-3.8-flash-high) with reading guide
         InvokeArchitect --> InvokeQA: Fresh agy session (gemini-3.8-flash-medium) with reading guide
         InvokeQA --> [*]
     }
@@ -107,14 +107,14 @@ stateDiagram-v2
 
 ## 🎯 Role Mandates & Rubrics
 
-### 🏛️ Tier 1 - Party 1: Principal Architect (`claude-opus-5-5`, `effort: medium`)
+### 🏛️ Tier 1 - Party 1: System Architect (`gemini-3.8-flash-high` via `agy`)
 - **Lens:** Systems Architecture, Performance, Scalability & Safety
 - **Core Checks:**
   - Database schema, locking, index efficiency, migrations.
   - Subprocess pipe deadlocks, Windows buffer saturation, timeout process killing.
   - Concurrency, race conditions, async task boundaries.
   - Backward compatibility, regression risks on existing pipelines.
-- **Section Appended:** `## 🏛️ Architect Review Iteration N` (legacy `## 🏛️ Gemini Architect Review Iteration N` headings are still recognized)
+- **Section Appended:** `## 🏛️ Architect Review Iteration N` (legacy `## 🏛️ Gemini Architect Review Iteration N` and `## 🏛️ Principal Architect Review Iteration N` headings are still recognized)
 
 ### 🧪 Tier 1 - Party 2: QA Guardian (`gemini-3.8-flash-medium` via `agy`)
 - **Lens:** Requirements Fidelity, UX/UI Experience & Functional Correctness
@@ -169,7 +169,7 @@ The helper script automatically:
 - Uses exactly the file given by `--plan` (aliases `--path`, `--file`).
 - Archives every completed plan except the active one into `archive/` next to the plan file.
 - Builds a per-reviewer reading guide (exact line ranges) for the active plan.
-- Runs the Principal Architect (`claude --model claude-opus-5-5 --effort medium`) and QA Guardian (`agy --model gemini-3.8-flash-medium`).
+- Runs the System Architect (`agy --model gemini-3.8-flash-high`) and QA Guardian (`agy --model gemini-3.8-flash-medium`).
 - Upon council dual agreement or reaching 3 council rounds in the cycle, automatically elevates the proposal to the **Chief Functional Architect** (`claude --model claude-opus-5-5 --effort max`).
 - Parses verdicts, surfaces `[BLOCKING]` objections and mandated amendments, and manages the two-tier cycle transitions.
 - Emits structured JSON summary (`status`, `council_verdict`, `architect_verdict`, `qa_verdict`, `chief_fa_verdict`, `overall_verdict`, `unresolved_points`).
@@ -184,16 +184,16 @@ Overrides & Flags:
 #### Option B: Direct Shell Invocations
 Only when the script cannot be used.
 
-**1. Principal Architect Invocation:**
+**1. System Architect Invocation:**
 ```powershell
 $architect_prompt = @"
-You are the Principal Architect conducting Round N of the Architectural Review of '<PLAN>'.
+You are the System Architect conducting Round N of the Architectural Review of '<PLAN>'.
 1. Read ONLY: the original proposal, current Final Decision Plan, latest author iteration, and previous review.
 2. Tag every objection [BLOCKING] or [NON-BLOCKING].
 3. Append a new section: ## 🏛️ Architect Review Iteration N
 Conclude with VERDICT: AGREED if no BLOCKING objections, otherwise VERDICT: DISAGREED.
 "@
-claude -p $architect_prompt --model claude-opus-5-5 --effort medium --no-session-persistence --dangerously-skip-permissions
+agy -p $architect_prompt --model gemini-3.8-flash-high --dangerously-skip-permissions --print-timeout 15m
 ```
 
 **2. QA Guardian Invocation:**
@@ -255,7 +255,7 @@ In `<PLAN>`, sections MUST strictly use these headers:
 - Plan title (one per feature): `# 📋 Implementation Plan: <feature>`
 - Initial plan: `## 📋 Initial Implementation Proposal` (or `## 📝 Initial Draft Proposal`)
 - Author reviews: `## 🔍 Review Iteration N (Author Perspective)`
-- Principal Architect reviews: `## 🏛️ Architect Review Iteration N`
+- System Architect reviews: `## 🏛️ Architect Review Iteration N`
 - QA reviews: `## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)`
 - Chief Functional Architect reviews: `## 🏛️ Chief Functional Architect Review Iteration M: Problem-Solution & Standards Audit`
 - Final decision (exactly one, replaced in place): `## 🎯 Final Decision Plan & User Story Specification`

@@ -115,7 +115,7 @@ Architect reviewed first.
             round_num=1, plan_path=dummy_plan, guide=["- Latest author iteration: lines 3-9"]
         )
 
-        assert "Principal Architect" in prompt
+        assert "System Architect" in prompt
         assert "Round 1" in prompt
         assert "## 🏛️ Architect Review Iteration 1" in prompt
         assert "VERDICT: AGREED" in prompt
@@ -436,8 +436,8 @@ VERDICT: DISAGREED
         assert cmd[cmd.index("--effort") + 1] == "low"
 
     def test_default_models(self):
-        assert agy_cross_review.DEFAULT_ARCHITECT_MODEL == "claude-opus-5-5"
-        assert agy_cross_review.DEFAULT_ARCHITECT_EFFORT == "medium"
+        assert agy_cross_review.DEFAULT_ARCHITECT_MODEL == "gemini-3.8-flash-high"
+        assert agy_cross_review.DEFAULT_ARCHITECT_EFFORT is None
         assert agy_cross_review.DEFAULT_QA_MODEL == "gemini-3.8-flash-medium"
         assert agy_cross_review.DEFAULT_QA_EFFORT is None
         assert agy_cross_review.DEFAULT_CHIEF_FA_MODEL == "claude-opus-5-5"
@@ -582,19 +582,25 @@ VERDICT: CHANGES REQUIRED
         custom.write_text("# 📋 Implementation Plan: Test\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
 
-        # Architect agrees, QA agrees, then Chief FA approves
-        def mock_claude_call(prompt, model, effort):
-            if "Principal Architect" in prompt:
-                assert effort == "medium"
+        # System Architect agrees (via agy), QA agrees (via agy), then Chief FA approves (via claude)
+        def mock_agy_call(prompt, model, effort=None):
+            if "System Architect" in prompt:
+                assert model == "gemini-3.8-flash-high"
                 return 0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", ""
-            elif "Chief Functional Architect" in prompt:
+            elif "QA Lead" in prompt:
+                assert model == "gemini-3.8-flash-medium"
+                return 0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", ""
+            return 0, "", ""
+
+        def mock_claude_call(prompt, model, effort):
+            if "Chief Functional Architect" in prompt:
                 assert effort == "max"
                 assert model == "claude-opus-5-5"
                 return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED\n", ""
             return 0, "", ""
 
+        mock_agy.side_effect = mock_agy_call
         mock_claude.side_effect = mock_claude_call
-        mock_agy.return_value = (0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", "")
 
         code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom))
 
@@ -613,16 +619,23 @@ VERDICT: CHANGES REQUIRED
         custom.write_text("# 📋 Implementation Plan: Test\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
 
-        def mock_claude_call(prompt, model, effort):
-            if "Principal Architect" in prompt:
+        def mock_agy_call(prompt, model, effort=None):
+            if "System Architect" in prompt:
+                assert model == "gemini-3.8-flash-high"
                 return 0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", ""
-            elif "Chief Functional Architect" in prompt:
+            elif "QA Lead" in prompt:
+                assert model == "gemini-3.8-flash-medium"
+                return 0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", ""
+            return 0, "", ""
+
+        def mock_claude_call(prompt, model, effort):
+            if "Chief Functional Architect" in prompt:
                 assert effort == "max"
                 return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\n- [BLOCKING] Missing rollback semantics.\nVERDICT: CHANGES REQUIRED\n", ""
             return 0, "", ""
 
+        mock_agy.side_effect = mock_agy_call
         mock_claude.side_effect = mock_claude_call
-        mock_agy.return_value = (0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", "")
 
         code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom))
 
@@ -704,5 +717,24 @@ VERDICT: CHANGES REQUIRED
         assert out["status"] == "executive_resolution_dictated"
         assert out["chief_fa_verdict"] == "EXECUTIVE_RESOLUTION"
         assert out["chief_fa_round"] == 3
+
+    @patch("agy_cross_review.invoke_claude")
+    @patch("agy_cross_review.invoke_agy")
+    def test_main_architect_dispatch_claude_override(self, mock_agy, mock_claude, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Override\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        mock_claude.return_value = (0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", "")
+        mock_agy.return_value = (0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", "")
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--architect-model", "claude-opus-5-5", "--skip-chief-fa")
+
+        assert code == 0
+        assert mock_claude.called
+        call_args = mock_claude.call_args
+        assert call_args[1]["model"] == "claude-opus-5-5"
+
 
 

@@ -4,7 +4,7 @@ agy_cross_review.py - Two-Tier Architectural & Functional Cross-Review Orchestra
 Coordinates the Two-Tier Review Council:
   Tier 1: Tri-Party Council
     1. Author (Synthesizer via the plan file)
-    2. Principal Architect (Claude Opus 5.5, medium effort, via claude CLI)
+    2. System Architect (Gemini 3.8 Flash High, via agy CLI)
     3. QA Guardian (Gemini 3.8 Flash Medium, via agy CLI)
   Tier 2: Chief Functional Architect
     4. Chief Functional Architect (Claude Opus 5.5, max effort, via claude CLI)
@@ -38,8 +38,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-DEFAULT_ARCHITECT_MODEL = "claude-opus-5-5"
-DEFAULT_ARCHITECT_EFFORT = "medium"
+DEFAULT_ARCHITECT_MODEL = "gemini-3.8-flash-high"
+DEFAULT_ARCHITECT_EFFORT: Optional[str] = None
 # agy encodes the reasoning effort in the model name (gemini-3.8-flash-{low,medium,high}).
 DEFAULT_QA_MODEL = "gemini-3.8-flash-medium"
 DEFAULT_QA_EFFORT: Optional[str] = None
@@ -47,7 +47,7 @@ DEFAULT_CHIEF_FA_MODEL = "claude-opus-5-5"
 DEFAULT_CHIEF_FA_EFFORT = "max"
 
 PLAN_HEADING_RE = re.compile(r"^#\s*📋\s*Implementation Plan")
-ARCHITECT_HEADING_RE = r"##\s*🏛️\s*(?:(?:Gemini|Principal)\s+)?Architect\s+Review Iteration"
+ARCHITECT_HEADING_RE = r"##\s*🏛️\s*(?:(?:Gemini|Principal|System)\s+)?Architect\s+Review Iteration"
 QA_HEADING_RE = r"##\s*🧪\s*(?:(?:Claude|Gemini)\s+)?QA\s+Review Iteration"
 CHIEF_FA_HEADING_RE = r"##\s*🏛️\s*Chief\s+Functional\s+Architect\s+Review\s+Iteration"
 AUTHOR_HEADING_RE = r"##\s*(?:🔍|🚀|💬)\s*(?:Boost\s*)?Review Iteration"
@@ -253,7 +253,7 @@ def _common_rules(abs_path: str, guide: List[str], heading: str) -> List[str]:
 def build_architect_prompt(round_num: int, plan_path: Path, guide: List[str]) -> str:
     abs_path = plan_path.resolve().as_posix()
     lines = [
-        f"You are the Principal Architect conducting Round {round_num} of the Architectural Review of the active implementation plan in '{abs_path}'.",
+        f"You are the System Architect conducting Round {round_num} of the Architectural Review of the active implementation plan in '{abs_path}'.",
         "Be rigorous about real defects and proportionate about everything else.",
         "",
         "OPERATIONAL RULES:",
@@ -539,7 +539,7 @@ def execute_chief_fa(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Two-Tier Cross-Review Council (Author, Principal Architect, QA Guardian, Chief Functional Architect)"
+        description="Two-Tier Cross-Review Council (Author, System Architect, QA Guardian, Chief Functional Architect)"
     )
     parser.add_argument(
         "--plan",
@@ -691,9 +691,12 @@ def main() -> None:
 
     next_round = max(architect_rounds, qa_rounds) + 1
 
-    # 1. Principal Architect
+    # 1. System Architect
     architect_prompt = build_architect_prompt(next_round, plan_path, reading_guide(plan_content, "architect", next_round))
-    architect_code, architect_stdout, _ = invoke_claude(architect_prompt, model=args.architect_model, effort=args.architect_effort)
+    if "gemini" in args.architect_model.lower():
+        architect_code, architect_stdout, _ = invoke_agy(architect_prompt, model=args.architect_model, effort=args.architect_effort)
+    else:
+        architect_code, architect_stdout, _ = invoke_claude(architect_prompt, model=args.architect_model, effort=args.architect_effort or "medium")
     updated_plan_content = _append_from_stdout_if_missing(plan_path, architect_stdout, ARCHITECT_HEADING_RE, next_round, count_index=1)
     architect_verdict = parse_architect_verdict(updated_plan_content, architect_stdout, next_round)
 
