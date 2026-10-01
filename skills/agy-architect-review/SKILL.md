@@ -1,7 +1,7 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative Two-Tier Architectural Review Council between Author, System Architect (Gemini 3.8 Flash High via agy CLI), QA Guardian (Gemini 3.8 Flash Medium via agy CLI), and Chief Functional Architect (Claude Opus 5.5, max effort via claude CLI). Council iterates up to 3 rounds before passing to the Chief Functional Architect, who audits problem-solution root cause and industry standards in the most critical way possible. If changes are required, amendments are sent back to the council for a fresh 3-iteration cycle (capped at 3 Chief FA iterations, after which the Chief FA unilaterally dictates the final solution). Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
+  Collaborative Two-Tier Architectural Review Council between Author, System Architect (Gemini 3.8 Flash High via agy CLI), QA Guardian (Gemini 3.8 Flash Medium via agy CLI), and Chief Functional Architect (Claude Opus 5.5 via claude CLI, high effort with max on the final executive iteration). Council iterates up to 3 rounds before passing to the Chief Functional Architect, who audits problem-solution root cause and industry standards in the most critical way possible. If changes are required, amendments are sent back to the council for a fresh 3-iteration cycle (capped at 3 Chief FA iterations, after which the Chief FA unilaterally dictates the final solution). Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
 ---
 
 # Two-Tier Architect & QA Cross-Review Workflow (/agy-architect-review)
@@ -12,7 +12,7 @@ Use this workflow whenever the user explicitly issues `/agy-architect-review`, `
    - **System Architect:** **Gemini 3.8 Flash High (`gemini-3.8-flash-high`)** via headless `agy` CLI.
    - **QA Guardian:** **Gemini 3.8 Flash Medium (`gemini-3.8-flash-medium`)** via headless `agy` CLI.
 2. **Tier 2: Chief Functional Architect Validation Gate:**
-   - **Chief Functional Architect:** **Claude Opus 5.5 (`claude-opus-5-5`, `effort: max`)** via headless `claude` CLI.
+   - **Chief Functional Architect:** **Claude Opus 5.5 (`claude-opus-5-5`, `effort: high`; `max` on the final executive iteration)** via headless `claude` CLI.
    - Audits problem-solution root cause and compliance with industry standards in the *most critical way possible*.
 
 > **Global skill — never copy it into a project.** This skill is shared by every project. Its single source of truth is
@@ -49,7 +49,7 @@ To solve this, the review protocol establishes a **Two-Tier Review Council**:
 3. **QA Guardian (`gemini-3.8-flash-medium` via `agy`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
 
 ### Tier 2: Chief Functional Architect Validation Gate (Executive Validation)
-4. **Chief Functional Architect (`claude-opus-5-5`, `effort: max`):** Evaluates the proposal in the *most critical way possible*:
+4. **Chief Functional Architect (`claude-opus-5-5`, `effort: high`, `max` on the final executive iteration):** Evaluates the proposal in the *most critical way possible*:
    - **Problem-Solution Fit & Root Cause:** Does the proposed architecture/solution genuinely fix the initial problem, root causes, and user requirements?
    - **Industry Standards & Best Practices:** Does it strictly adhere to modern software architecture, engineering standards, reliability, and security practices?
    - **Iterative Return & Executive Authority:** If changes are required, sends actionable amendments back to the Council for a fresh 3-iteration cycle. If agreement is still not reached after 3 Chief FA iterations (hard cap), the Chief Functional Architect exercises executive authority and **unilaterally dictates the definitive solution**.
@@ -59,9 +59,10 @@ To solve this, the review protocol establishes a **Two-Tier Review Council**:
 2. **Live File Holds Only the Active Plan:** Completed plans are moved verbatim to `archive/<timestamp>-NN-<slug>.md` next to `<PLAN>` (one file per plan). The audit trail is preserved in the archive; the live file stays small so no reviewer re-reads finished features.
 3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new session (`agy -p` without `-c` for System Architect and QA, `claude -p --no-session-persistence` for Chief FA).
 4. **Scoped Reading:** The helper script hands each reviewer exact line ranges to read instead of the whole file. Codebase inspection is limited to files the plan names (~8 files max) and targeted greps.
-5. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` or `VERDICT: APPROVED` is given when no BLOCKING objections remain.
-6. **Two-Tier Cadence Gate:** Council debates up to 3 rounds per cycle. Every 3 council rounds (or upon dual council consensus), the proposal advances to the Chief Functional Architect.
-7. **Hard 3-Iteration Chief FA Cap:** Capped at 3 Chief Functional Architect review iterations before unilateral executive determination.
+5. **Lean claude Sessions (Chief FA, and the Architect when overridden to a Claude model):** the script inlines those same plan sections into the prompt (sent through stdin, so the Windows command-line limit never applies) and appends the reviewer's reply to `<PLAN>` itself. The session gets read-only code tools (`--tools "Read,Grep,Glob"`: no Bash, Edit/Write or Agent subagents), no MCP servers (`--strict-mcp-config`), a timeout (`--claude-timeout`, default 1200 s), and reports `duration_ms`, turns and token usage as `chief_fa_metrics` / `architect_metrics` in the JSON result. The final executive iteration also gets `Edit`, only to rewrite the Final Decision Plan in place.
+6. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` or `VERDICT: APPROVED` is given when no BLOCKING objections remain.
+7. **Two-Tier Cadence Gate:** Council debates up to 3 rounds per cycle. Every 3 council rounds (or upon dual council consensus), the proposal advances to the Chief Functional Architect.
+8. **Hard 3-Iteration Chief FA Cap:** Capped at 3 Chief Functional Architect review iterations before unilateral executive determination.
 
 ---
 
@@ -125,7 +126,7 @@ stateDiagram-v2
   - **BDD Acceptance Criteria & Testability:** Confirms Gherkin scenarios are complete, unambiguous, and cover nominal and adversarial paths.
 - **Section Appended:** `## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)` (legacy `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)` headings are still recognized)
 
-### 🏛️ Tier 2 - Party 3: Chief Functional Architect (`claude-opus-5-5`, `effort: max`)
+### 🏛️ Tier 2 - Party 3: Chief Functional Architect (`claude-opus-5-5`, `effort: high`; `max` on the final executive iteration)
 - **Lens:** Hyper-Critical Problem-Solution Fit, Root Cause & Industry Standards Compliance
 - **Core Checks:**
   - **Problem-Solution Fit & Root Cause:** Does the proposed architecture/solution genuinely fix the initial problem, root causes, and user requirements? Has anything essential been omitted, diluted, or swept under the rug?
@@ -170,12 +171,15 @@ The helper script automatically:
 - Archives every completed plan except the active one into `archive/` next to the plan file.
 - Builds a per-reviewer reading guide (exact line ranges) for the active plan.
 - Runs the System Architect (`agy --model gemini-3.8-flash-high`) and QA Guardian (`agy --model gemini-3.8-flash-medium`).
-- Upon council dual agreement or reaching 3 council rounds in the cycle, automatically elevates the proposal to the **Chief Functional Architect** (`claude --model claude-opus-5-5 --effort max`).
+- Upon council dual agreement or reaching 3 council rounds in the cycle, automatically elevates the proposal to the **Chief Functional Architect** (`claude --model claude-opus-5-5 --effort high`, `max` on the final executive iteration) as a lean session: plan excerpts inlined via stdin, read-only code tools, no MCP servers, reply appended by the script.
 - Parses verdicts, surfaces `[BLOCKING]` objections and mandated amendments, and manages the two-tier cycle transitions.
-- Emits structured JSON summary (`status`, `council_verdict`, `architect_verdict`, `qa_verdict`, `chief_fa_verdict`, `overall_verdict`, `unresolved_points`).
+- Emits structured JSON summary (`status`, `council_verdict`, `architect_verdict`, `qa_verdict`, `chief_fa_verdict`, `overall_verdict`, `unresolved_points`, and `chief_fa_metrics` with `duration_ms`, `num_turns`, token usage and `subagents_spawned`).
 
 Overrides & Flags:
 - `--chief-fa` / `--run-chief-fa`: Force running Chief Functional Architect review directly.
+- `--chief-fa-effort <level>`: Chief FA effort for regular iterations (default: `high`, the same as interactive Claude Code).
+- `--chief-fa-final-effort <level>`: Chief FA effort on the final executive iteration (default: `max`).
+- `--claude-timeout <seconds>`: Kill a claude reviewer session after this long (default: 1200); the run then exits 1 with `timed_out` in the metrics.
 - `--max-rounds <N>`: Maximum council rounds per cycle (default: 3).
 - `--max-chief-fa-rounds <M>`: Maximum Chief Functional Architect iterations (default: 3).
 - `--skip-chief-fa`: Run council only.
@@ -211,16 +215,19 @@ agy -p $qa_prompt --model gemini-3.8-flash-medium --dangerously-skip-permissions
 **3. Chief Functional Architect Invocation (Every 3 Council Rounds or Council Agreement):**
 ```powershell
 $chief_fa_prompt = @"
+<paste the original proposal, current Final Decision Plan, latest author iteration and latest Architect/QA reviews here>
 You are the Chief Functional Architect conducting Iteration M of the Two-Tier Architectural Review of '<PLAN>'.
 Evaluate the proposed solution in the MOST CRITICAL WAY POSSIBLE:
 1. Problem-Solution Fit & Root Cause: Does the solution genuinely fix the initial problem and root causes?
 2. Industry Standards & Best Practices: Does it strictly adhere to modern software architecture and engineering standards?
-3. Append: ## 🏛️ Chief Functional Architect Review Iteration M: Problem-Solution & Standards Audit
+3. Reply with: ## 🏛️ Chief Functional Architect Review Iteration M: Problem-Solution & Standards Audit (do not edit the file)
 Conclude with VERDICT: APPROVED or VERDICT: CHANGES REQUIRED.
 If M == 3 and unagreed, provide ### 🎯 Definitive Executive Resolution and dictate final solution in Final Decision Plan.
 "@
-claude -p $chief_fa_prompt --model claude-opus-5-5 --effort max --no-session-persistence --dangerously-skip-permissions
+# Prompt through stdin; use --effort max and add Edit to --tools only for the final executive iteration.
+$chief_fa_prompt | claude -p --model claude-opus-5-5 --effort high --tools "Read,Grep,Glob" --strict-mcp-config --output-format json --no-session-persistence --dangerously-skip-permissions
 ```
+Then append the JSON `result` field to `<PLAN>`.
 
 ### Step 4: Two-Tier Convergence & Decision Logic
 
