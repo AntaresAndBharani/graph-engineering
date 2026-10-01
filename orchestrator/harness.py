@@ -8,6 +8,8 @@ from pathlib import Path
 import random
 import re
 import shutil
+import subprocess
+import sys
 from typing import Callable, Dict, List, Optional
 import psutil
 
@@ -266,6 +268,18 @@ class AsyncHarnessAdapter:
         captured_chunks: deque[str] = deque(maxlen=1000)
 
         try:
+            if sys.platform == "win32":
+                cmd_line = subprocess.list2cmdline(cmd)
+                if len(cmd_line) > 32000:
+                    err_msg = (
+                        f"\n\n[ORCHESTRATOR ERROR] Subprocess command line length ({len(cmd_line)} characters) "
+                        f"exceeds Windows CreateProcessW limit of 32,767 characters. Aborting to avoid OS buffer overflow.\n"
+                    )
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(err_msg)
+                    captured_chunks.append(err_msg)
+                    return 1, "".join(captured_chunks)
+
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(cwd),

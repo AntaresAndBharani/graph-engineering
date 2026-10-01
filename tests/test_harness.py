@@ -1178,6 +1178,27 @@ async def test_harness_premature_exit_disabled(tmp_path: Path, monkeypatch):
     assert call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_harness_windows_command_line_length_abort(tmp_path: Path, monkeypatch):
+    """Verifies that on Windows, command line exceeding 32,000 characters is aborted safely."""
+    import sys
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    cfg = HarnessConfig(binary="agy", args=["-p", "{prompt}"])
+    adapter = AsyncHarnessAdapter("antigravity", cfg)
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+
+    huge_prompt = "x" * 35000
+    log_file = tmp_path / "overflow.log"
+    exit_code = await adapter.execute(huge_prompt, tmp_path, log_file)
+
+    assert exit_code == 1
+    assert log_file.exists()
+    content = log_file.read_text(encoding="utf-8")
+    assert "exceeds Windows CreateProcessW limit" in content
+
+
+
 
 
 

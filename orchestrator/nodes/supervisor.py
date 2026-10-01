@@ -168,12 +168,20 @@ async def evaluate_supervisor_issue(
     model = node_cfg.model
     effort = node_cfg.effort
 
+    eval_body = body
+    if len(eval_body) > 8000:
+        eval_body = (
+            eval_body[:4000]
+            + f"\n\n... [TRUNCATED {len(eval_body) - 8000} CHARS OF EXTENSIVE SPECIFICATION] ...\n\n"
+            + eval_body[-4000:]
+        )
+
     prompt = (
         f"You are the proactive AI Product Owner Proxy operating in non-interactive batch mode.\n"
         f"Evaluate GitHub Issue #{issue_num} ('{title}') for repository '{project.repo}'.\n\n"
         f"ISSUE CONTENT:\n"
         f"Title: {title}\n"
-        f"Body:\n{body}\n\n"
+        f"Body:\n{eval_body}\n\n"
         f"MISSION:\n"
         f"Evaluate whether the functional requirements are complete, unambiguous, testable, and adhere to INVEST principles.\n\n"
         f"DECISION CRITERIA:\n"

@@ -309,3 +309,107 @@ async def test_devtest_phase2_auto_merges_open_implemented_pr_when_ci_green(tmp_
     assert closed is True
 
 
+@pytest.mark.asyncio
+async def test_devtest_oversized_issue_body_offloaded_to_file(tmp_path: Path, monkeypatch):
+    """Verifies that an issue body > 8000 chars is offloaded to .graph/ISSUE_SPECIFICATION.md."""
+    from orchestrator import poller
+    from orchestrator.nodes import devtest
+    from orchestrator.worktree import WorktreeManager
+
+    huge_body = "A" * 15000
+    mock_issue = {
+        "number": 99,
+        "title": "feat: massive spec",
+        "body": huge_body,
+        "labels": [{"name": "ready-for-dev"}],
+    }
+
+    async def mock_fetch_prs(repo, label=None, limit=20):
+        return []
+
+    async def mock_fetch_issues(repo, label, limit=5):
+        if label == "ready-for-dev":
+            return [mock_issue]
+        return []
+
+    async def mock_verify_safety(path, repo):
+        return True, "Safety verified."
+
+    async def mock_ensure_worktree(project, node_name):
+        return tmp_path
+
+    monkeypatch.setattr(poller, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(poller, "fetch_issues_with_label", mock_fetch_issues)
+    monkeypatch.setattr(devtest, "fetch_open_prs", mock_fetch_prs)
+    monkeypatch.setattr(devtest, "verify_git_safety", mock_verify_safety)
+    monkeypatch.setattr(WorktreeManager, "ensure_worktree", mock_ensure_worktree)
+
+    captured_prompt = None
+
+    class MockAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def execute(self, prompt, cwd, log_file, **kwargs):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return 0
+
+    monkeypatch.setattr(devtest, "AsyncHarnessAdapter", MockAdapter)
+
+    config = GlobalConfig(
+        harnesses={"antigravity": HarnessConfig(binary="agy", timeout_minutes=30)}
+    )
+    project = ProjectConfig(
+        name="test-repo",
+        repo="BasketIQ/test-repo",
+        local_path=str(tmp_path),
+        nodes={"devtest": NodeConfig(harness="antigravity", enabled=True)},
+    )
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+    await state_manager.sync_project_sdlc_items("test-repo", [{
+        "issue_number": 99,
+        "title": "feat: massive spec",
+        "state": "OPEN",
+        "labels": "ready-for-dev",
+        "item_type": "TASK",
+        "sequence_order": 1,
+        "parent_issue_id": None,
+    }])
+
+    async def mock_fetch_issue_by_num(repo, num):
+        if num == 99:
+            return mock_issue
+        return None
+
+    monkeypatch.setattr(devtest, "fetch_issue_by_number", mock_fetch_issue_by_num)
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        mock_proc = AsyncMock()
+        if "pr" in args and "list" in args:
+            pr_data = json.dumps([{"number": 101, "title": "feat: test", "headRefName": "feat/issue-99", "state": "OPEN", "labels": [], "statusCheckRollup": []}])
+            mock_proc.communicate = AsyncMock(return_value=(pr_data.encode("utf-8"), b""))
+        else:
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.wait = AsyncMock(return_value=0)
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+    monkeypatch.setattr("shutil.which", lambda cmd: "C:\\Program Files\\GitHub CLI\\gh.exe")
+
+    await run_devtest_node(project, config, state_manager)
+
+    # Verify that .graph/ISSUE_SPECIFICATION.md was created
+    spec_file = tmp_path / ".graph" / "ISSUE_SPECIFICATION.md"
+    assert spec_file.exists()
+    assert spec_file.read_text(encoding="utf-8") == huge_body
+
+    # Verify that captured prompt references the file rather than blowing up CLI args
+    assert captured_prompt is not None
+    assert "saved to '.graph/ISSUE_SPECIFICATION.md'" in captured_prompt
+    assert len(captured_prompt) < 4000
+
+
+

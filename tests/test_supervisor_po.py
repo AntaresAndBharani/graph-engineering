@@ -904,3 +904,45 @@ Feature: Redis Caching
     po_record = await state_manager.get_po_tracking(test_project.repo, 201)
     assert po_record is not None
     assert po_record["status"] == "PO_APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_supervisor_oversized_body_truncated_in_prompt(tmp_path: Path, mock_config: GlobalConfig, test_project: ProjectConfig, monkeypatch):
+    """Verifies that an issue body > 8000 chars is safely truncated in the supervisor evaluation prompt."""
+    from orchestrator.nodes.supervisor import evaluate_supervisor_issue
+
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    huge_body = "START_MARKER_" + ("x" * 12000) + "_END_MARKER"
+    issue_data = {
+        "number": 305,
+        "title": "feat: giant spec",
+        "body": huge_body,
+    }
+
+    captured_prompt = None
+
+    async def mock_execute(self, prompt, cwd, log_file, **kwargs):
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(log_file).write_text("VERDICT: PO_APPROVED\nGAPS: None\nGHERKIN_AC:\n```gherkin\nFeature: Test\n```\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr("orchestrator.nodes.supervisor.AsyncHarnessAdapter.is_available", lambda self: True)
+    monkeypatch.setattr("orchestrator.nodes.supervisor.AsyncHarnessAdapter.execute", mock_execute)
+
+    res = await evaluate_supervisor_issue(
+        project=test_project,
+        issue=issue_data,
+        config=mock_config,
+        state_manager=state_manager,
+        dry_run=True,
+    )
+
+    assert res.verdict == "PO_APPROVED"
+    assert captured_prompt is not None
+    assert "TRUNCATED" in captured_prompt
+    assert len(captured_prompt) < 10000
+

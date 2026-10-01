@@ -1304,7 +1304,22 @@ async def run_devtest_node(
         )
 
     issue_body_text = target_issue.get("body", "").strip()
-    issue_body_section = f"\nISSUE SPECIFICATION:\n{issue_body_text}\n" if issue_body_text else ""
+    # Guard against Windows CLI buffer overflow (Win32 CreateProcessW lpCommandLine 32,767 character limit)
+    MAX_INLINE_ISSUE_BODY_CHARS = 8000
+    if len(issue_body_text) > MAX_INLINE_ISSUE_BODY_CHARS:
+        spec_path = exec_cwd / ".graph" / "ISSUE_SPECIFICATION.md"
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_path.write_text(issue_body_text, encoding="utf-8")
+        issue_body_section = (
+            f"\nISSUE SPECIFICATION:\n"
+            f"The issue specification is extensive ({len(issue_body_text)} characters) and has been saved to "
+            f"'.graph/ISSUE_SPECIFICATION.md' in your workspace to avoid OS command-line buffer overflow.\n"
+            f"MANDATORY: You MUST read and review '.graph/ISSUE_SPECIFICATION.md' using your file viewing tool "
+            f"before implementing to review the full requirements and Gherkin acceptance criteria.\n"
+            f"(Note: You may stage and commit '.graph/ISSUE_SPECIFICATION.md' along with your implementation).\n"
+        )
+    else:
+        issue_body_section = f"\nISSUE SPECIFICATION:\n{issue_body_text}\n" if issue_body_text else ""
 
     prompt = (
         f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
