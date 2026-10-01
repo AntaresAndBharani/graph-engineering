@@ -1,15 +1,22 @@
 ---
 name: agy-architect-review
 description: >-
-  Collaborative Tri-Party Architectural Review Council between Author, Architect (Claude Opus 5.5, medium effort via claude CLI), and QA Guardian (Gemini 3.8 Flash Medium via agy CLI). Iterates up to a maximum of 3 rounds exclusively via the implementation plan file (the file the operator names via --plan/--path/--file or in the request, edited in place; defaults to docs/draft-requisites/implementation-plan.md only when no file is named). The Architect evaluates system architecture, concurrency, and performance, while the QA Guardian guards requirements fidelity (anti-drift) and audits UX/UI or functional behavior. Objections are tagged BLOCKING or NON-BLOCKING; if neither reviewer has BLOCKING objections the plan is approved. If after 3 rounds disagreement remains, execution halts and surfaces the exact points of contention to the operator. Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
+  Collaborative Two-Tier Architectural Review Council between Author, Principal Architect (Claude Opus 5.5, medium effort via claude CLI), QA Guardian (Gemini 3.8 Flash Medium via agy CLI), and Chief Functional Architect (Claude Opus 5.5, max effort via claude CLI). Council iterates up to 3 rounds before passing to the Chief Functional Architect, who audits problem-solution root cause and industry standards in the most critical way possible. If changes are required, amendments are sent back to the council for a fresh 3-iteration cycle (capped at 3 Chief FA iterations, after which the Chief FA unilaterally dictates the final solution). Trigger with /agy-architect-review [--plan <path>], /agy-review, or /gemini-architect-review.
 ---
 
-# Tri-Party Architect & QA Cross-Review Workflow (/agy-architect-review)
+# Two-Tier Architect & QA Cross-Review Workflow (/agy-architect-review)
 
-Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan. The council reviewers run headless: the **Architect** on **Claude Opus 5.5 (`claude-opus-5-5`, `effort: medium`)** via the `claude` CLI, and the **QA Guardian** on **Gemini 3.8 Flash Medium (`gemini-3.8-flash-medium`)** via the `agy` CLI. (The skill keeps its historical `agy`/`gemini` trigger names; the Architect seat moved from `gemini-3.8-flash-high` to Opus 5.5.)
+Use this workflow whenever the user explicitly issues `/agy-architect-review`, `/agy-review`, `/gemini-architect-review`, or asks for an architectural cross-review of an implementation plan. The review protocol is structured into a **Two-Tier Review Council**:
+1. **Tier 1: Tri-Party Council:**
+   - **Author Agent:** Synthesizes revisions in the plan.
+   - **Principal Architect:** **Claude Opus 5.5 (`claude-opus-5-5`, `effort: medium`)** via headless `claude` CLI.
+   - **QA Guardian:** **Gemini 3.8 Flash Medium (`gemini-3.8-flash-medium`)** via headless `agy` CLI.
+2. **Tier 2: Chief Functional Architect Validation Gate:**
+   - **Chief Functional Architect:** **Claude Opus 5.5 (`claude-opus-5-5`, `effort: max`)** via headless `claude` CLI.
+   - Audits problem-solution root cause and compliance with industry standards in the *most critical way possible*.
 
 > **Global skill — never copy it into a project.** This skill is shared by every project. Its single source of truth is
-> `graph-engineering/.agents/skills/agy-architect-review/`, exposed globally through a directory junction at
+> `graph-engineering/skills/agy-architect-review/`, exposed globally through a directory junction at
 > `$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review` (run `graph-engineering/scripts/link-global-skills.ps1` to recreate it).
 > Always invoke the helper script through that global path from the target project's root and pass `--plan "<PLAN>"`.
 
@@ -30,23 +37,31 @@ Usage: `/agy-architect-review [--plan <path>]` (also `/agy-review`, `/gemini-arc
 
 ---
 
-## 🎯 Purpose & Core Value: The Tri-Party Review Council
+## 🎯 Purpose & Core Value: Two-Tier Review Council
 
-In complex software design, deep architectural debates between author and systems architects often risk **requirements drift**—technical optimizations, deep refactorings, or abstractions can inadvertently drop, dilute, or over-complicate the operator's original user requirements or neglect user experience.
+In complex software design, deep architectural debates between author and systems architects often risk **requirements drift**—technical optimizations, deep refactorings, or abstractions can inadvertently drop, dilute, or over-complicate the operator's original user requirements or neglect user experience. Furthermore, technical consensus within a working council can develop tunnel vision, failing to step back and critically verify whether the architecture actually solves the root problem or adheres to best-in-class industry standards.
 
-To solve this, the review protocol establishes a **Tri-Party Review Council**:
+To solve this, the review protocol establishes a **Two-Tier Review Council**:
+
+### Tier 1: Tri-Party Council (Working Group)
 1. **Author Agent (Synthesizer):** Drafts the initial proposal and synthesizes revisions in response to critiques.
-2. **Architect (`claude-opus-5-5`, `effort: medium`):** Scrutinizes systems architecture, concurrency, pipe/lock safety, DB schema integrity, performance, and failure modes.
+2. **Principal Architect (`claude-opus-5-5`, `effort: medium`):** Scrutinizes systems architecture, concurrency, pipe/lock safety, DB schema integrity, performance, and failure modes.
 3. **QA Guardian (`gemini-3.8-flash-medium` via `agy`):** Acts as the **Requirements & UX/UI Guardian**. Strictly enforces that the plan remains 100% faithful to the operator's original requirements, audits the UX/UI experience (or functional correctness if no UI), and verifies Gherkin BDD testability.
+
+### Tier 2: Chief Functional Architect Validation Gate (Executive Validation)
+4. **Chief Functional Architect (`claude-opus-5-5`, `effort: max`):** Evaluates the proposal in the *most critical way possible*:
+   - **Problem-Solution Fit & Root Cause:** Does the proposed architecture/solution genuinely fix the initial problem, root causes, and user requirements?
+   - **Industry Standards & Best Practices:** Does it strictly adhere to modern software architecture, engineering standards, reliability, and security practices?
+   - **Iterative Return & Executive Authority:** If changes are required, sends actionable amendments back to the Council for a fresh 3-iteration cycle. If agreement is still not reached after 3 Chief FA iterations (hard cap), the Chief Functional Architect exercises executive authority and **unilaterally dictates the definitive solution**.
 
 ### Key Invariants:
 1. **Single Medium of Truth:** All communication happens **exclusively** through `<PLAN>` in the target project workspace.
 2. **Live File Holds Only the Active Plan:** Completed plans are moved verbatim to `archive/<timestamp>-NN-<slug>.md` next to `<PLAN>` (one file per plan). The audit trail is preserved in the archive; the live file stays small so no reviewer re-reads finished features.
-3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new session (`claude -p --no-session-persistence` for the Architect, `agy -p` without `-c` for QA). The plan file already carries the full debate history, so resuming sessions (`-c` / `-r`) only re-sends stale context and multiplies token cost round over round.
-4. **Scoped Reading:** The helper script hands each reviewer exact line ranges to read — the operator's original proposal, the current Final Decision Plan, the latest author iteration, and the reviewer's own previous review — instead of the whole file. Codebase inspection is limited to files the plan names (~8 files max) and targeted greps.
-5. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` is given when no BLOCKING objections remain. BLOCKING is reserved for correctness bugs, data loss, race conditions, security holes, requirement drift, or untestable acceptance criteria.
-6. **Dual Consensus Gate:** Approval requires **both** Architect and QA Guardian to issue `VERDICT: AGREED`.
-7. **Hard 3-Round Cap & Guaranteed Operator Escalation:** If after 3 rounds dual agreement is not achieved, execution halts and surfaces a consolidated dispute matrix to the human operator.
+3. **Fresh Session Per Round (No Resume):** Every reviewer invocation is a new session (`claude -p --no-session-persistence` for Architect and Chief FA, `agy -p` without `-c` for QA).
+4. **Scoped Reading:** The helper script hands each reviewer exact line ranges to read instead of the whole file. Codebase inspection is limited to files the plan names (~8 files max) and targeted greps.
+5. **Blocking vs Non-Blocking Objections:** Reviewers tag every objection `[BLOCKING]` or `[NON-BLOCKING]`. `VERDICT: AGREED` or `VERDICT: APPROVED` is given when no BLOCKING objections remain.
+6. **Two-Tier Cadence Gate:** Council debates up to 3 rounds per cycle. Every 3 council rounds (or upon dual council consensus), the proposal advances to the Chief Functional Architect.
+7. **Hard 3-Iteration Chief FA Cap:** Capped at 3 Chief Functional Architect review iterations before unilateral executive determination.
 
 ---
 
@@ -66,22 +81,33 @@ stateDiagram-v2
         InvokeQA --> [*]
     }
 
-    CouncilReview --> CheckDualVerdict: Evaluate Both Verdicts
+    CouncilReview --> CheckCouncilVerdict: Evaluate Council Verdicts
 
-    CheckDualVerdict --> ConsensusApproved: No BLOCKING objections from either reviewer
+    CheckCouncilVerdict --> ChiefFAReview: Council Agreed OR Council Cycle == 3
+    CheckCouncilVerdict --> AppendAuthor: Council Disagreed AND Round < 3 (Next Council Round)
+
+    state ChiefFAReview {
+        [*] --> InvokeChiefFA: Fresh claude session (Opus 5.5, max) with reading guide
+        InvokeChiefFA --> EvaluateChiefFAVerdict: Problem-Solution Fit & Standards Audit
+        EvaluateChiefFAVerdict --> [*]
+    }
+
+    ChiefFAReview --> ConsensusApproved: Chief FA Verdict: APPROVED
     ConsensusApproved --> [*]: Final Decision Plan approved & ready for operator sign-off
 
-    CheckDualVerdict --> CheckRounds: Any BLOCKING objection (VERDICT: DISAGREED)
-    CheckRounds --> AppendAuthor: Round < 3 (Author addresses BLOCKING objections in Round N+1)
-    CheckRounds --> EscalateOperator: Round == 3 (Cap reached)
-    EscalateOperator --> [*]: Surface consolidated dispute matrix to Operator
+    ChiefFAReview --> CheckFACycle: Chief FA Verdict: CHANGES REQUIRED
+    CheckFACycle --> ReturnToCouncil: Chief FA Iterations < 3
+    ReturnToCouncil --> AppendAuthor: Author responds to Chief FA amendments (New 3-round council cycle)
+
+    CheckFACycle --> ChiefFAExecutiveSolution: Chief FA Iterations == 3 (Hard Cap)
+    ChiefFAExecutiveSolution --> [*]: Chief FA dictates binding solution in Final Decision Plan
 ```
 
 ---
 
 ## 🎯 Role Mandates & Rubrics
 
-### 🏛️ Party 1: Architect (`claude-opus-5-5`, `effort: medium`)
+### 🏛️ Tier 1 - Party 1: Principal Architect (`claude-opus-5-5`, `effort: medium`)
 - **Lens:** Systems Architecture, Performance, Scalability & Safety
 - **Core Checks:**
   - Database schema, locking, index efficiency, migrations.
@@ -90,7 +116,7 @@ stateDiagram-v2
   - Backward compatibility, regression risks on existing pipelines.
 - **Section Appended:** `## 🏛️ Architect Review Iteration N` (legacy `## 🏛️ Gemini Architect Review Iteration N` headings are still recognized)
 
-### 🧪 Party 2: QA Guardian (`gemini-3.8-flash-medium` via `agy`)
+### 🧪 Tier 1 - Party 2: QA Guardian (`gemini-3.8-flash-medium` via `agy`)
 - **Lens:** Requirements Fidelity, UX/UI Experience & Functional Correctness
 - **Core Checks:**
   - **Anti-Drift Requirement Guardian:** Cross-checks the proposal against the **user's original prompt and stated constraints**. Disallows dropping, over-abstracting, or altering the user's intent.
@@ -98,6 +124,14 @@ stateDiagram-v2
   - **Functional Correctness Audit (If no UI exists):** Audits behavioral correctness, input validation, error messages returned to user/logs, edge cases (cold-start, network drop, zero-division), and fail-closed safety.
   - **BDD Acceptance Criteria & Testability:** Confirms Gherkin scenarios are complete, unambiguous, and cover nominal and adversarial paths.
 - **Section Appended:** `## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)` (legacy `## 🧪 Claude QA Review Iteration N (Requirements & UX/UI Guardian)` headings are still recognized)
+
+### 🏛️ Tier 2 - Party 3: Chief Functional Architect (`claude-opus-5-5`, `effort: max`)
+- **Lens:** Hyper-Critical Problem-Solution Fit, Root Cause & Industry Standards Compliance
+- **Core Checks:**
+  - **Problem-Solution Fit & Root Cause:** Does the proposed architecture/solution genuinely fix the initial problem, root causes, and user requirements? Has anything essential been omitted, diluted, or swept under the rug?
+  - **Industry Standards & Best Practices:** Does the design strictly adhere to modern software architecture standards, robust engineering principles, separation of concerns, testability, and operational resilience?
+  - **Executive Authority:** If after 3 Chief FA iterations agreement is still not reached, the Chief Functional Architect unilaterally dictates the definitive solution directly in the Final Decision Plan.
+- **Section Appended:** `## 🏛️ Chief Functional Architect Review Iteration M: Problem-Solution & Standards Audit`
 
 ---
 
@@ -125,36 +159,39 @@ Before council review:
    ```
 3. Keep **exactly one** `## 🎯 Final Decision Plan & User Story Specification` section in the active plan. When revising it, replace that section (and move it to the end of the file) instead of appending another full copy. It is the only section that may be edited in place; all iteration and review sections stay append-only, so the history of what changed lives in the iterations.
 
-### Step 3: Council Execution (Architect + QA Guardian)
-Invoke the review council non-interactively using the helper script (recommended) or direct CLI commands.
+### Step 3: Two-Tier Review Execution
 
 #### Option A: Via Python Helper Script (Recommended)
 ```powershell
-python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>" --max-rounds 3
+python "$HOME\.gemini\config\plugins\swarm-dev-core\skills\agy-architect-review\scripts\agy_cross_review.py" --plan "<PLAN>"
 ```
 The helper script automatically:
-- Uses exactly the file given by `--plan` (aliases `--path`, `--file`). Always pass it: without it, the script falls back to searching upward for `docs/draft-requisites/implementation-plan.md`, warns on stderr, and reports `"plan_source": "default"`. If the JSON `plan_path` is not the resolved `<PLAN>`, stop and report it; do not keep working on the other file.
+- Uses exactly the file given by `--plan` (aliases `--path`, `--file`).
 - Archives every completed plan except the active one into `archive/` next to the plan file.
 - Builds a per-reviewer reading guide (exact line ranges) for the active plan.
-- Runs the Architect (`claude --model claude-opus-5-5 --effort medium`) and then the QA Guardian (`agy --model gemini-3.8-flash-medium`), each as a fresh session.
-- Parses both verdicts, surfaces `[BLOCKING]` objections, and enforces the dual consensus gate.
-- Emits a structured JSON summary (`plan_path`, `plan_source`, `council_verdict`, `architect_verdict`, `qa_verdict`, `unresolved_points`, `archived_files`).
+- Runs the Principal Architect (`claude --model claude-opus-5-5 --effort medium`) and QA Guardian (`agy --model gemini-3.8-flash-medium`).
+- Upon council dual agreement or reaching 3 council rounds in the cycle, automatically elevates the proposal to the **Chief Functional Architect** (`claude --model claude-opus-5-5 --effort max`).
+- Parses verdicts, surfaces `[BLOCKING]` objections and mandated amendments, and manages the two-tier cycle transitions.
+- Emits structured JSON summary (`status`, `council_verdict`, `architect_verdict`, `qa_verdict`, `chief_fa_verdict`, `overall_verdict`, `unresolved_points`).
 
-Overrides: `--architect-model`, `--architect-effort`, `--qa-model`, `--qa-effort`, `--skip-qa`, `--check-status`.
+Overrides & Flags:
+- `--chief-fa` / `--run-chief-fa`: Force running Chief Functional Architect review directly.
+- `--max-rounds <N>`: Maximum council rounds per cycle (default: 3).
+- `--max-chief-fa-rounds <M>`: Maximum Chief Functional Architect iterations (default: 3).
+- `--skip-chief-fa`: Run council only.
+- `--check-status`: Inspect round counts and cycle progress without invoking LLMs.
 
 #### Option B: Direct Shell Invocations
-Only when the script cannot be used. Give each reviewer the line ranges to read (see the script's reading guide) rather than the whole file.
+Only when the script cannot be used.
 
-**1. Architect Invocation:**
+**1. Principal Architect Invocation:**
 ```powershell
 $architect_prompt = @"
 You are the Principal Architect conducting Round N of the Architectural Review of '<PLAN>'.
-1. Read ONLY: the original proposal, the current Final Decision Plan, the latest author iteration, and your previous review (line ranges: ...).
-2. Inspect only the codebase files the plan names. Do not run tests.
-3. Tag every objection [BLOCKING] or [NON-BLOCKING]; BLOCKING = correctness bugs, data loss, races, security, requirement drift, untestable AC.
-4. Append a new section titled:
-## 🏛️ Architect Review Iteration N
-Conclude with VERDICT: AGREED if there are no BLOCKING objections, otherwise VERDICT: DISAGREED.
+1. Read ONLY: the original proposal, current Final Decision Plan, latest author iteration, and previous review.
+2. Tag every objection [BLOCKING] or [NON-BLOCKING].
+3. Append a new section: ## 🏛️ Architect Review Iteration N
+Conclude with VERDICT: AGREED if no BLOCKING objections, otherwise VERDICT: DISAGREED.
 "@
 claude -p $architect_prompt --model claude-opus-5-5 --effort medium --no-session-persistence --dangerously-skip-permissions
 ```
@@ -163,61 +200,52 @@ claude -p $architect_prompt --model claude-opus-5-5 --effort medium --no-session
 ```powershell
 $qa_prompt = @"
 You are the QA Lead & Requirements Guardian conducting Round N of the Review of '<PLAN>'.
-1. Read ONLY: the original proposal, the current Final Decision Plan, the latest author iteration, and your previous review (line ranges: ...).
-2. Anti-Drift Check: Ensure the plan remains 100% faithful to original requirements without scope creep or dropped invariants.
-3. UX/UI & Functional Check: If UI exists, audit UX ergonomics and user feedback; if backend only, audit functional correctness and error handling.
-4. Testability Check: Confirm Gherkin BDD criteria cover edge cases and failure modes.
-5. Tag every objection [BLOCKING] or [NON-BLOCKING], then append a new section titled:
-## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)
-Conclude with VERDICT: AGREED if there are no BLOCKING objections, otherwise VERDICT: DISAGREED.
+1. Read ONLY: the original proposal, current Final Decision Plan, latest author iteration, and previous review.
+2. Audit Requirements Fidelity (Anti-Drift), UX/UI ergonomics, and BDD testability.
+3. Tag every objection [BLOCKING] or [NON-BLOCKING], then append: ## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)
+Conclude with VERDICT: AGREED if no BLOCKING objections, otherwise VERDICT: DISAGREED.
 "@
 agy -p $qa_prompt --model gemini-3.8-flash-medium --dangerously-skip-permissions --print-timeout 15m
 ```
 
-### Step 4: Verdict Analysis & Convergence Check
-Read the new review sections (not the whole file).
-
-#### Case 1: Dual Consensus Reached (`Both AGREED`)
-- Update the single `## 🎯 Final Decision Plan & User Story Specification`, folding in agreed safeguards and any NON-BLOCKING notes worth adopting.
-- Mark status: **✅ APPROVED BY ARCHITECT & QA CONSENSUS**.
-- Report completion and present the approved Final Decision Plan to the user.
-
-#### Case 2: Disagreement & Round < 3
-- Address the `[BLOCKING]` objections under `## 🏛️ Architect Review Iteration N` and `## 🧪 QA Review Iteration N`. NON-BLOCKING notes may be adopted or explicitly declined in one line each.
-- Increment the round count (N → N+1).
-- Append `## 🔍 Review Iteration N+1 (Author Response)` and replace the Final Decision Plan section.
-- Return to **Step 3** to re-invoke the council for Round N+1.
-
-#### Case 3: Cap Reached (Round == 3 with Disagreement)
-- **DO NOT INVOKE COUNCIL AGAIN.**
-- Append escalation marker in `<PLAN>`:
-  ```markdown
-  ## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies (Round 3 Cap Reached)
-  ```
-- Extract the exact BLOCKING points of divergence and present an **Operator Dispute Matrix** directly in the chat.
-
----
-
-## 🚨 Operator Escalation Format (When Round 3 Has No Consensus)
-
-```markdown
-### ⚠️ Tri-Party Cross-Review Round 3 Escalation: Unresolved Disagreements
-
-The Author, Architect, and QA Guardian have completed 3 iterative debate rounds via `<PLAN>` without resolving all BLOCKING objections. Execution has halted to request your architectural decision.
-
-#### 📊 Points of Contention Matrix
-| Role | Contested Item | Stance & Objections | Proposed Alternative / Risk |
-| :--- | :--- | :--- | :--- |
-| **Architect** | [System/Technical Item] | ... | ... |
-| **QA Guardian** | [Requirement/UX Item] | ... | ... |
-| **Author** | [Proposed Synthesis] | ... | ... |
-
-#### 🎯 Action Required from Operator
-Please select how you wish to proceed:
-- **Option 1:** Adopt the Author proposal.
-- **Option 2:** Adopt the Architect's recommendation on technical points and the QA Guardian's recommendation on requirements/UX.
-- **Option 3:** Provide specific compromise or custom guidance.
+**3. Chief Functional Architect Invocation (Every 3 Council Rounds or Council Agreement):**
+```powershell
+$chief_fa_prompt = @"
+You are the Chief Functional Architect conducting Iteration M of the Two-Tier Architectural Review of '<PLAN>'.
+Evaluate the proposed solution in the MOST CRITICAL WAY POSSIBLE:
+1. Problem-Solution Fit & Root Cause: Does the solution genuinely fix the initial problem and root causes?
+2. Industry Standards & Best Practices: Does it strictly adhere to modern software architecture and engineering standards?
+3. Append: ## 🏛️ Chief Functional Architect Review Iteration M: Problem-Solution & Standards Audit
+Conclude with VERDICT: APPROVED or VERDICT: CHANGES REQUIRED.
+If M == 3 and unagreed, provide ### 🎯 Definitive Executive Resolution and dictate final solution in Final Decision Plan.
+"@
+claude -p $chief_fa_prompt --model claude-opus-5-5 --effort max --no-session-persistence --dangerously-skip-permissions
 ```
+
+### Step 4: Two-Tier Convergence & Decision Logic
+
+#### Case 1: Council Debates in Progress (Council Disagreed, Round < 3)
+- Address `[BLOCKING]` objections under Architect & QA review sections.
+- Append `## 🔍 Review Iteration N+1 (Author Response)` and replace the Final Decision Plan section.
+- Re-invoke the helper script for Round N+1.
+
+#### Case 2: Chief Functional Architect Approval (`VERDICT: APPROVED`)
+- Chief FA confirms problem-solution fit and industry standards compliance.
+- Update `## 🎯 Final Decision Plan & User Story Specification` with `Resolution Type: Consensus Agreement (Validated by Chief Functional Architect)`.
+- Mark status: **✅ APPROVED BY ARCHITECT, QA & CHIEF FUNCTIONAL ARCHITECT**.
+- Present approved plan to the operator.
+
+#### Case 3: Chief Functional Architect Mandates Amendments (Iteration M < 3)
+- Chief FA identifies functional deficiencies or standards non-compliance.
+- Proposal is returned to the Council for a fresh 3-iteration cycle.
+- Author addresses Chief FA amendments in `## 🔍 Review Iteration N+1 (Author Response to Chief Functional Architect)`.
+- Return to **Step 3** for the new council cycle.
+
+#### Case 4: Chief Functional Architect Executive Determination (Iteration M == 3 Hard Cap)
+- If after 3 Chief FA iterations no agreement has been reached across the council and Chief FA:
+- Chief Functional Architect exercises executive authority and **unilaterally dictates the definitive solution**.
+- Section `### 🎯 Definitive Executive Resolution` is appended and the Final Decision Plan is updated with `Resolution Type: Chief Functional Architect Executive Determination (3-Round Cap Triggered)`.
+- No further debates occur. The definitive solution is presented directly to the operator.
 
 ---
 
@@ -227,10 +255,10 @@ In `<PLAN>`, sections MUST strictly use these headers:
 - Plan title (one per feature): `# 📋 Implementation Plan: <feature>`
 - Initial plan: `## 📋 Initial Implementation Proposal` (or `## 📝 Initial Draft Proposal`)
 - Author reviews: `## 🔍 Review Iteration N (Author Perspective)`
-- Architect reviews: `## 🏛️ Architect Review Iteration N`
+- Principal Architect reviews: `## 🏛️ Architect Review Iteration N`
 - QA reviews: `## 🧪 QA Review Iteration N (Requirements & UX/UI Guardian)`
+- Chief Functional Architect reviews: `## 🏛️ Chief Functional Architect Review Iteration M: Problem-Solution & Standards Audit`
 - Final decision (exactly one, replaced in place): `## 🎯 Final Decision Plan & User Story Specification`
-- Escalation: `## ⚠️ Escalation to Operator: Unresolved Architectural Discrepancies`
 
 ---
 
