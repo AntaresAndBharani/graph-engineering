@@ -24,7 +24,7 @@ if not SKILL_SCRIPT_DIR.exists():
 if str(SKILL_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPT_DIR))
 
-import agy_cross_review
+import agy_cross_review  # noqa: E402
 
 
 class TestAgyCrossReview:
@@ -51,10 +51,11 @@ Second architect critique.
 ## 🧪 Claude QA Review Iteration 2 (Requirements & UX/UI Guardian)
 Second QA critique.
 """
-        author, architect, qa = agy_cross_review.count_iterations(sample_plan)
+        author, architect, qa, chief_fa = agy_cross_review.count_iterations(sample_plan)
         assert author == 2
         assert architect == 2
         assert qa == 2
+        assert chief_fa == 0
 
     def test_count_iterations_partial_rounds(self):
         sample_plan = """
@@ -66,10 +67,11 @@ Initial.
 ## 🏛️ Architect Review Iteration 1
 Architect reviewed first.
 """
-        author, architect, qa = agy_cross_review.count_iterations(sample_plan)
+        author, architect, qa, chief_fa = agy_cross_review.count_iterations(sample_plan)
         assert author == 1
         assert architect == 1
         assert qa == 0
+        assert chief_fa == 0
 
     def test_count_iterations_active_plan_only(self):
         plan = """
@@ -82,7 +84,7 @@ Architect reviewed first.
 ## 🏛️ Architect Review Iteration 1
 ## 🧪 Claude QA Review Iteration 1 (Requirements & UX/UI Guardian)
 """
-        assert agy_cross_review.count_iterations(plan) == (1, 1, 1)
+        assert agy_cross_review.count_iterations(plan) == (1, 1, 1, 0)
 
     def test_build_qa_prompt_mandates(self, tmp_path):
         dummy_plan = tmp_path / "implementation-plan.md"
@@ -408,7 +410,7 @@ VERDICT: AGREED
 - [BLOCKING] Missing empty-state scenario.
 VERDICT: DISAGREED
 """
-        assert agy_cross_review.count_iterations(plan) == (1, 1, 1)
+        assert agy_cross_review.count_iterations(plan) == (1, 1, 1, 0)
         assert agy_cross_review.parse_qa_verdict(plan, "", 1) == "DISAGREED"
         assert agy_cross_review.extract_disagreement_points(plan, 1, header_prefix="🧪") == [
             "[BLOCKING] Missing empty-state scenario."
@@ -438,3 +440,269 @@ VERDICT: DISAGREED
         assert agy_cross_review.DEFAULT_ARCHITECT_EFFORT == "medium"
         assert agy_cross_review.DEFAULT_QA_MODEL == "gemini-3.8-flash-medium"
         assert agy_cross_review.DEFAULT_QA_EFFORT is None
+        assert agy_cross_review.DEFAULT_CHIEF_FA_MODEL == "claude-opus-5-5"
+        assert agy_cross_review.DEFAULT_CHIEF_FA_EFFORT == "max"
+
+    def test_count_iterations_with_chief_fa(self):
+        plan = """
+# 📋 Implementation Plan: Feature Two-Tier
+## 🔍 Review Iteration 1 (Author Perspective)
+## 🏛️ Architect Review Iteration 1
+## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)
+## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit
+## 🔍 Review Iteration 2 (Author Response to Chief Functional Architect)
+## 🏛️ Architect Review Iteration 2
+## 🧪 QA Review Iteration 2 (Requirements & UX/UI Guardian)
+## 🏛️ Chief Functional Architect Review Iteration 2: Problem-Solution & Standards Audit
+"""
+        author, architect, qa, chief_fa = agy_cross_review.count_iterations(plan)
+        assert author == 2
+        assert architect == 2
+        assert qa == 2
+        assert chief_fa == 2
+
+    def test_count_council_rounds_in_cycle(self):
+        # Cycle 1: 2 council rounds
+        plan_c1 = """
+# 📋 Implementation Plan: Feature Cycle
+## 🏛️ Architect Review Iteration 1
+## 🧪 QA Review Iteration 1
+## 🏛️ Architect Review Iteration 2
+## 🧪 QA Review Iteration 2
+"""
+        assert agy_cross_review.count_council_rounds_in_cycle(plan_c1) == 2
+
+        # Cycle 2: Chief FA ran once, then 1 new council round
+        plan_c2 = plan_c1 + """
+## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit
+VERDICT: CHANGES REQUIRED
+## 🔍 Review Iteration 2 (Author Response)
+## 🏛️ Architect Review Iteration 3
+## 🧪 QA Review Iteration 3
+"""
+        assert agy_cross_review.count_council_rounds_in_cycle(plan_c2) == 1
+
+    def test_build_chief_fa_prompt(self, tmp_path):
+        dummy_plan = tmp_path / "implementation-plan.md"
+        dummy_plan.write_text("# Plan", encoding="utf-8")
+
+        prompt = agy_cross_review.build_chief_fa_prompt(
+            round_num=1,
+            plan_path=dummy_plan,
+            guide=["- Active plan: lines 1-1"],
+            is_final_round=False,
+        )
+
+        assert "Chief Functional Architect" in prompt
+        assert "Iteration 1" in prompt
+        assert "MOST CRITICAL WAY POSSIBLE" in prompt
+        assert "PROBLEM-SOLUTION FIT & ROOT CAUSE" in prompt
+        assert "INDUSTRY STANDARDS & BEST PRACTICES" in prompt
+        assert "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit" in prompt
+        assert "VERDICT: APPROVED" in prompt
+        assert "VERDICT: CHANGES REQUIRED" in prompt
+        assert "CRITICAL EXECUTIVE AUTHORITY" not in prompt
+
+    def test_build_chief_fa_prompt_final_round(self, tmp_path):
+        dummy_plan = tmp_path / "implementation-plan.md"
+        dummy_plan.write_text("# Plan", encoding="utf-8")
+
+        prompt = agy_cross_review.build_chief_fa_prompt(
+            round_num=3,
+            plan_path=dummy_plan,
+            guide=["- Active plan: lines 1-1"],
+            is_final_round=True,
+        )
+
+        assert "Iteration 3 (Hard Cap)" in prompt
+        assert "CRITICAL EXECUTIVE AUTHORITY (FINAL ITERATION)" in prompt
+        assert "### 🎯 Definitive Executive Resolution" in prompt
+        assert "[Executive Resolution: Dictated by Chief Functional Architect]" in prompt
+        assert "VERDICT: EXECUTIVE RESOLUTION DICTATED" in prompt
+
+    def test_parse_chief_fa_verdict(self):
+        approved_plan = """
+## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit
+- [NON-BLOCKING] Minor telemetry naming.
+VERDICT: APPROVED
+"""
+        assert agy_cross_review.parse_chief_fa_verdict(approved_plan, "", 1) == "APPROVED"
+
+        changes_plan = """
+## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit
+- [BLOCKING] Does not solve root cause of subprocess pipe hangs on Windows.
+VERDICT: CHANGES REQUIRED
+"""
+        assert agy_cross_review.parse_chief_fa_verdict(changes_plan, "", 1) == "CHANGES REQUIRED"
+
+        exec_plan = """
+## 🏛️ Chief Functional Architect Review Iteration 3: Problem-Solution & Standards Audit
+### 🎯 Definitive Executive Resolution
+VERDICT: EXECUTIVE RESOLUTION DICTATED
+"""
+        assert agy_cross_review.parse_chief_fa_verdict(exec_plan, "", 3) == "EXECUTIVE_RESOLUTION"
+
+    def test_extract_chief_fa_points(self):
+        plan = """
+## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit
+### 🚨 Deficiencies & Functional Amendments
+- [BLOCKING] Fails to adhere to POSIX file locking standards on shared storage.
+- [NON-BLOCKING] Suggest adding Prometheus metrics.
+VERDICT: CHANGES REQUIRED
+"""
+        points = agy_cross_review.extract_chief_fa_points(plan, 1)
+        assert points == ["[BLOCKING] Fails to adhere to POSIX file locking standards on shared storage."]
+
+    def test_reading_guide_chief_fa(self):
+        plan = "\n".join([
+            "# 📋 Implementation Plan: Feature Two-Tier",   # 1
+            "## 📝 Initial Draft Proposal",                  # 2
+            "operator initial request",                      # 3
+            "## 🔍 Review Iteration 1 (Author)",             # 4
+            "author notes",                                  # 5
+            "## 🏛️ Architect Review Iteration 1",            # 6
+            "architect notes",                               # 7
+            "## 🧪 QA Review Iteration 1 (Requirements)",    # 8
+            "qa notes",                                      # 9
+            "## 🎯 Final Decision Plan",                     # 10
+            "final spec",                                    # 11
+        ])
+        guide = "\n".join(agy_cross_review.reading_guide(plan, "chief_fa", round_num=1))
+        assert "original proposal / requirements: lines 2-3" in guide
+        assert "Current Final Decision Plan: lines 10-11" in guide
+        assert "Latest author iteration: lines 4-5" in guide
+        assert "Latest Architect review: lines 6-7" in guide
+        assert "Latest QA review: lines 8-9" in guide
+
+    @patch("agy_cross_review.invoke_claude")
+    @patch("agy_cross_review.invoke_agy")
+    def test_main_chief_fa_triggered_on_council_agreed(self, mock_agy, mock_claude, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Test\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        # Architect agrees, QA agrees, then Chief FA approves
+        def mock_claude_call(prompt, model, effort):
+            if "Principal Architect" in prompt:
+                assert effort == "medium"
+                return 0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", ""
+            elif "Chief Functional Architect" in prompt:
+                assert effort == "max"
+                assert model == "claude-opus-5-5"
+                return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED\n", ""
+            return 0, "", ""
+
+        mock_claude.side_effect = mock_claude_call
+        mock_agy.return_value = (0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", "")
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom))
+
+        assert code == 0
+        assert out["status"] == "completed"
+        assert out["council_verdict"] == "AGREED"
+        assert out["chief_fa_verdict"] == "APPROVED"
+        assert out["overall_verdict"] == "APPROVED"
+        assert out["chief_fa_round"] == 1
+
+    @patch("agy_cross_review.invoke_claude")
+    @patch("agy_cross_review.invoke_agy")
+    def test_main_chief_fa_changes_required_returns_to_council(self, mock_agy, mock_claude, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Test\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def mock_claude_call(prompt, model, effort):
+            if "Principal Architect" in prompt:
+                return 0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", ""
+            elif "Chief Functional Architect" in prompt:
+                assert effort == "max"
+                return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\n- [BLOCKING] Missing rollback semantics.\nVERDICT: CHANGES REQUIRED\n", ""
+            return 0, "", ""
+
+        mock_claude.side_effect = mock_claude_call
+        mock_agy.return_value = (0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", "")
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom))
+
+        assert code == 0
+        assert out["status"] == "chief_fa_changes_required"
+        assert out["chief_fa_verdict"] == "CHANGES REQUIRED"
+        assert "Returning to Council for a new 3-round cycle" in out["message"]
+
+    @patch("agy_cross_review.invoke_claude")
+    def test_main_run_chief_fa_flag(self, mock_claude, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text(
+            "# 📋 Implementation Plan: Test\n"
+            "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n"
+            "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        mock_claude.return_value = (
+            0,
+            "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED\n",
+            "",
+        )
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--run-chief-fa")
+
+        assert code == 0
+        assert out["role"] == "chief_fa"
+        assert out["chief_fa_verdict"] == "APPROVED"
+        assert out["chief_fa_round"] == 1
+
+    def test_main_check_status_includes_chief_fa(self, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text(
+            "# 📋 Implementation Plan: Status\n"
+            "## 🏛️ Architect Review Iteration 1\n"
+            "## 🧪 QA Review Iteration 1\n"
+            "## 🏛️ Chief Functional Architect Review Iteration 1\n"
+            "## 🏛️ Architect Review Iteration 2\n"
+            "## 🧪 QA Review Iteration 2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--check-status")
+
+        assert code == 0
+        assert out["architect_rounds"] == 2
+        assert out["qa_rounds"] == 2
+        assert out["chief_fa_rounds"] == 1
+        assert out["council_rounds_in_cycle"] == 1
+        assert out["max_chief_fa_rounds"] == 3
+
+    @patch("agy_cross_review.invoke_claude")
+    def test_main_chief_fa_final_resolution_on_round_3(self, mock_claude, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text(
+            "# 📋 Implementation Plan: Final Resolution\n"
+            "## 🏛️ Chief Functional Architect Review Iteration 1\n"
+            "## 🏛️ Chief Functional Architect Review Iteration 2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        def mock_claude_call(prompt, model, effort):
+            assert effort == "max"
+            assert "Iteration 3 (Hard Cap)" in prompt
+            return 0, "## 🏛️ Chief Functional Architect Review Iteration 3: Problem-Solution & Standards Audit\n### 🎯 Definitive Executive Resolution\nFinal binding design.\nVERDICT: EXECUTIVE RESOLUTION DICTATED\n", ""
+
+        mock_claude.side_effect = mock_claude_call
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--run-chief-fa")
+
+        assert code == 0
+        assert out["status"] == "executive_resolution_dictated"
+        assert out["chief_fa_verdict"] == "EXECUTIVE_RESOLUTION"
+        assert out["chief_fa_round"] == 3
+
+
