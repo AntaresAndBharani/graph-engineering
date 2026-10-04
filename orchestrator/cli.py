@@ -2335,6 +2335,11 @@ def council_command(
         min=1,
         help="Rounds before a deadlock is declared (default: 2).",
     ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Council model/effort config (default: ~/.gemini/config/plugins/swarm-dev-core/config/architect-council-review.json).",
+    ),
 ):
     """Architect Council (FA, TL, QA) review: 2 bounded rounds, then consensus or a deadlock escalation dossier."""
     import subprocess
@@ -2358,6 +2363,8 @@ def council_command(
         cmd += ["--diff-range", diff_range]
     if max_rounds is not None:
         cmd += ["--max-rounds", str(max_rounds)]
+    if config is not None:
+        cmd += ["--config", str(config)]
 
     completed = subprocess.run(cmd)
     raise typer.Exit(code=completed.returncode)

@@ -54,6 +54,13 @@ def _reply(verdict="AGREED", blocking=None, agreed=("CSV export is in scope",), 
     ])
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path_factory, monkeypatch):
+    """Ignore the operator's real global config and env override: tests use the shipped default unless they opt in."""
+    monkeypatch.setattr(cr, "GLOBAL_CONFIG_PATH", tmp_path_factory.mktemp("noglobal") / "absent.json")
+    monkeypatch.delenv(cr.CONFIG_ENV_VAR, raising=False)
+
+
 @pytest.fixture
 def plan(tmp_path):
     p = tmp_path / "plan.md"
@@ -96,7 +103,7 @@ def test_compute_state_idle_and_round_tracking(plan):
     assert state.status == cr.STATUS_IDLE
     assert state.next_round() == 1
 
-    cfg = cr.RoleConfig("m", "e")
+    cfg = cr.RoleConfig("claude", "m", "e")
     cr.append_blocks(plan, [cr.render_round_block(a, 1, cfg, _reply("DISAGREED", ["x"])) for a in cr.ROLE_ORDER])
     _, _, state = cr.load_state(plan, 2)
     assert state.status == cr.STATUS_IN_PROGRESS
@@ -105,7 +112,7 @@ def test_compute_state_idle_and_round_tracking(plan):
 
 
 def test_compute_state_consensus_then_new_session(plan):
-    cfg = cr.RoleConfig("m", "e")
+    cfg = cr.RoleConfig("claude", "m", "e")
     cr.append_blocks(plan, [cr.render_round_block(a, 1, cfg, _reply()) for a in cr.ROLE_ORDER])
     reviews = {a: cr.parse_review(_reply()) for a in cr.ROLE_ORDER}
     cr.append_blocks(plan, [cr.render_consensus(1, reviews)])
@@ -116,7 +123,7 @@ def test_compute_state_consensus_then_new_session(plan):
 
 
 def test_compute_state_deadlock_and_continuation(plan):
-    cfg = cr.RoleConfig("m", "e")
+    cfg = cr.RoleConfig("claude", "m", "e")
     for rnd in (1, 2):
         cr.append_blocks(plan, [cr.render_round_block(a, rnd, cfg, _reply("DISAGREED", ["x"])) for a in cr.ROLE_ORDER])
     reviews = {a: cr.parse_review(_reply("DISAGREED", ["x"])) for a in cr.ROLE_ORDER}
@@ -190,7 +197,7 @@ def test_prompt_round1_agy_uses_line_ranges(plan):
 
 
 def test_prompt_round2_inlines_peers_for_claude(plan):
-    cfg = cr.RoleConfig("m", "e")
+    cfg = cr.RoleConfig("claude", "m", "e")
     cr.append_blocks(plan, [
         cr.render_round_block(a, 1, cfg, _reply("DISAGREED", [f"{a}-objection"])) for a in cr.ROLE_ORDER
     ])
@@ -225,13 +232,13 @@ def test_invoke_claude_flags_and_metrics():
     assert out.reply == "review" and out.metrics["num_turns"] == 2
 
 
-def test_invoke_agy_flags_tl():
+def test_invoke_agy_flags_tl_effort_in_model_id():
     with patch.object(cr.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="ok", stderr="")) as run:
-        out = cr.invoke_agy("P", "claude-opus-5-5", "medium", timeout_s=1200)
+        out = cr.invoke_agy("P", "claude-opus-5-5-medium", timeout_s=1200)
     cmd = run.call_args.args[0]
     assert cmd[:3] == ["agy", "-p", "P"]
-    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
-    assert cmd[cmd.index("--effort") + 1] == "medium"
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5-medium"
+    assert "--effort" not in cmd
     assert cmd[cmd.index("--print-timeout") + 1] == "20m"
     assert "-c" not in cmd
     assert out.reply == "ok"
@@ -243,23 +250,126 @@ def test_invoke_agy_missing_cli():
     assert out.returncode == 127
 
 
-def test_default_role_configs_match_spec():
+def test_shipped_default_config_matches_spec():
     args = cr.build_parser().parse_args([])
-    cfg = cr.role_configs(args)
-    assert (cfg["FA"].model, cfg["FA"].effort) == ("claude-opus-5-5", "high")
-    assert (cfg["TL"].model, cfg["TL"].effort) == ("claude-opus-5-5", "medium")
-    assert (cfg["QA"].model, cfg["QA"].effort) == ("gemini-3.8-flash-high", None)
-    assert (cr.ROLES["FA"].harness, cr.ROLES["TL"].harness, cr.ROLES["QA"].harness) == ("claude", "agy", "agy")
+    cfg, path, source = cr.resolve_role_configs(args)
+    assert source == "default" and path == cr.DEFAULT_CONFIG_PATH
+    assert cfg["FA"] == cr.RoleConfig("claude", "claude-opus-5-5", "high")
+    assert cfg["TL"] == cr.RoleConfig("agy", "claude-opus-5-5-medium", None)
+    assert cfg["QA"] == cr.RoleConfig("agy", "gemini-3.8-flash-high", None)
     assert args.max_rounds == 2
 
 
-def test_run_role_dispatches_by_harness():
+def test_run_role_dispatches_by_configured_harness():
     args = cr.build_parser().parse_args([])
     with patch.object(cr, "invoke_claude", return_value=_outcome("c")) as ic, patch.object(cr, "invoke_agy", return_value=_outcome("a")) as ia:
-        cr.run_role("FA", "p", cr.RoleConfig("claude-opus-5-5", "high"), args)
-        cr.run_role("QA", "p", cr.RoleConfig("gemini-3.8-flash-high", None), args)
-    ic.assert_called_once_with("p", "claude-opus-5-5", "high", args.claude_timeout)
-    ia.assert_called_once_with("p", "gemini-3.8-flash-high", None, args.agy_timeout)
+        cr.run_role("FA", "p", cr.RoleConfig("claude", "claude-opus-5-5", "high"), args)
+        cr.run_role("QA", "p", cr.RoleConfig("agy", "gemini-3.8-flash-high"), args)
+        cr.run_role("TL", "p", cr.RoleConfig("claude", "claude-sonnet-5-5", "low"), args)
+    assert ic.call_args_list[0].args == ("p", "claude-opus-5-5", "high", args.claude_timeout)
+    assert ic.call_args_list[1].args == ("p", "claude-sonnet-5-5", "low", args.claude_timeout)
+    ia.assert_called_once_with("p", "gemini-3.8-flash-high", args.agy_timeout)
+
+
+# ------------------------------------------------------------------ config file
+
+def _write_config(path, roles):
+    path.write_text(json.dumps({"roles": roles}), encoding="utf-8")
+    return path
+
+
+GOOD_ROLES = {
+    "FA": {"harness": "claude", "model": "claude-opus-5-5", "effort": "medium"},
+    "TL": {"harness": "agy", "model": "claude-sonnet-5-5-high"},
+    "QA": {"harness": "agy", "model": "gemini-3.7-flash-low"},
+}
+
+
+def test_config_precedence_argument_env_global(tmp_path, monkeypatch):
+    glob = _write_config(tmp_path / "global.json", GOOD_ROLES)
+    env = _write_config(tmp_path / "env.json", {**GOOD_ROLES, "QA": {"harness": "agy", "model": "gemini-3.1-pro-high"}})
+    arg = _write_config(tmp_path / "arg.json", {**GOOD_ROLES, "QA": {"harness": "agy", "model": "gpt-oss-120b-medium"}})
+    monkeypatch.setattr(cr, "GLOBAL_CONFIG_PATH", glob)
+    assert cr.resolve_config_path() == (glob, "global")
+    monkeypatch.setenv(cr.CONFIG_ENV_VAR, str(env))
+    assert cr.resolve_config_path() == (env.resolve(), "env")
+    assert cr.resolve_config_path(str(arg)) == (arg.resolve(), "argument")
+
+    args = cr.build_parser().parse_args(["--config", str(arg)])
+    cfg, _, source = cr.resolve_role_configs(args)
+    assert source == "argument" and cfg["QA"].model == "gpt-oss-120b-medium"
+
+
+def test_global_config_is_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(cr, "GLOBAL_CONFIG_PATH", _write_config(tmp_path / "g.json", GOOD_ROLES))
+    cfg, _, source = cr.resolve_role_configs(cr.build_parser().parse_args([]))
+    assert source == "global"
+    assert cfg["FA"].effort == "medium"
+    assert cfg["TL"].model == "claude-sonnet-5-5-high"
+
+
+def test_missing_explicit_config_is_error(tmp_path):
+    with pytest.raises(cr.ConfigError, match="not found"):
+        cr.resolve_config_path(str(tmp_path / "missing.json"))
+
+
+@pytest.mark.parametrize(
+    "role_patch, message",
+    [
+        ({"TL": {"harness": "agy", "model": "claude-opus-5-5", "effort": "medium"}}, "claude-opus-5-5-medium"),
+        ({"TL": {"harness": "agy", "model": "claude-opus-5-5"}}, "no effort suffix"),
+        ({"FA": {"harness": "claude", "model": "claude-opus-5-5"}}, "effort is required"),
+        ({"QA": {"harness": "codex", "model": "x-high"}}, "harness must be one of"),
+        ({"QA": {"harness": "agy", "model": "gemini-3.8-flash-high", "temperature": 1}}, "unknown keys"),
+    ],
+)
+def test_config_validation_errors(tmp_path, role_patch, message):
+    path = _write_config(tmp_path / "c.json", {**GOOD_ROLES, **role_patch})
+    with pytest.raises(cr.ConfigError, match=message):
+        cr.resolve_role_configs(cr.build_parser().parse_args(["--config", str(path)]))
+
+
+def test_config_missing_role_and_bad_json(tmp_path):
+    path = _write_config(tmp_path / "c.json", {"FA": GOOD_ROLES["FA"], "TL": GOOD_ROLES["TL"]})
+    with pytest.raises(cr.ConfigError, match="missing roles"):
+        cr.load_council_config(path)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    with pytest.raises(cr.ConfigError, match="not valid JSON"):
+        cr.load_council_config(bad)
+
+
+def test_cli_overrides_apply_and_are_validated(tmp_path):
+    path = _write_config(tmp_path / "c.json", GOOD_ROLES)
+    args = cr.build_parser().parse_args(["--config", str(path), "--tl-model", "claude-opus-5-5-low", "--fa-effort", "max"])
+    cfg, _, _ = cr.resolve_role_configs(args)
+    assert cfg["TL"].model == "claude-opus-5-5-low"
+    assert cfg["FA"].effort == "max"
+    args = cr.build_parser().parse_args(["--config", str(path), "--qa-effort", "high"])
+    with pytest.raises(cr.ConfigError, match="not allowed for the agy harness"):
+        cr.resolve_role_configs(args)
+
+
+def test_run_reports_config_error_without_invoking(plan, tmp_path):
+    path = _write_config(tmp_path / "c.json", {**GOOD_ROLES, "TL": {"harness": "agy", "model": "claude-opus-5-5"}})
+    with patch.object(cr, "run_role", side_effect=AssertionError("must not run")):
+        code, result = cr.run(["--plan", str(plan), "--config", str(path)])
+    assert code == cr.EXIT_ERROR and "no effort suffix" in result["error"]
+
+
+def test_check_status_reports_roles_and_config(plan, tmp_path):
+    path = _write_config(tmp_path / "c.json", GOOD_ROLES)
+    code, result = cr.run(["--plan", str(plan), "--config", str(path), "--check-status"])
+    assert code == cr.EXIT_OK
+    assert result["config_source"] == "argument"
+    assert result["roles"]["TL"] == {"harness": "agy", "model": "claude-sonnet-5-5-high", "effort": None}
+
+
+def test_round_header_shows_configured_harness_and_effort():
+    block = cr.render_round_block("TL", 1, cr.RoleConfig("agy", "claude-opus-5-5-medium"), _reply())
+    assert "_Harness: `agy` · Model: `claude-opus-5-5-medium` · Effort: `medium (in model ID)`" in block
+    block = cr.render_round_block("FA", 2, cr.RoleConfig("claude", "claude-opus-5-5", "high"), _reply())
+    assert "Effort: `high` · Mode: Cross-Rebuttal" in block
 
 
 # ------------------------------------------------------------------ end-to-end flow
@@ -399,12 +509,12 @@ def test_orchestrator_council_forwards_arguments(tmp_path):
 
     runner = CliRunner()
     with patch("subprocess.run", return_value=SimpleNamespace(returncode=2)) as run:
-        result = runner.invoke(cli.app, ["council", "--plan", "p.md", "--continue", "2", "--max-rounds", "3"])
+        result = runner.invoke(cli.app, ["council", "--plan", "p.md", "--continue", "2", "--max-rounds", "3", "--config", "c.json"])
     assert result.exit_code == 2
     cmd = run.call_args.args[0]
     assert cmd[0] == sys.executable
     assert cmd[1].endswith("council_review.py")
-    assert cmd[2:] == ["--plan", "p.md", "--continue", "2", "--max-rounds", "3"]
+    assert cmd[2:] == ["--plan", "p.md", "--continue", "2", "--max-rounds", "3", "--config", "c.json"]
 
 
 def test_orchestrator_council_proceed_and_status():

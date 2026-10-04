@@ -17,18 +17,42 @@ Use this skill when the user runs `/architect-council-review`, `/council-review`
 
 ## 👥 Council Composition
 
-| Role | Harness | Model | Effort | Focus |
+Default configuration (from the global config file, described below):
+
+| Role | Harness | Model ID | Effort | Focus |
 |---|---|---|---|---|
-| **Functional Architect (FA)** | `claude` (Claude Code CLI) | `claude-opus-5-5` | `high` | Problem fidelity, user story completeness, Given-When-Then precision, scope creep elimination. |
-| **Technical Lead (TL)** | `agy` (Antigravity CLI) | `claude-opus-5-5` | `medium` | Implementation feasibility, architectural patterns, minimal change set strictly necessary for the requirements. |
-| **Quality Assurance (QA)** | `agy` (Antigravity CLI) | `gemini-3.8-flash-high` | `high` (in the model name) | Regression surface analysis, backwards compatibility, test matrix completeness, contract stability. |
+| **Functional Architect (FA)** | `claude` (Claude Code CLI) | `claude-opus-5-5` | `high` (`--effort`) | Problem fidelity, user story completeness, Given-When-Then precision, scope creep elimination. |
+| **Technical Lead (TL)** | `agy` (Antigravity CLI) | `claude-opus-5-5-medium` | `medium` (in the model ID) | Implementation feasibility, architectural patterns, minimal change set strictly necessary for the requirements. |
+| **Quality Assurance (QA)** | `agy` (Antigravity CLI) | `gemini-3.8-flash-high` | `high` (in the model ID) | Regression surface analysis, backwards compatibility, test matrix completeness, contract stability. |
 
 Exact invocations (the script builds them; every round starts a fresh session, never `-c`/`-r`):
 - **FA:** `claude -p --model claude-opus-5-5 --effort high --tools "Read,Grep,Glob" --strict-mcp-config --output-format json --no-session-persistence --dangerously-skip-permissions`. The prompt goes through stdin with the plan excerpts inlined.
-- **TL:** `agy -p <prompt> --model claude-opus-5-5 --effort medium --dangerously-skip-permissions --print-timeout 20m`
+- **TL:** `agy -p <prompt> --model claude-opus-5-5-medium --dangerously-skip-permissions --print-timeout 20m`
 - **QA:** `agy -p <prompt> --model gemini-3.8-flash-high --dangerously-skip-permissions --print-timeout 20m`
 
-Override with `--fa-model/--fa-effort`, `--tl-model/--tl-effort`, `--qa-model/--qa-effort`.
+### ⚙️ Global model / effort config
+Each role's harness, model and effort come from **one global JSON file**:
+
+```
+$HOME\.gemini\config\plugins\swarm-dev-core\config\architect-council-review.json
+```
+
+```json
+{
+  "roles": {
+    "FA": { "harness": "claude", "model": "claude-opus-5-5", "effort": "high" },
+    "TL": { "harness": "agy",    "model": "claude-opus-5-5-medium" },
+    "QA": { "harness": "agy",    "model": "gemini-3.8-flash-high" }
+  }
+}
+```
+
+- **`claude` harness:** `model` + `effort`, passed as `claude --model <model> --effort <effort>`.
+- **`agy` harness:** `model` is the **full agy model ID, with the effort built into the name** (`<model>-low|medium|high`, e.g. `claude-opus-5-5-medium`, `claude-sonnet-5-5-high`, `gemini-3.7-flash-low`, `gemini-3.1-pro-high`, `gpt-oss-120b-medium`). agy never gets `--effort`. An `effort` key on an agy role, or an agy model with no effort suffix, is a config error. The error message shows the correct model ID.
+- **Lookup order:** `--config <path>` → `$ARCHITECT_COUNCIL_CONFIG` → the global file → the shipped `council-config.default.json` (the script prints a warning on stderr when it falls back to this one).
+- **The skill sync never overwrites the global file.** `graph-engineering/scripts/link-global-skills.ps1` creates it from `council-config.default.json` only if it is missing. Edit the global file to change models. Never edit the mirrored skill folder.
+- **Validation:** the config is validated before any reviewer runs. An invalid config exits with code `1` and an `error`. `--check-status` and every run result report the effective `roles` (plus `config_path` / `config_source` on `--check-status`).
+- **Per-run overrides** (they do not change the file): `--fa-model`, `--fa-effort`, `--tl-model`, `--qa-model` (and `--tl-effort` / `--qa-effort`, which are only valid when that role uses the `claude` harness).
 
 ---
 
