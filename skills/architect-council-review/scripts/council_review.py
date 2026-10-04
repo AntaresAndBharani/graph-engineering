@@ -4,12 +4,16 @@ Architect Council Review helper (/architect-council-review, /council-review, /co
 
 A three-member council reviews a requirement, draft plan, or git diff in bounded rounds:
 
-  * Functional Architect (FA): `claude` CLI, claude-opus-5-5, effort high.
-    Problem fidelity, user story completeness, Given-When-Then precision, scope creep.
-  * Technical Lead (TL): `agy` CLI, claude-opus-5-5, effort medium.
-    Implementation feasibility, architectural patterns, minimal change set.
-  * Quality Assurance (QA): `agy` CLI, gemini-3.8-flash-high.
-    Regression surface, backwards compatibility, test matrix, contract stability.
+  * Functional Architect (FA): problem fidelity, user story completeness, Given-When-Then precision, scope creep.
+  * Technical Lead (TL): implementation feasibility, architectural patterns, minimal change set.
+  * Quality Assurance (QA): regression surface, backwards compatibility, test matrix, contract stability.
+
+Harness, model and effort for each role come from a JSON config file (see `resolve_config_path`):
+  --config <path>  >  $ARCHITECT_COUNCIL_CONFIG  >  the global file
+  ~/.gemini/config/plugins/swarm-dev-core/config/architect-council-review.json  >  the shipped
+  `council-config.default.json` next to this skill. `claude` roles take `model` + `effort`
+  (`claude --model M --effort E`). `agy` encodes the effort in the model ID (e.g. `claude-opus-5-5-medium`,
+  `gemini-3.8-flash-high`), so `agy` roles take only a full `model` ID and never get `--effort`.
 
 Protocol:
   Round 1 (Independent Review): the three members review in parallel. Unanimous `VERDICT: AGREED`
@@ -43,13 +47,15 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_PLAN_RELATIVE = Path("docs") / "draft-requisites" / "implementation-plan.md"
 DEFAULT_MAX_ROUNDS = 2
 
-DEFAULT_FA_MODEL = "claude-opus-5-5"
-DEFAULT_FA_EFFORT = "high"
-DEFAULT_TL_MODEL = "claude-opus-5-5"
-DEFAULT_TL_EFFORT = "medium"
-# agy encodes the Gemini reasoning effort in the model name (gemini-3.8-flash-{low,medium,high}).
-DEFAULT_QA_MODEL = "gemini-3.8-flash-high"
-DEFAULT_QA_EFFORT: Optional[str] = None
+# Model / effort configuration (single global file, edited by the operator, never overwritten by the skill sync).
+CONFIG_ENV_VAR = "ARCHITECT_COUNCIL_CONFIG"
+GLOBAL_CONFIG_PATH = (
+    Path.home() / ".gemini" / "config" / "plugins" / "swarm-dev-core" / "config" / "architect-council-review.json"
+)
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "council-config.default.json"
+HARNESSES = ("claude", "agy")
+# agy model IDs carry the reasoning effort as a suffix (gemini-3.8-flash-high, claude-opus-5-5-medium, gpt-oss-120b-medium).
+AGY_EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high)$")
 
 DEFAULT_CLAUDE_TIMEOUT_S = 20 * 60
 DEFAULT_AGY_TIMEOUT_S = 20 * 60
@@ -76,7 +82,6 @@ EXIT_DEADLOCK = 2
 class Role:
     abbr: str
     name: str
-    harness: str  # "claude" or "agy"
     focus: str
 
 
@@ -85,19 +90,16 @@ ROLES: Dict[str, Role] = {
     "FA": Role(
         "FA",
         "Functional Architect",
-        "claude",
         "problem fidelity, user story completeness, Given-When-Then precision, and scope creep elimination",
     ),
     "TL": Role(
         "TL",
         "Technical Lead",
-        "agy",
         "implementation feasibility, architectural patterns, and the minimal change set strictly necessary for the requirements",
     ),
     "QA": Role(
         "QA",
         "Quality Assurance",
-        "agy",
         "regression surface analysis, backwards compatibility, test matrix completeness, and contract stability",
     ),
 }
@@ -488,12 +490,17 @@ def invoke_claude(prompt: str, model: str, effort: str, timeout_s: int = DEFAULT
     return RoleOutcome(code, reply, process.stderr, metrics)
 
 
-def invoke_agy(prompt: str, model: str, effort: Optional[str] = None, timeout_s: int = DEFAULT_AGY_TIMEOUT_S) -> RoleOutcome:
-    """Fresh headless agy session (never `-c`: the plan file carries the history)."""
-    cmd = ["agy", "-p", prompt, "--model", model]
-    if effort:
-        cmd.extend(["--effort", effort])
-    cmd.extend(["--dangerously-skip-permissions", "--print-timeout", f"{max(1, timeout_s // 60)}m"])
+def invoke_agy(prompt: str, model: str, timeout_s: int = DEFAULT_AGY_TIMEOUT_S) -> RoleOutcome:
+    """
+    Fresh headless agy session (never `-c`: the plan file carries the history).
+    agy has no separate effort flag: the effort is part of the model ID (e.g. `claude-opus-5-5-medium`).
+    """
+    cmd = [
+        "agy", "-p", prompt,
+        "--model", model,
+        "--dangerously-skip-permissions",
+        "--print-timeout", f"{max(1, timeout_s // 60)}m",
+    ]
     if sys.platform == "win32" and len(subprocess.list2cmdline(cmd)) > WINDOWS_CMD_LIMIT:
         return RoleOutcome(1, "", "agy prompt exceeds the Windows command-line limit")
     try:
@@ -514,24 +521,119 @@ def invoke_agy(prompt: str, model: str, effort: Optional[str] = None, timeout_s:
     return RoleOutcome(process.returncode, process.stdout or "", process.stderr or "")
 
 
+# --------------------------------------------------------------------------------------------------
+# Model / effort configuration
+# --------------------------------------------------------------------------------------------------
+
+class ConfigError(ValueError):
+    """Invalid or missing council configuration."""
+
+
 @dataclass(frozen=True)
 class RoleConfig:
-    model: str
-    effort: Optional[str]
+    harness: str  # "claude" or "agy"
+    model: str  # claude: base model ID; agy: full model ID including the effort suffix
+    effort: Optional[str] = None  # claude only
+
+    def validate(self, abbr: str) -> None:
+        where = f"roles.{abbr}"
+        if self.harness not in HARNESSES:
+            raise ConfigError(f"{where}.harness must be one of {', '.join(HARNESSES)} (got {self.harness!r}).")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ConfigError(f"{where}.model is required.")
+        if self.harness == "claude":
+            if not isinstance(self.effort, str) or not self.effort.strip():
+                raise ConfigError(f"{where}.effort is required for the claude harness (e.g. \"high\").")
+            return
+        if self.effort:
+            raise ConfigError(
+                f"{where}.effort is not allowed for the agy harness: agy encodes the effort in the model ID. "
+                f"Use \"model\": \"{self.model}-{self.effort}\" instead."
+            )
+        if not AGY_EFFORT_SUFFIX_RE.search(self.model):
+            raise ConfigError(
+                f"{where}.model {self.model!r} has no effort suffix. agy model IDs end in -low, -medium or -high "
+                f"(e.g. claude-opus-5-5-medium, gemini-3.8-flash-high)."
+            )
+
+    def effort_label(self) -> str:
+        if self.harness == "claude":
+            return self.effort or ""
+        m = AGY_EFFORT_SUFFIX_RE.search(self.model)
+        return f"{m.group(1)} (in model ID)" if m else "(in model ID)"
+
+
+def resolve_config_path(explicit: Optional[str] = None) -> Tuple[Path, str]:
+    """
+    Picks the config file: --config > $ARCHITECT_COUNCIL_CONFIG > global file > shipped default.
+    Returns (path, source) where source is 'argument', 'env', 'global' or 'default'.
+    """
+    for value, source in ((explicit, "argument"), (os.environ.get(CONFIG_ENV_VAR), "env")):
+        if value:
+            p = Path(value).expanduser().resolve()
+            if not p.is_file():
+                raise ConfigError(f"Council config file not found ({source}): {p}")
+            return p, source
+    if GLOBAL_CONFIG_PATH.is_file():
+        return GLOBAL_CONFIG_PATH, "global"
+    if DEFAULT_CONFIG_PATH.is_file():
+        return DEFAULT_CONFIG_PATH, "default"
+    raise ConfigError(
+        f"No council config found. Create {GLOBAL_CONFIG_PATH} (run graph-engineering/scripts/link-global-skills.ps1)."
+    )
+
+
+def load_council_config(path: Path) -> Dict[str, RoleConfig]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"Council config {path} is not valid JSON: {exc}") from exc
+    roles = data.get("roles") if isinstance(data, dict) else None
+    if not isinstance(roles, dict):
+        raise ConfigError(f"Council config {path} needs a \"roles\" object with FA, TL and QA.")
+    unknown = sorted(set(roles) - set(ROLE_ORDER))
+    missing = [r for r in ROLE_ORDER if r not in roles]
+    if unknown or missing:
+        raise ConfigError(f"Council config {path}: missing roles {missing or '[]'}, unknown roles {unknown or '[]'}.")
+
+    configs: Dict[str, RoleConfig] = {}
+    for abbr in ROLE_ORDER:
+        entry = roles[abbr]
+        if not isinstance(entry, dict):
+            raise ConfigError(f"roles.{abbr} must be an object.")
+        extra = sorted(set(entry) - {"harness", "model", "effort"})
+        if extra:
+            raise ConfigError(f"roles.{abbr} has unknown keys: {', '.join(extra)}.")
+        configs[abbr] = RoleConfig(entry.get("harness", ""), entry.get("model", ""), entry.get("effort") or None)
+    return configs
+
+
+def resolve_role_configs(args: argparse.Namespace) -> Tuple[Dict[str, RoleConfig], Path, str]:
+    """Loads the config file, applies per-run CLI overrides, and validates every role."""
+    path, source = resolve_config_path(getattr(args, "config", None))
+    configs = load_council_config(path)
+    for abbr in ROLE_ORDER:
+        key = abbr.lower()
+        base = configs[abbr]
+        model = getattr(args, f"{key}_model", None) or base.model
+        effort = getattr(args, f"{key}_effort", None) or base.effort
+        configs[abbr] = RoleConfig(base.harness, model, effort)
+        configs[abbr].validate(abbr)
+    return configs, path, source
 
 
 def role_configs(args: argparse.Namespace) -> Dict[str, RoleConfig]:
-    return {
-        "FA": RoleConfig(args.fa_model, args.fa_effort),
-        "TL": RoleConfig(args.tl_model, args.tl_effort),
-        "QA": RoleConfig(args.qa_model, args.qa_effort),
-    }
+    resolved = getattr(args, "resolved_roles", None)
+    if resolved is None:
+        resolved, _, _ = resolve_role_configs(args)
+        args.resolved_roles = resolved
+    return resolved
 
 
 def run_role(abbr: str, prompt: str, config: RoleConfig, args: argparse.Namespace) -> RoleOutcome:
-    if ROLES[abbr].harness == "claude":
-        return invoke_claude(prompt, config.model, config.effort or DEFAULT_FA_EFFORT, args.claude_timeout)
-    return invoke_agy(prompt, config.model, config.effort, args.agy_timeout)
+    if config.harness == "claude":
+        return invoke_claude(prompt, config.model, config.effort or "high", args.claude_timeout)
+    return invoke_agy(prompt, config.model, args.agy_timeout)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -634,10 +736,9 @@ def sanitize_reply(reply: str) -> str:
 def render_round_block(abbr: str, round_num: int, config: RoleConfig, reply: str) -> str:
     role = ROLES[abbr]
     mode = "Cross-Rebuttal" if round_num > 1 else "Independent Review"
-    effort = config.effort or "(in model name)"
     return (
         f"## ⚖️ Council Round {round_num}: {role.name} ({abbr})\n"
-        f"_Harness: `{role.harness}` · Model: `{config.model}` · Effort: `{effort}` · Mode: {mode}_\n\n"
+        f"_Harness: `{config.harness}` · Model: `{config.model}` · Effort: `{config.effort_label()}` · Mode: {mode}_\n\n"
         f"{sanitize_reply(reply)}"
     )
 
@@ -765,7 +866,7 @@ def run_round(round_num: int, plan_path: Path, args: argparse.Namespace) -> Tupl
     lines, sections, state = load_state(plan_path, args.max_rounds)
     configs = role_configs(args)
     prompts = {
-        abbr: build_prompt(ROLES[abbr], round_num, plan_path, lines, sections, state, inline=ROLES[abbr].harness == "claude")
+        abbr: build_prompt(ROLES[abbr], round_num, plan_path, lines, sections, state, inline=configs[abbr].harness == "claude")
         for abbr in ROLE_ORDER
     }
     snapshot = read_raw(plan_path)
@@ -787,7 +888,12 @@ def deliberate(plan_path: Path, plan_source: str, args: argparse.Namespace) -> T
     _, _, state = load_state(plan_path, args.max_rounds)
     round_num = state.next_round()
     max_rounds = args.max_rounds if round_num == 1 else state.max_rounds
-    result: Dict[str, Any] = {"plan_path": str(plan_path), "plan_source": plan_source, "warnings": []}
+    result: Dict[str, Any] = {
+        "plan_path": str(plan_path),
+        "plan_source": plan_source,
+        "roles": describe_roles(role_configs(args)),
+        "warnings": [],
+    }
 
     if args.diff_range:
         if round_num != 1:
@@ -866,15 +972,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-diff-chars", type=int, default=DEFAULT_MAX_DIFF_CHARS)
     parser.add_argument("--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS,
                         help=f"Rounds before a deadlock is declared (default: {DEFAULT_MAX_ROUNDS}).")
-    parser.add_argument("--fa-model", default=DEFAULT_FA_MODEL)
-    parser.add_argument("--fa-effort", default=DEFAULT_FA_EFFORT)
-    parser.add_argument("--tl-model", default=DEFAULT_TL_MODEL)
-    parser.add_argument("--tl-effort", default=DEFAULT_TL_EFFORT)
-    parser.add_argument("--qa-model", default=DEFAULT_QA_MODEL)
-    parser.add_argument("--qa-effort", default=DEFAULT_QA_EFFORT)
+    parser.add_argument("--config", type=str, default=None,
+                        help=f"Council model/effort config (default: ${CONFIG_ENV_VAR}, then {GLOBAL_CONFIG_PATH}, "
+                        "then the shipped council-config.default.json).")
+    for abbr in ROLE_ORDER:
+        key = abbr.lower()
+        parser.add_argument(f"--{key}-model", default=None,
+                            help=f"Override the {abbr} model for this run (agy: full ID with effort suffix).")
+        parser.add_argument(f"--{key}-effort", default=None,
+                            help=f"Override the {abbr} effort for this run (claude harness only).")
     parser.add_argument("--claude-timeout", type=int, default=DEFAULT_CLAUDE_TIMEOUT_S)
     parser.add_argument("--agy-timeout", type=int, default=DEFAULT_AGY_TIMEOUT_S)
     return parser
+
+
+def describe_roles(configs: Dict[str, RoleConfig]) -> Dict[str, Dict[str, Optional[str]]]:
+    return {a: {"harness": c.harness, "model": c.model, "effort": c.effort} for a, c in configs.items()}
 
 
 def run(argv: Optional[List[str]] = None) -> Tuple[int, Dict[str, Any]]:
@@ -886,11 +999,24 @@ def run(argv: Optional[List[str]] = None) -> Tuple[int, Dict[str, Any]]:
     if plan_source == "default":
         print(f"[council] No --plan given; using default plan file {plan_path}", file=sys.stderr)
 
+    try:
+        configs, config_path, config_source = resolve_role_configs(args)
+    except ConfigError as exc:
+        return EXIT_ERROR, {"status": "error", "error": str(exc), "plan_path": str(plan_path)}
+    args.resolved_roles = configs
+    if config_source == "default":
+        print(f"[council] Global config {GLOBAL_CONFIG_PATH} not found; using shipped defaults {config_path}", file=sys.stderr)
+
     _, _, state = load_state(plan_path, args.max_rounds)
     base = {"plan_path": str(plan_path), "plan_source": plan_source}
 
     if args.check_status:
-        return EXIT_OK, status_payload(plan_path, plan_source, state)
+        return EXIT_OK, {
+            **status_payload(plan_path, plan_source, state),
+            "config_path": str(config_path),
+            "config_source": config_source,
+            "roles": describe_roles(configs),
+        }
 
     if args.continue_rounds is not None:
         if args.continue_rounds < 1:

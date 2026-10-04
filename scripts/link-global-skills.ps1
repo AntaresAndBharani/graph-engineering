@@ -53,3 +53,22 @@ foreach ($name in $SharedSkills) {
     robocopy $source $target /MIR /XD __pycache__ /NJH /NJS /NDL /NC /NS | Out-Null
     Write-Host "synced   $name -> $target"
 }
+
+# Global, operator-editable skill configs. Stored outside skills/ so /MIR never overwrites them;
+# seeded once from the shipped defaults and never replaced afterwards.
+$GlobalConfigDir = Join-Path (Split-Path $PluginSkillsDir -Parent) "config"
+$SeedConfigs = @{
+    "architect-council-review.json" = (Join-Path $RepoSkillsDir "architect-council-review\council-config.default.json")
+}
+if (-not (Test-Path $GlobalConfigDir)) {
+    New-Item -ItemType Directory -Path $GlobalConfigDir -Force | Out-Null
+}
+foreach ($entry in $SeedConfigs.GetEnumerator()) {
+    $dest = Join-Path $GlobalConfigDir $entry.Key
+    if (Test-Path $dest) {
+        Write-Host "kept     $dest (existing config is never overwritten)"
+    } else {
+        Copy-Item -LiteralPath $entry.Value -Destination $dest
+        Write-Host "seeded   $dest"
+    }
+}
