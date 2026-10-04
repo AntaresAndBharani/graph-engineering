@@ -2282,6 +2282,86 @@ async def _run_story_provision(
         console.print("DevTest node will automatically pick up Slice 1 on the next cycle pass.")
 
 
+COUNCIL_SCRIPT_RELATIVE = Path("skills") / "architect-council-review" / "scripts" / "council_review.py"
+
+
+def resolve_council_script() -> Path:
+    """Locates the architect-council-review helper: repo checkout first, then the global plugin mirror."""
+    candidates = [
+        Path(__file__).resolve().parent.parent / COUNCIL_SCRIPT_RELATIVE,
+        Path.home() / ".gemini" / "config" / "plugins" / "swarm-dev-core" / COUNCIL_SCRIPT_RELATIVE,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "architect-council-review helper not found. Run graph-engineering/scripts/link-global-skills.ps1."
+    )
+
+
+@app.command("council")
+def council_command(
+    plan: Optional[Path] = typer.Option(
+        None,
+        "--plan",
+        "--path",
+        "--file",
+        help="Plan / requirement file (defaults to docs/draft-requisites/implementation-plan.md).",
+    ),
+    continue_rounds: Optional[int] = typer.Option(
+        None,
+        "--continue",
+        min=1,
+        help="After a deadlock: run N additional cross-rebuttal rounds.",
+    ),
+    proceed: Optional[str] = typer.Option(
+        None,
+        "--proceed",
+        help="After a deadlock: accept the Recommended Compromise and hand off to the target skill (provision-story).",
+    ),
+    check_status: bool = typer.Option(
+        False,
+        "--check-status",
+        help="Report the council state without invoking any LLM.",
+    ),
+    diff_range: Optional[str] = typer.Option(
+        None,
+        "--diff-range",
+        help="Attach `git diff <range>` as the council subject at session start.",
+    ),
+    max_rounds: Optional[int] = typer.Option(
+        None,
+        "--max-rounds",
+        min=1,
+        help="Rounds before a deadlock is declared (default: 2).",
+    ),
+):
+    """Architect Council (FA, TL, QA) review: 2 bounded rounds, then consensus or a deadlock escalation dossier."""
+    import subprocess
+
+    try:
+        script = resolve_council_script()
+    except FileNotFoundError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    cmd = [sys.executable, str(script)]
+    if plan is not None:
+        cmd += ["--plan", str(plan)]
+    if continue_rounds is not None:
+        cmd += ["--continue", str(continue_rounds)]
+    if proceed is not None:
+        cmd += ["--proceed", proceed]
+    if check_status:
+        cmd.append("--check-status")
+    if diff_range is not None:
+        cmd += ["--diff-range", diff_range]
+    if max_rounds is not None:
+        cmd += ["--max-rounds", str(max_rounds)]
+
+    completed = subprocess.run(cmd)
+    raise typer.Exit(code=completed.returncode)
+
 
 if __name__ == "__main__":
     app()
