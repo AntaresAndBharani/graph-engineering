@@ -27,6 +27,26 @@ if str(SKILL_SCRIPT_DIR) not in sys.path:
 import agy_cross_review  # noqa: E402
 
 
+def _claude_json(result: str, *, is_error: bool = False, duration_ms: int = 1000, num_turns: int = 1, spawned: int = 0) -> str:
+    """A `claude -p --output-format json` payload with the fields the script reads."""
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": is_error,
+        "result": result,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
+        "total_cost_usd": 0.12,
+        "usage": {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 500,
+            "cache_creation_input_tokens": 2000,
+            "output_tokens": 300,
+        },
+        "subagent_stats": {"spawned": spawned},
+    })
+
+
 class TestAgyCrossReview:
 
     def test_count_iterations_all_parties(self):
@@ -260,12 +280,12 @@ VERDICT: DISAGREED
 
     @patch("subprocess.run")
     def test_invoke_claude_arguments(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout=_claude_json("OK"), stderr="")
 
         agy_cross_review.invoke_claude(prompt="Architect Prompt", model="claude-opus-5-5", effort="medium")
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "claude"
-        assert cmd[cmd.index("-p") + 1] == "Architect Prompt"
+        assert "-p" in cmd
         assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
         assert cmd[cmd.index("--effort") + 1] == "medium"
         assert "--no-session-persistence" in cmd
@@ -274,6 +294,74 @@ VERDICT: DISAGREED
         assert "-r" not in cmd
         assert "-c" not in cmd
         assert "--session-id" not in cmd
+        # Read-only code tools only (no Bash/Edit/Write/Agent), no MCP servers, JSON metrics
+        assert cmd[cmd.index("--tools") + 1] == "Read,Grep,Glob"
+        assert "--strict-mcp-config" in cmd
+        assert "--mcp-config" not in cmd
+        assert cmd[cmd.index("--output-format") + 1] == "json"
+        # Prompt goes through stdin, never argv
+        assert "Architect Prompt" not in cmd
+        assert mock_run.call_args[1]["input"] == "Architect Prompt"
+        assert mock_run.call_args[1]["timeout"] == agy_cross_review.DEFAULT_CLAUDE_TIMEOUT_S
+
+    @patch("subprocess.run")
+    def test_invoke_claude_long_prompt_stays_out_of_command_line(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout=_claude_json("OK"), stderr="")
+        huge_prompt = "x" * 100_000  # far above the Windows 32,767-char command-line limit
+
+        agy_cross_review.invoke_claude(prompt=huge_prompt, model="claude-opus-5-5", effort="high")
+        cmd = mock_run.call_args[0][0]
+        assert len(" ".join(cmd)) < 1000
+        assert mock_run.call_args[1]["input"] == huge_prompt
+
+    @patch("subprocess.run")
+    def test_invoke_claude_parses_reply_and_metrics(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_claude_json("## Review\nVERDICT: APPROVED", duration_ms=4200, num_turns=3, spawned=0),
+            stderr="",
+        )
+
+        code, reply, _, metrics = agy_cross_review.invoke_claude("p", model="claude-opus-5-5", effort="high", tools="Read")
+        assert code == 0
+        assert reply == "## Review\nVERDICT: APPROVED"
+        assert metrics["duration_ms"] == 4200
+        assert metrics["num_turns"] == 3
+        assert metrics["input_tokens"] == 10
+        assert metrics["cache_read_input_tokens"] == 500
+        assert metrics["cache_creation_input_tokens"] == 2000
+        assert metrics["output_tokens"] == 300
+        assert metrics["subagents_spawned"] == 0
+        assert metrics["is_error"] is False
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--tools") + 1] == "Read"
+
+    @patch("subprocess.run")
+    def test_invoke_claude_error_result_is_nonzero(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout=_claude_json("boom", is_error=True), stderr="")
+
+        code, _, _, metrics = agy_cross_review.invoke_claude("p", model="claude-opus-5-5", effort="high")
+        assert code == 1
+        assert metrics["is_error"] is True
+
+    @patch("subprocess.run")
+    def test_invoke_claude_non_json_output_is_flagged_not_dropped(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="plain text reply", stderr="")
+
+        code, reply, _, metrics = agy_cross_review.invoke_claude("p", model="claude-opus-5-5", effort="high")
+        assert code == 0
+        assert reply == "plain text reply"
+        assert "output_format_error" in metrics
+
+    @patch("subprocess.run")
+    def test_invoke_claude_timeout(self, mock_run):
+        mock_run.side_effect = agy_cross_review.subprocess.TimeoutExpired(cmd="claude", timeout=5)
+
+        code, reply, stderr, metrics = agy_cross_review.invoke_claude("p", model="claude-opus-5-5", effort="high", timeout_s=5)
+        assert code == 124
+        assert reply == ""
+        assert "timed out after 5s" in stderr
+        assert metrics == {"timed_out": True, "timeout_s": 5}
 
     def test_find_plan_file_custom_path(self, tmp_path, monkeypatch):
         custom = tmp_path / "specs" / "checkout-redesign.md"
@@ -441,7 +529,11 @@ VERDICT: DISAGREED
         assert agy_cross_review.DEFAULT_QA_MODEL == "gemini-3.8-flash-medium"
         assert agy_cross_review.DEFAULT_QA_EFFORT is None
         assert agy_cross_review.DEFAULT_CHIEF_FA_MODEL == "claude-opus-5-5"
-        assert agy_cross_review.DEFAULT_CHIEF_FA_EFFORT == "max"
+        # Interactive-parity effort; max only on the final executive iteration
+        assert agy_cross_review.DEFAULT_CHIEF_FA_EFFORT == "high"
+        assert agy_cross_review.DEFAULT_CHIEF_FA_FINAL_EFFORT == "max"
+        assert agy_cross_review.CLAUDE_REVIEW_TOOLS == "Read,Grep,Glob"
+        assert agy_cross_review.CLAUDE_EXECUTIVE_TOOLS == "Read,Grep,Glob,Edit"
 
     def test_count_iterations_with_chief_fa(self):
         plan = """
@@ -574,6 +666,119 @@ VERDICT: CHANGES REQUIRED
         assert "Latest Architect review: lines 6-7" in guide
         assert "Latest QA review: lines 8-9" in guide
 
+    _EXCERPT_PLAN = "\n".join([
+        "# 📋 Implementation Plan: Feature Two-Tier",   # 1
+        "## 📝 Initial Draft Proposal",                  # 2
+        "operator initial request",                      # 3
+        "## 🔍 Review Iteration 1 (Author)",             # 4
+        "stale author notes",                            # 5
+        "## 🏛️ Architect Review Iteration 1",            # 6
+        "architect notes",                               # 7
+        "## 🔍 Review Iteration 2 (Author)",             # 8
+        "latest author notes",                           # 9
+        "```gherkin",                                    # 10
+        "## not a heading inside a fence",               # 11
+        "```",                                           # 12
+        "## 🧪 QA Review Iteration 1 (Requirements)",    # 13
+        "qa notes",                                      # 14
+        "## 🎯 Final Decision Plan",                     # 15
+        "final spec",                                    # 16
+    ])
+
+    def test_plan_excerpts_inline_the_reading_guide_sections_verbatim(self):
+        excerpts = agy_cross_review.plan_excerpts(self._EXCERPT_PLAN, "chief_fa", round_num=1)
+
+        assert '<plan_excerpt label="Operator\'s original proposal / requirements" lines="2-3">' in excerpts
+        assert "operator initial request" in excerpts
+        assert '<plan_excerpt label="Latest author iteration" lines="8-12">' in excerpts
+        assert "latest author notes" in excerpts
+        assert "## not a heading inside a fence" in excerpts  # fenced content stays inside its section
+        assert "architect notes" in excerpts
+        assert "qa notes" in excerpts
+        assert "final spec" in excerpts
+        # Superseded iterations are not sent
+        assert "stale author notes" not in excerpts
+
+    def test_plan_excerpts_falls_back_to_active_plan(self):
+        excerpts = agy_cross_review.plan_excerpts("# 📋 Implementation Plan: Raw\nfree text only\n", "chief_fa", round_num=1)
+        assert '<plan_excerpt label="Active plan" lines="1-2">' in excerpts
+        assert "free text only" in excerpts
+
+    def test_reading_guide_format_unchanged_for_agy_reviewers(self):
+        guide = agy_cross_review.reading_guide(self._EXCERPT_PLAN, "qa", round_num=1)
+        assert "- Latest author iteration: lines 8-12 (`## 🔍 Review Iteration 2 (Author)`)" in guide
+        assert agy_cross_review.reading_guide("no headings here", "qa", 1) == ["- Active plan: lines 1-1"]
+
+    def test_build_chief_fa_prompt_inline_mode(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        guide = agy_cross_review.reading_guide(self._EXCERPT_PLAN, "chief_fa", 1)
+        excerpts = agy_cross_review.plan_excerpts(self._EXCERPT_PLAN, "chief_fa", 1)
+
+        prompt = agy_cross_review.build_chief_fa_prompt(1, plan_path, guide, is_final_round=False, excerpts=excerpts)
+
+        assert prompt.startswith("PLAN EXCERPTS")
+        assert prompt.index("final spec") < prompt.index("You are the Chief Functional Architect")
+        assert "Do NOT open the plan file" in prompt
+        assert "Read ONLY these line ranges" not in prompt
+        assert "RETURN YOUR REVIEW as your final reply" in prompt
+        assert "APPEND YOUR REVIEW" not in prompt
+        assert "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit" in prompt
+        assert "Edit tool" not in prompt
+
+        final = agy_cross_review.build_chief_fa_prompt(3, plan_path, guide, is_final_round=True, excerpts=excerpts)
+        assert "Iteration 3 (Hard Cap)" in final
+        assert "use the Edit tool; that section is the only part of the file you may change" in final
+
+    def test_build_architect_prompt_keeps_file_mode_for_agy(self, tmp_path):
+        guide = agy_cross_review.reading_guide(self._EXCERPT_PLAN, "architect", 1)
+        prompt = agy_cross_review.build_architect_prompt(1, tmp_path / "plan.md", guide)
+        assert "Read ONLY these line ranges" in prompt
+        assert "APPEND YOUR REVIEW at the very end of" in prompt
+        assert "<plan_excerpt" not in prompt
+
+    @patch("agy_cross_review.invoke_claude")
+    def test_execute_chief_fa_regular_round_is_read_only_high_effort(self, mock_claude, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(self._EXCERPT_PLAN + "\n", encoding="utf-8")
+        reply = "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED"
+        mock_claude.return_value = (0, reply, "", {"num_turns": 2})
+
+        code, _, content, verdict, unresolved, metrics = agy_cross_review.execute_chief_fa(
+            plan_path, 1, "claude-opus-5-5", "high", 3
+        )
+
+        kwargs = mock_claude.call_args[1]
+        assert kwargs["effort"] == "high"
+        assert kwargs["tools"] == "Read,Grep,Glob"
+        assert kwargs["timeout_s"] == agy_cross_review.DEFAULT_CLAUDE_TIMEOUT_S
+        assert "final spec" in mock_claude.call_args[0][0]  # excerpts inlined
+        assert code == 0 and verdict == "APPROVED" and unresolved == []
+        assert metrics == {"num_turns": 2}
+        # The script appends the returned section to the plan
+        assert content.rstrip().endswith("VERDICT: APPROVED")
+        assert plan_path.read_text(encoding="utf-8").count("Chief Functional Architect Review Iteration 1") == 1
+
+    @patch("agy_cross_review.invoke_claude")
+    def test_execute_chief_fa_final_round_uses_final_effort_and_edit(self, mock_claude, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(self._EXCERPT_PLAN + "\n", encoding="utf-8")
+        mock_claude.return_value = (
+            0,
+            "## 🏛️ Chief Functional Architect Review Iteration 3: Problem-Solution & Standards Audit\nVERDICT: EXECUTIVE RESOLUTION DICTATED",
+            "",
+            {},
+        )
+
+        *_, verdict, _, _ = agy_cross_review.execute_chief_fa(
+            plan_path, 3, "claude-opus-5-5", "high", 3, final_effort="max", timeout_s=60
+        )
+
+        kwargs = mock_claude.call_args[1]
+        assert kwargs["effort"] == "max"
+        assert kwargs["tools"] == "Read,Grep,Glob,Edit"
+        assert kwargs["timeout_s"] == 60
+        assert verdict == "EXECUTIVE_RESOLUTION"
+
     @patch("agy_cross_review.invoke_claude")
     @patch("agy_cross_review.invoke_agy")
     def test_main_chief_fa_triggered_on_council_agreed(self, mock_agy, mock_claude, tmp_path, monkeypatch, capsys):
@@ -592,12 +797,14 @@ VERDICT: CHANGES REQUIRED
                 return 0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", ""
             return 0, "", ""
 
-        def mock_claude_call(prompt, model, effort):
+        def mock_claude_call(prompt, model, effort, **kwargs):
             if "Chief Functional Architect" in prompt:
-                assert effort == "max"
+                assert effort == "high"
                 assert model == "claude-opus-5-5"
-                return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED\n", ""
-            return 0, "", ""
+                assert kwargs["tools"] == "Read,Grep,Glob"
+                assert "<plan_excerpt" in prompt
+                return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED\n", "", {"num_turns": 2}
+            return 0, "", "", {}
 
         mock_agy.side_effect = mock_agy_call
         mock_claude.side_effect = mock_claude_call
@@ -610,6 +817,8 @@ VERDICT: CHANGES REQUIRED
         assert out["chief_fa_verdict"] == "APPROVED"
         assert out["overall_verdict"] == "APPROVED"
         assert out["chief_fa_round"] == 1
+        assert out["chief_fa_metrics"] == {"num_turns": 2}
+        assert "architect_metrics" not in out  # the Architect ran on agy
 
     @patch("agy_cross_review.invoke_claude")
     @patch("agy_cross_review.invoke_agy")
@@ -628,11 +837,11 @@ VERDICT: CHANGES REQUIRED
                 return 0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", ""
             return 0, "", ""
 
-        def mock_claude_call(prompt, model, effort):
+        def mock_claude_call(prompt, model, effort, **kwargs):
             if "Chief Functional Architect" in prompt:
-                assert effort == "max"
-                return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\n- [BLOCKING] Missing rollback semantics.\nVERDICT: CHANGES REQUIRED\n", ""
-            return 0, "", ""
+                assert effort == "high"
+                return 0, "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\n- [BLOCKING] Missing rollback semantics.\nVERDICT: CHANGES REQUIRED\n", "", {}
+            return 0, "", "", {}
 
         mock_agy.side_effect = mock_agy_call
         mock_claude.side_effect = mock_claude_call
@@ -660,14 +869,36 @@ VERDICT: CHANGES REQUIRED
             0,
             "## 🏛️ Chief Functional Architect Review Iteration 1: Problem-Solution & Standards Audit\nVERDICT: APPROVED\n",
             "",
+            {"duration_ms": 1234},
         )
 
-        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--run-chief-fa")
+        code, out = self._run_main(
+            monkeypatch, capsys, "--plan", str(custom), "--run-chief-fa",
+            "--chief-fa-effort", "medium", "--claude-timeout", "90",
+        )
 
         assert code == 0
         assert out["role"] == "chief_fa"
         assert out["chief_fa_verdict"] == "APPROVED"
         assert out["chief_fa_round"] == 1
+        assert out["chief_fa_metrics"] == {"duration_ms": 1234}
+        kwargs = mock_claude.call_args[1]
+        assert kwargs["effort"] == "medium"
+        assert kwargs["timeout_s"] == 90
+
+    @patch("agy_cross_review.invoke_claude")
+    def test_main_run_chief_fa_timeout_fails_run(self, mock_claude, tmp_path, monkeypatch, capsys):
+        custom = tmp_path / "specs" / "feature.md"
+        custom.parent.mkdir()
+        custom.write_text("# 📋 Implementation Plan: Test\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        mock_claude.return_value = (124, "", "claude timed out after 90s", {"timed_out": True, "timeout_s": 90})
+
+        code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--run-chief-fa")
+
+        assert code == 1
+        assert out["chief_fa_returncode"] == 124
+        assert out["chief_fa_metrics"]["timed_out"] is True
 
     def test_main_check_status_includes_chief_fa(self, tmp_path, monkeypatch, capsys):
         custom = tmp_path / "specs" / "feature.md"
@@ -704,10 +935,11 @@ VERDICT: CHANGES REQUIRED
         )
         monkeypatch.chdir(tmp_path)
 
-        def mock_claude_call(prompt, model, effort):
+        def mock_claude_call(prompt, model, effort, **kwargs):
             assert effort == "max"
+            assert kwargs["tools"] == "Read,Grep,Glob,Edit"
             assert "Iteration 3 (Hard Cap)" in prompt
-            return 0, "## 🏛️ Chief Functional Architect Review Iteration 3: Problem-Solution & Standards Audit\n### 🎯 Definitive Executive Resolution\nFinal binding design.\nVERDICT: EXECUTIVE RESOLUTION DICTATED\n", ""
+            return 0, "## 🏛️ Chief Functional Architect Review Iteration 3: Problem-Solution & Standards Audit\n### 🎯 Definitive Executive Resolution\nFinal binding design.\nVERDICT: EXECUTIVE RESOLUTION DICTATED\n", "", {}
 
         mock_claude.side_effect = mock_claude_call
 
@@ -726,7 +958,7 @@ VERDICT: CHANGES REQUIRED
         custom.write_text("# 📋 Implementation Plan: Override\n## 📝 Initial Draft Proposal\nReqs\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
 
-        mock_claude.return_value = (0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", "")
+        mock_claude.return_value = (0, "## 🏛️ Architect Review Iteration 1\nVERDICT: AGREED\n", "", {"num_turns": 1})
         mock_agy.return_value = (0, "## 🧪 QA Review Iteration 1 (Requirements & UX/UI Guardian)\nVERDICT: AGREED\n", "")
 
         code, out = self._run_main(monkeypatch, capsys, "--plan", str(custom), "--architect-model", "claude-opus-5-5", "--skip-chief-fa")
@@ -735,6 +967,13 @@ VERDICT: CHANGES REQUIRED
         assert mock_claude.called
         call_args = mock_claude.call_args
         assert call_args[1]["model"] == "claude-opus-5-5"
+        assert call_args[1]["effort"] == "medium"
+        # A claude Architect gets the inline mode; the agy QA keeps line ranges
+        assert "<plan_excerpt" in call_args[0][0]
+        assert "RETURN YOUR REVIEW" in call_args[0][0]
+        assert "<plan_excerpt" not in mock_agy.call_args[0][0]
+        assert out["architect_metrics"] == {"num_turns": 1}
+        assert custom.read_text(encoding="utf-8").count("## 🏛️ Architect Review Iteration 1") == 1
 
 
 

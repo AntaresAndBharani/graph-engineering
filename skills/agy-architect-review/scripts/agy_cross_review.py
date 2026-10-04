@@ -7,7 +7,7 @@ Coordinates the Two-Tier Review Council:
     2. System Architect (Gemini 3.8 Flash High, via agy CLI)
     3. QA Guardian (Gemini 3.8 Flash Medium, via agy CLI)
   Tier 2: Chief Functional Architect
-    4. Chief Functional Architect (Claude Opus 5.5, max effort, via claude CLI)
+    4. Chief Functional Architect (Claude Opus 5.5 via claude CLI; high effort, max on the final executive round)
 
 Execution Protocol:
   - Council debates for up to 3 iterative rounds per cycle.
@@ -24,6 +24,10 @@ Execution Protocol:
 Token discipline:
   - Completed plans are archived to an archive/ folder next to the plan file so it only holds the active plan.
   - Every round is a fresh, non-persisted session; reviewers read only the line ranges they need.
+  - claude reviewers (Chief FA, and the Architect when it runs on Claude) get the plan excerpts inlined
+    through stdin and return their section as the reply, which this script appends. They only get
+    read-only code tools (no Bash, Edit/Write or Agent subagents) and no MCP servers, so a review is a
+    few turns instead of a page-by-page read-and-edit loop.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_ARCHITECT_MODEL = "gemini-3.8-flash-high"
 DEFAULT_ARCHITECT_EFFORT: Optional[str] = None
@@ -44,7 +48,15 @@ DEFAULT_ARCHITECT_EFFORT: Optional[str] = None
 DEFAULT_QA_MODEL = "gemini-3.8-flash-medium"
 DEFAULT_QA_EFFORT: Optional[str] = None
 DEFAULT_CHIEF_FA_MODEL = "claude-opus-5-5"
-DEFAULT_CHIEF_FA_EFFORT = "max"
+# Same effort as interactive Claude Code; max is kept for the final round, which dictates the binding solution.
+DEFAULT_CHIEF_FA_EFFORT = "high"
+DEFAULT_CHIEF_FA_FINAL_EFFORT = "max"
+DEFAULT_CLAUDE_TIMEOUT_S = 20 * 60
+
+# Read-only code inspection for claude reviewers: no Bash, Edit/Write or Agent (subagent fan-out).
+CLAUDE_REVIEW_TOOLS = "Read,Grep,Glob"
+# The final Chief FA round also rewrites the Final Decision Plan in place.
+CLAUDE_EXECUTIVE_TOOLS = "Read,Grep,Glob,Edit"
 
 PLAN_HEADING_RE = re.compile(r"^#\s*📋\s*Implementation Plan")
 ARCHITECT_HEADING_RE = r"##\s*🏛️\s*(?:(?:Gemini|Principal|System)\s+)?Architect\s+Review Iteration"
@@ -193,11 +205,12 @@ def _section_ranges(lines: List[str], offset: int) -> List[Tuple[int, int, str]]
     return ranges
 
 
-def reading_guide(plan_content: str, role: str, round_num: int) -> List[str]:
+def _guide_ranges(plan_content: str, role: str, round_num: int) -> List[Tuple[str, Tuple[int, int, str]]]:
     """
-    Builds the list of line ranges a reviewer must read, so it never pages through the whole file:
-    the operator's original proposal, the current Final Decision Plan, the latest author iteration,
-    and previous relevant reviews.
+    (label, (start_line, end_line, heading)) for every section a reviewer needs, so it never pages
+    through the whole file: the operator's original proposal, the current Final Decision Plan, the
+    latest author iteration, and previous relevant reviews. Lines are 1-based and inclusive.
+    Falls back to the whole active plan when none of those sections exist.
     """
     lines = plan_content.splitlines()
     starts = _plan_start_lines(lines)
@@ -231,34 +244,84 @@ def reading_guide(plan_content: str, role: str, round_num: int) -> List[str]:
         if chief_fa_review:
             wanted.append(("Latest Chief Functional Architect review", chief_fa_review))
 
-    guide = [f"- {label}: lines {r[0]}-{r[1]} (`{r[2][:90]}`)" for label, r in wanted if r]
-    if not guide:
-        guide = [f"- Active plan: lines {offset + 1}-{len(lines)}"]
-    return guide
+    found = [(label, r) for label, r in wanted if r]
+    if not found:
+        found = [("Active plan", (offset + 1, len(lines), ""))]
+    return found
 
 
-def _common_rules(abs_path: str, guide: List[str], heading: str) -> List[str]:
+def reading_guide(plan_content: str, role: str, round_num: int) -> List[str]:
+    """The line ranges a reviewer must read, one `- label: lines a-b (`heading`)` entry per section."""
     return [
-        f"1. TARGET FILE: '{abs_path}'. Read ONLY these line ranges (use offset/limit reads); do not page through the rest of the file:",
-        *guide,
+        f"- {label}: lines {start}-{end}" + (f" (`{heading[:90]}`)" if heading else "")
+        for label, (start, end, heading) in _guide_ranges(plan_content, role, round_num)
+    ]
+
+
+def plan_excerpts(plan_content: str, role: str, round_num: int) -> str:
+    """The reading-guide sections themselves, so a claude reviewer gets them inline instead of reading the file."""
+    lines = plan_content.splitlines()
+    blocks = []
+    for label, (start, end, _heading) in _guide_ranges(plan_content, role, round_num):
+        body = "\n".join(lines[start - 1:end])
+        blocks.append(f'<plan_excerpt label="{label}" lines="{start}-{end}">\n{body}\n</plan_excerpt>')
+    return "\n\n".join(blocks)
+
+
+def _common_rules(abs_path: str, guide: List[str], heading: str, inline: bool = False) -> List[str]:
+    """
+    Operational rules shared by every reviewer. `inline=True` is the claude mode: the plan excerpts
+    are embedded in the prompt and the review comes back as the reply instead of a file edit.
+    """
+    if inline:
+        reading_rule = [
+            f"1. PLAN: the sections of '{abs_path}' you need are embedded above in <plan_excerpt> blocks. "
+            "Do NOT open the plan file; everything relevant from it is already in this prompt.",
+        ]
+        output_rule = (
+            "3. RETURN YOUR REVIEW as your final reply (the orchestrator appends it to the plan file; "
+            "do NOT write it to any file). Start the reply with this exact heading line and output nothing before it:"
+        )
+    else:
+        reading_rule = [
+            f"1. TARGET FILE: '{abs_path}'. Read ONLY these line ranges (use offset/limit reads); do not page through the rest of the file:",
+            *guide,
+        ]
+        output_rule = f"3. APPEND YOUR REVIEW at the very end of '{abs_path}' with a new section titled exactly:"
+    return [
+        *reading_rule,
         "2. CODEBASE INSPECTION: Only open files the plan names, plus targeted grep lookups to verify specific claims (at most ~8 files). "
         "Do NOT execute test suites or background commands; evaluate static code directly.",
-        f"3. APPEND YOUR REVIEW at the very end of '{abs_path}' with a new section titled exactly:",
+        output_rule,
         "",
         heading,
         "",
     ]
 
 
-def build_architect_prompt(round_num: int, plan_path: Path, guide: List[str]) -> str:
+def _with_excerpts(prompt_lines: List[str], excerpts: Optional[str]) -> str:
+    """Puts the inlined plan excerpts ahead of the instructions (long material first, then the task)."""
+    if excerpts is None:
+        return "\n".join(prompt_lines)
+    return "\n".join(["PLAN EXCERPTS (verbatim from the plan file):", "", excerpts, "", *prompt_lines])
+
+
+def _summary_rule(abs_path: str, inline: bool, verdicts: str) -> str:
+    if inline:
+        return f"4. OUTPUT: reply with your review section only (heading through the final `VERDICT:` line), ending with {verdicts}."
+    return f"4. OUTPUT SUMMARY: Once '{abs_path}' is updated, output a concise 3-5 bullet summary stating {verdicts} and listing any BLOCKING objections."
+
+
+def build_architect_prompt(round_num: int, plan_path: Path, guide: List[str], excerpts: Optional[str] = None) -> str:
+    """`excerpts` switches to the inline claude mode (plan sections in the prompt, review returned as the reply)."""
     abs_path = plan_path.resolve().as_posix()
     lines = [
         f"You are the System Architect conducting Round {round_num} of the Architectural Review of the active implementation plan in '{abs_path}'.",
         "Be rigorous about real defects and proportionate about everything else.",
         "",
         "OPERATIONAL RULES:",
-        *_common_rules(abs_path, guide, f"## 🏛️ Architect Review Iteration {round_num}"),
-        "Structure your appended section with:",
+        *_common_rules(abs_path, guide, f"## 🏛️ Architect Review Iteration {round_num}", inline=excerpts is not None),
+        "Structure your section with:",
         "- ### ⚖️ Architecture & Drawbacks Critique (race conditions, edge cases, performance, backward compatibility)",
         "- ### 🚨 Objections (each tagged [BLOCKING] or [NON-BLOCKING])",
         "- ### 🛠️ Required Changes (for BLOCKING objections only)",
@@ -267,9 +330,9 @@ def build_architect_prompt(round_num: int, plan_path: Path, guide: List[str]) ->
         "VERDICT RULES:",
         *[f"- {rule}" for rule in VERDICT_RULES],
         "",
-        f"4. OUTPUT SUMMARY: Once '{abs_path}' is updated, output a concise 3-5 bullet summary stating AGREED or DISAGREED and listing any BLOCKING objections.",
+        _summary_rule(abs_path, excerpts is not None, "AGREED or DISAGREED"),
     ]
-    return "\n".join(lines)
+    return _with_excerpts(lines, excerpts)
 
 
 def build_qa_prompt(round_num: int, plan_path: Path, guide: List[str]) -> str:
@@ -301,8 +364,16 @@ def build_qa_prompt(round_num: int, plan_path: Path, guide: List[str]) -> str:
     return "\n".join(lines)
 
 
-def build_chief_fa_prompt(round_num: int, plan_path: Path, guide: List[str], is_final_round: bool = False) -> str:
+def build_chief_fa_prompt(
+    round_num: int,
+    plan_path: Path,
+    guide: List[str],
+    is_final_round: bool = False,
+    excerpts: Optional[str] = None,
+) -> str:
+    """`excerpts` switches to the inline claude mode (plan sections in the prompt, review returned as the reply)."""
     abs_path = plan_path.resolve().as_posix()
+    inline = excerpts is not None
     lines = [
         f"You are the Chief Functional Architect conducting Iteration {round_num} of the Two-Tier Architectural Review of the active implementation plan in '{abs_path}'.",
         "Your mandate is to evaluate the proposed solution in the MOST CRITICAL WAY POSSIBLE.",
@@ -312,8 +383,10 @@ def build_chief_fa_prompt(round_num: int, plan_path: Path, guide: List[str], is_
         "2. INDUSTRY STANDARDS & BEST PRACTICES: Does the design strictly adhere to modern software architecture standards, robust engineering principles, separation of concerns, testability, and operational resilience?",
         "",
         "OPERATIONAL RULES:",
-        *_common_rules(abs_path, guide, f"## 🏛️ Chief Functional Architect Review Iteration {round_num}: Problem-Solution & Standards Audit"),
-        "Structure your appended section with:",
+        *_common_rules(
+            abs_path, guide, f"## 🏛️ Chief Functional Architect Review Iteration {round_num}: Problem-Solution & Standards Audit", inline=inline
+        ),
+        "Structure your section with:",
         "- ### 🎯 Problem-Solution Fit & Root Cause Audit",
         "- ### 📐 Industry Standards & Best Practices Compliance",
         "- ### 🚨 Deficiencies & Functional Amendments (each tagged [BLOCKING] or [NON-BLOCKING])",
@@ -331,26 +404,70 @@ def build_chief_fa_prompt(round_num: int, plan_path: Path, guide: List[str], is_
             "",
             "CRITICAL EXECUTIVE AUTHORITY (FINAL ITERATION):",
             "This is Iteration 3 (Hard Cap). If you conclude that changes are still required and agreement was not reached,",
-            "you MUST exercise executive authority and unilaterally provide the definitive solution. Append a subsection:",
+            "you MUST exercise executive authority and unilaterally provide the definitive solution. Add a subsection to your section:",
             "- ### 🎯 Definitive Executive Resolution",
             "Detailing the exact, binding architectural and functional solution that must be implemented,",
-            "and update the `## 🎯 Final Decision Plan & User Story Specification` in place with `[Executive Resolution: Dictated by Chief Functional Architect]`.",
+            f"and update the `## 🎯 Final Decision Plan & User Story Specification` of '{abs_path}' in place with `[Executive Resolution: Dictated by Chief Functional Architect]`"
+            + (" (use the Edit tool; that section is the only part of the file you may change)." if inline else "."),
             "End your section with `VERDICT: EXECUTIVE RESOLUTION DICTATED`.",
         ])
 
     lines.extend([
         "",
-        f"4. OUTPUT SUMMARY: Once '{abs_path}' is updated, output a concise 3-5 bullet summary stating APPROVED or CHANGES REQUIRED (or EXECUTIVE RESOLUTION DICTATED) and listing key findings.",
+        _summary_rule(abs_path, inline, "APPROVED or CHANGES REQUIRED (or EXECUTIVE RESOLUTION DICTATED)"),
     ])
-    return "\n".join(lines)
+    return _with_excerpts(lines, excerpts)
 
 
-def invoke_claude(prompt: str, model: str, effort: str) -> Tuple[int, str, str]:
-    """Runs one fresh, non-persisted headless claude session (no resume: the plan file carries the history)."""
+def _parse_claude_json(stdout: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Splits `claude -p --output-format json` output into (reply_text, metrics).
+    Non-JSON output is returned unchanged with `output_format_error` set, so the caller can still
+    recover a printed section while the metrics show that something is off.
+    """
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return stdout or "", {"output_format_error": "claude did not return JSON output"}
+    if not isinstance(data, dict):
+        return stdout, {"output_format_error": "claude JSON output is not an object"}
+    usage = data.get("usage") or {}
+    metrics: Dict[str, Any] = {
+        "duration_ms": data.get("duration_ms"),
+        "num_turns": data.get("num_turns"),
+        "total_cost_usd": data.get("total_cost_usd"),
+        "input_tokens": usage.get("input_tokens"),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "subagents_spawned": (data.get("subagent_stats") or {}).get("spawned"),
+        "is_error": bool(data.get("is_error")),
+    }
+    return str(data.get("result") or ""), metrics
+
+
+def invoke_claude(
+    prompt: str,
+    model: str,
+    effort: str,
+    tools: str = CLAUDE_REVIEW_TOOLS,
+    timeout_s: int = DEFAULT_CLAUDE_TIMEOUT_S,
+) -> Tuple[int, str, str, Dict[str, Any]]:
+    """
+    Runs one fresh, non-persisted headless claude session (no resume: the plan file carries the history).
+
+    The prompt goes through stdin, so inlined plan excerpts never hit the Windows 32,767-character
+    command-line limit. `--tools` removes every other built-in tool (with --dangerously-skip-permissions an
+    allowlist would not), and `--strict-mcp-config` without `--mcp-config` starts no MCP servers.
+    Returns (returncode, reply_text, stderr, metrics).
+    """
     cmd = [
-        "claude", "-p", prompt,
+        "claude", "-p",
         "--model", model,
         "--effort", effort,
+        "--tools", tools,
+        "--strict-mcp-config",
+        "--output-format", "json",
         "--no-session-persistence",
         "--dangerously-skip-permissions",
     ]
@@ -359,16 +476,25 @@ def invoke_claude(prompt: str, model: str, effort: str) -> Tuple[int, str, str]:
     env["GH_PROMPT_DISABLED"] = "1"
     env["CLAUDE_NON_INTERACTIVE"] = "1"
 
-    process = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return process.returncode, process.stdout, process.stderr
+    try:
+        process = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"claude timed out after {timeout_s}s", {"timed_out": True, "timeout_s": timeout_s}
+
+    reply, metrics = _parse_claude_json(process.stdout)
+    returncode = process.returncode
+    if returncode == 0 and metrics.get("is_error"):
+        returncode = 1
+    return returncode, reply, process.stderr, metrics
 
 
 def invoke_agy(prompt: str, model: str, effort: Optional[str] = None) -> Tuple[int, str, str]:
@@ -517,16 +643,29 @@ def execute_chief_fa(
     model: str,
     effort: str,
     max_chief_fa_rounds: int,
-) -> Tuple[int, str, str, str, List[str]]:
+    final_effort: str = DEFAULT_CHIEF_FA_FINAL_EFFORT,
+    timeout_s: int = DEFAULT_CLAUDE_TIMEOUT_S,
+) -> Tuple[int, str, str, str, List[str], Dict[str, Any]]:
     """
     Invokes Chief Functional Architect for iteration `round_num`.
-    Returns (code, stdout, updated_plan_content, verdict, unresolved_points).
+    The final (executive) iteration runs at `final_effort` and may edit the Final Decision Plan in place;
+    every other iteration is read-only and returns its section for this script to append.
+    Returns (code, reply, updated_plan_content, verdict, unresolved_points, metrics).
     """
     plan_content = plan_path.read_text(encoding="utf-8", errors="replace")
     is_final_round = (round_num >= max_chief_fa_rounds)
     guide = reading_guide(plan_content, "chief_fa", round_num)
-    prompt = build_chief_fa_prompt(round_num, plan_path, guide, is_final_round=is_final_round)
-    code, stdout, _ = invoke_claude(prompt, model=model, effort=effort)
+    prompt = build_chief_fa_prompt(
+        round_num, plan_path, guide, is_final_round=is_final_round,
+        excerpts=plan_excerpts(plan_content, "chief_fa", round_num),
+    )
+    code, stdout, _, metrics = invoke_claude(
+        prompt,
+        model=model,
+        effort=final_effort if is_final_round else effort,
+        tools=CLAUDE_EXECUTIVE_TOOLS if is_final_round else CLAUDE_REVIEW_TOOLS,
+        timeout_s=timeout_s,
+    )
     updated_plan_content = _append_from_stdout_if_missing(
         plan_path, stdout, CHIEF_FA_HEADING_RE, round_num, count_index=3
     )
@@ -534,7 +673,7 @@ def execute_chief_fa(
     unresolved = []
     if verdict != "APPROVED":
         unresolved = extract_chief_fa_points(updated_plan_content, round_num)
-    return code, stdout, updated_plan_content, verdict, unresolved
+    return code, stdout, updated_plan_content, verdict, unresolved, metrics
 
 
 def main() -> None:
@@ -557,6 +696,18 @@ def main() -> None:
     parser.add_argument("--qa-effort", type=str, default=DEFAULT_QA_EFFORT, help="Optional agy --effort for QA (default: none; the effort is part of the model name)")
     parser.add_argument("--chief-fa-model", type=str, default=DEFAULT_CHIEF_FA_MODEL, help=f"Chief Functional Architect model (default: {DEFAULT_CHIEF_FA_MODEL})")
     parser.add_argument("--chief-fa-effort", type=str, default=DEFAULT_CHIEF_FA_EFFORT, help=f"Chief Functional Architect effort (default: {DEFAULT_CHIEF_FA_EFFORT})")
+    parser.add_argument(
+        "--chief-fa-final-effort",
+        type=str,
+        default=DEFAULT_CHIEF_FA_FINAL_EFFORT,
+        help=f"Chief Functional Architect effort on the final executive iteration (default: {DEFAULT_CHIEF_FA_FINAL_EFFORT})",
+    )
+    parser.add_argument(
+        "--claude-timeout",
+        type=int,
+        default=DEFAULT_CLAUDE_TIMEOUT_S,
+        help=f"Seconds before a claude reviewer session is killed (default: {DEFAULT_CLAUDE_TIMEOUT_S})",
+    )
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum number of debate rounds for the council per cycle (default: 3)")
     parser.add_argument("--max-chief-fa-rounds", type=int, default=3, help="Maximum number of Chief Functional Architect validation rounds (default: 3)")
     parser.add_argument("--run-chief-fa", "--chief-fa", dest="run_chief_fa", action="store_true", help="Force running Chief Functional Architect review directly")
@@ -617,8 +768,9 @@ def main() -> None:
     if args.run_chief_fa:
         next_chief_fa_round = chief_fa_rounds + 1
         is_final_round = (next_chief_fa_round >= args.max_chief_fa_rounds)
-        code, stdout, updated_plan_content, verdict, unresolved = execute_chief_fa(
-            plan_path, next_chief_fa_round, args.chief_fa_model, args.chief_fa_effort, args.max_chief_fa_rounds
+        code, stdout, updated_plan_content, verdict, unresolved, metrics = execute_chief_fa(
+            plan_path, next_chief_fa_round, args.chief_fa_model, args.chief_fa_effort, args.max_chief_fa_rounds,
+            final_effort=args.chief_fa_final_effort, timeout_s=args.claude_timeout,
         )
         result = {
             "status": "completed",
@@ -633,6 +785,7 @@ def main() -> None:
             "unresolved_points": unresolved,
             "chief_fa_returncode": code,
             "chief_fa_stdout_snippet": stdout[:400] if stdout else "",
+            "chief_fa_metrics": metrics,
         }
         if verdict == "EXECUTIVE_RESOLUTION":
             result["status"] = "executive_resolution_dictated"
@@ -655,8 +808,9 @@ def main() -> None:
     if council_rounds_in_cycle >= args.max_rounds and not args.skip_chief_fa:
         next_chief_fa_round = chief_fa_rounds + 1
         is_final_round = (next_chief_fa_round >= args.max_chief_fa_rounds)
-        code, stdout, updated_plan_content, verdict, unresolved = execute_chief_fa(
-            plan_path, next_chief_fa_round, args.chief_fa_model, args.chief_fa_effort, args.max_chief_fa_rounds
+        code, stdout, updated_plan_content, verdict, unresolved, metrics = execute_chief_fa(
+            plan_path, next_chief_fa_round, args.chief_fa_model, args.chief_fa_effort, args.max_chief_fa_rounds,
+            final_effort=args.chief_fa_final_effort, timeout_s=args.claude_timeout,
         )
         result = {
             "status": "completed",
@@ -671,6 +825,7 @@ def main() -> None:
             "unresolved_points": unresolved,
             "chief_fa_returncode": code,
             "chief_fa_stdout_snippet": stdout[:400] if stdout else "",
+            "chief_fa_metrics": metrics,
         }
         if verdict == "EXECUTIVE_RESOLUTION":
             result["status"] = "executive_resolution_dictated"
@@ -692,11 +847,18 @@ def main() -> None:
     next_round = max(architect_rounds, qa_rounds) + 1
 
     # 1. System Architect
-    architect_prompt = build_architect_prompt(next_round, plan_path, reading_guide(plan_content, "architect", next_round))
+    architect_guide = reading_guide(plan_content, "architect", next_round)
+    architect_metrics: Optional[Dict[str, Any]] = None
     if "gemini" in args.architect_model.lower():
+        architect_prompt = build_architect_prompt(next_round, plan_path, architect_guide)
         architect_code, architect_stdout, _ = invoke_agy(architect_prompt, model=args.architect_model, effort=args.architect_effort)
     else:
-        architect_code, architect_stdout, _ = invoke_claude(architect_prompt, model=args.architect_model, effort=args.architect_effort or "medium")
+        architect_prompt = build_architect_prompt(
+            next_round, plan_path, architect_guide, excerpts=plan_excerpts(plan_content, "architect", next_round)
+        )
+        architect_code, architect_stdout, _, architect_metrics = invoke_claude(
+            architect_prompt, model=args.architect_model, effort=args.architect_effort or "medium", timeout_s=args.claude_timeout
+        )
     updated_plan_content = _append_from_stdout_if_missing(plan_path, architect_stdout, ARCHITECT_HEADING_RE, next_round, count_index=1)
     architect_verdict = parse_architect_verdict(updated_plan_content, architect_stdout, next_round)
 
@@ -726,8 +888,9 @@ def main() -> None:
     if council_cycle_finished and not args.skip_chief_fa:
         next_chief_fa_round = chief_fa_rounds + 1
         is_final_round = (next_chief_fa_round >= args.max_chief_fa_rounds)
-        chief_fa_code, chief_fa_stdout, updated_plan_content, chief_fa_verdict, chief_fa_unresolved = execute_chief_fa(
-            plan_path, next_chief_fa_round, args.chief_fa_model, args.chief_fa_effort, args.max_chief_fa_rounds
+        chief_fa_code, chief_fa_stdout, updated_plan_content, chief_fa_verdict, chief_fa_unresolved, chief_fa_metrics = execute_chief_fa(
+            plan_path, next_chief_fa_round, args.chief_fa_model, args.chief_fa_effort, args.max_chief_fa_rounds,
+            final_effort=args.chief_fa_final_effort, timeout_s=args.claude_timeout,
         )
 
         result = {
@@ -752,7 +915,10 @@ def main() -> None:
             "architect_stdout_snippet": architect_stdout[:400] if architect_stdout else "",
             "qa_stdout_snippet": qa_stdout[:400] if qa_stdout else "",
             "chief_fa_stdout_snippet": chief_fa_stdout[:400] if chief_fa_stdout else "",
+            "chief_fa_metrics": chief_fa_metrics,
         }
+        if architect_metrics is not None:
+            result["architect_metrics"] = architect_metrics
 
         if chief_fa_verdict == "APPROVED":
             result["status"] = "completed"
@@ -792,6 +958,8 @@ def main() -> None:
         "architect_stdout_snippet": architect_stdout[:400] if architect_stdout else "",
         "qa_stdout_snippet": qa_stdout[:400] if qa_stdout else "",
     }
+    if architect_metrics is not None:
+        result["architect_metrics"] = architect_metrics
 
     if council_verdict != "AGREED" and new_council_rounds_in_cycle >= args.max_rounds:
         result["status"] = "cap_reached"
