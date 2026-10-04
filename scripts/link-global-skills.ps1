@@ -21,6 +21,7 @@ $ErrorActionPreference = "Stop"
 
 $SharedSkills = @(
     "agy-architect-review",
+    "architect-council-review",
     "claude-architect-review",
     "provision-story",
     "quick-fix",
