@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import pytest
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent
+from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent
 
 from orchestrator.config import (
     GlobalConfig,
@@ -389,7 +389,7 @@ async def test_dashboard_double_press_force_quit(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dashboard_sigint_and_task_cancellation_cleanup(tmp_path: Path, monkeypatch):
-    """Asserts SIGINT/CancelledError during watch daemon triggers worker cancellation and teardown."""
+    import orchestrator.cli as cli_mod
     from orchestrator.cli import _watch_daemon_tui
 
     config_file = tmp_path / "config.yaml"
@@ -429,8 +429,8 @@ projects:
         terminated_calls.append(True)
         return 0
 
-    monkeypatch.setattr("orchestrator.cli._project_worker_loop", mock_worker_loop)
-    monkeypatch.setattr("orchestrator.cli.sync_all_projects_labels", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(cli_mod, "_project_worker_loop", mock_worker_loop)
+    monkeypatch.setattr(cli_mod, "sync_all_projects_labels", lambda *args, **kwargs: asyncio.sleep(0))
     monkeypatch.setattr(AsyncHarnessAdapter, "terminate_all_active", mock_terminate)
 
     # Mock run_async to raise CancelledError (simulating SIGINT)
@@ -3691,7 +3691,6 @@ async def test_scenario_live_streaming_without_manual_refresh_for_active_running
     )
 
     async with app.run_test() as pilot:
-        table = app.query_one("#projects_table", DataTable)
         log_view = app.query_one("#log_view", RichLog)
         await pilot.pause()
 
@@ -3711,7 +3710,7 @@ async def test_scenario_live_streaming_without_manual_refresh_for_active_running
         assert app.selected_issue_id == 75
         assert "architect*" in str(log_view.border_title)
         assert app._placeholder_active is True
-        assert [l.text for l in log_view.lines] == ["⚡ Initializing architect harness on Issue #75... Awaiting output."]
+        assert [line_entry.text for line_entry in log_view.lines] == ["⚡ Initializing architect harness on Issue #75... Awaiting output."]
 
         # Spy on call_from_thread and action_refresh / refresh to verify zero manual refresh
         call_from_thread_spy = mocker.spy(app, "call_from_thread")
@@ -3903,7 +3902,6 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
     )
 
     async with app.run_test() as pilot:
-        table = app.query_one("#projects_table", DataTable)
         log_view = app.query_one("#log_view", RichLog)
         await pilot.pause()
 
@@ -3921,7 +3919,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         assert app.selected_issue_id == 75
         assert "architect*" in str(log_view.border_title)
         assert app._placeholder_active is True
-        assert [l.text for l in log_view.lines] == ["⚡ Initializing architect harness on Issue #75... Awaiting output."]
+        assert [line_entry.text for line_entry in log_view.lines] == ["⚡ Initializing architect harness on Issue #75... Awaiting output."]
 
         # Live harness output stream arrives (harness writes to disk then dispatches stream line)
         arch_log_file.write_text("Architect: Analyzing Issue #75 Gherkin scenarios\n", encoding="utf-8")
@@ -3933,7 +3931,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         await pilot.pause()
 
         assert app._placeholder_active is False
-        assert [l.text for l in log_view.lines] == ["Architect: Analyzing Issue #75 Gherkin scenarios"]
+        assert [line_entry.text for line_entry in log_view.lines] == ["Architect: Analyzing Issue #75 Gherkin scenarios"]
         assert app._last_tail_offset == arch_log_file.stat().st_size
 
         # Additional output written to disk log
@@ -3946,7 +3944,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         await pilot.pause()
 
         # Offset handoff reads incremental bytes without duplicating first line
-        assert [l.text for l in log_view.lines] == [
+        assert [line_entry.text for line_entry in log_view.lines] == [
             "Architect: Analyzing Issue #75 Gherkin scenarios",
             "Architect: Plan finalized",
         ]
@@ -3965,7 +3963,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         assert app.selected_issue_id == 76
         assert "devtest*" in str(log_view.border_title)
         assert app._placeholder_active is True
-        assert [l.text for l in log_view.lines] == ["⚡ Initializing devtest harness on Issue #76... Awaiting output."]
+        assert [line_entry.text for line_entry in log_view.lines] == ["⚡ Initializing devtest harness on Issue #76... Awaiting output."]
 
         # DevTest emits live output
         app._handle_harness_stream_line(
@@ -3976,7 +3974,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
         await pilot.pause()
 
         assert app._placeholder_active is False
-        assert [l.text for l in log_view.lines] == ["DevTest: Running pytest unit verification suite"]
+        assert [line_entry.text for line_entry in log_view.lines] == ["DevTest: Running pytest unit verification suite"]
 
         # Step 4: Log Rotation during DevTest execution
         devtest_log_file.unlink()
@@ -3999,7 +3997,7 @@ async def test_scenario_end_to_end_full_dashboard_lifecycle_log_streaming_suite(
 
         assert app._last_tail_file == devtest_rotated
         assert app._last_tail_offset == devtest_rotated.stat().st_size
-        assert any("DevTest rotated: all 50 tests passed" in l.text for l in log_view.lines)
+        assert any("DevTest rotated: all 50 tests passed" in line_entry.text for line_entry in log_view.lines)
 
         # Step 5: DevTest finishes -> Return to Idle State
         await state_manager.release_lock(issue_id=76, repo="BasketIQ/biq-playbook", node_type="devtest")
@@ -4959,5 +4957,281 @@ async def test_scenario_issue_199_watchdog_liveness_heartbeat(tmp_path: Path):
         assert "heartbeat_at" in info
         recorded_hb = float(info["heartbeat_at"])
         assert recorded_hb >= initial_hb
+
+
+# ---------------------------------------------------------------------------
+# Acceptance Criteria Tests for Issue #213: TUI Dashboard Layout & Project Filtering
+# ---------------------------------------------------------------------------
+
+
+def make_11_project_config(tmp_path: Path) -> GlobalConfig:
+    """Fixture creating the deterministic 11-project portfolio across 3 GitHub organizations."""
+    projects = [
+        # 5 BasketIQ projects
+        ProjectConfig(name="biq-home", repo="BasketIQ/biq-home", local_path=str(tmp_path)),
+        ProjectConfig(name="biq-knowledge", repo="BasketIQ/biq-knowledge", local_path=str(tmp_path)),
+        ProjectConfig(name="biq-onboard", repo="BasketIQ/biq-onboard", local_path=str(tmp_path)),
+        ProjectConfig(name="biq-training", repo="BasketIQ/biq-training", local_path=str(tmp_path)),
+        ProjectConfig(name="biq-playbook", repo="BasketIQ/biq-playbook", local_path=str(tmp_path)),
+        # 5 AntaresAndBharani projects
+        ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path)),
+        ProjectConfig(name="darwin-trader", repo="AntaresAndBharani/darwin-trader", local_path=str(tmp_path)),
+        ProjectConfig(name="graph-engineering", repo="AntaresAndBharani/graph-engineering", local_path=str(tmp_path)),
+        ProjectConfig(name="kerberito", repo="AntaresAndBharani/kerberito", local_path=str(tmp_path)),
+        ProjectConfig(name="retro-fighter-classic", repo="AntaresAndBharani/retro-fighter-classic", local_path=str(tmp_path)),
+        # 1 Antares1980 project
+        ProjectConfig(name="retro-fighter", repo="Antares1980/retro-fighter", local_path=str(tmp_path)),
+    ]
+    return GlobalConfig(projects=projects)
+
+
+@pytest.mark.asyncio
+async def test_scenario_1_vertical_layout_proportions(tmp_path: Path):
+    """
+    Scenario 1: Vertical Layout Proportions
+    - Given DashboardApp mounted in a test terminal of size (120, 35) with 11 projects loaded,
+    - When the initial composition and render pass completes,
+    - Then #projects_table allocates at least 15 visible rows without row truncation,
+    - And #bottom_container occupies exactly 30% of vertical height (<= 35%).
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#projects_table", DataTable)
+        bottom = app.query_one("#bottom_container", Horizontal)
+
+        assert table.region.height >= 15
+        assert bottom.region.height / 35.0 <= 0.35
+        assert table.row_count == 11
+
+
+@pytest.mark.asyncio
+async def test_scenario_2_github_organization_filter_cycling(tmp_path: Path):
+    """
+    Scenario 2: GitHub Organization Filter Cycling
+    - Given the 11-project dashboard with selected_org = None (displaying [All Orgs]),
+    - When the operator presses o once,
+    - Then selected_org transitions to Antares1980, displaying 1 project (retro-fighter),
+    - When the operator presses o again,
+    - Then selected_org transitions to AntaresAndBharani, displaying 5 projects,
+    - When the operator presses o again,
+    - Then selected_org transitions to BasketIQ, displaying 5 projects (biq-*),
+    - And the filter chip displays (Matched: 5 of 11).
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chip = app.query_one("#filter_chip", Static)
+        table = app.query_one("#projects_table", DataTable)
+
+        # Initially selected_org is None -> displaying [All Orgs], 11 rows
+        assert app.selected_org is None
+        assert "[All Orgs]" in str(chip.render())
+        assert table.row_count == 11
+
+        # Press o once -> Antares1980 (1 project)
+        await pilot.press("o")
+        await pilot.pause()
+        assert app.selected_org == "Antares1980"
+        assert table.row_count == 1
+        assert "Antares1980" in str(chip.render())
+        assert "(Matched: 1 of 11)" in str(chip.render())
+
+        # Press o again -> AntaresAndBharani (5 projects)
+        await pilot.press("o")
+        await pilot.pause()
+        assert app.selected_org == "AntaresAndBharani"
+        assert table.row_count == 5
+        assert "AntaresAndBharani" in str(chip.render())
+        assert "(Matched: 5 of 11)" in str(chip.render())
+
+        # Press o again -> BasketIQ (5 projects)
+        await pilot.press("o")
+        await pilot.pause()
+        assert app.selected_org == "BasketIQ"
+        assert table.row_count == 5
+        assert "BasketIQ" in str(chip.render())
+        assert "(Matched: 5 of 11)" in str(chip.render())
+
+        # Press o once more -> cycles back to None ([All Orgs], 11 rows)
+        await pilot.press("o")
+        await pilot.pause()
+        assert app.selected_org is None
+        assert "[All Orgs]" in str(chip.render())
+        assert table.row_count == 11
+
+
+@pytest.mark.asyncio
+async def test_scenario_3_name_substring_search_and_priority_key_isolation(tmp_path: Path):
+    """
+    Scenario 3: Name Substring Search & Priority Key Isolation
+    - Given the dashboard displaying all 11 projects,
+    - When the operator presses / to focus #filter_input,
+    - And types "biq rq",
+    - Then #filter_input.value equals "biq rq",
+    - And the application does NOT quit, drain, reload, or toggle auto-scroll,
+    - And only projects matching substring "biq rq" in project.name remain visible.
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.query_one("#projects_table", DataTable)
+        assert table.row_count == 11
+
+        # Press / to focus filter input
+        await pilot.press("slash")
+        await pilot.pause()
+        inp = app.query_one("#filter_input", Input)
+        assert app.focused == inp
+
+        # Type "biq rq" containing 'q', 'r', and space
+        await pilot.press(*list("biq rq"))
+        await pilot.pause()
+
+        assert inp.value == "biq rq"
+        assert app.is_running is True
+        assert app.is_draining is False
+        assert app.auto_scroll is True
+        assert table.row_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_compound_filtering_and_escape_reset(tmp_path: Path):
+    """
+    Scenario 4: Compound Filtering & Escape Reset
+    - Given selected_org is set to AntaresAndBharani and filter_text is "cross",
+    - When the filter evaluates,
+    - Then only crosstrainingapp is visible and highlighted,
+    - When the operator presses Esc,
+    - Then filter_text is cleared to "", selected_org is reset to None,
+    - And all 11 projects are immediately restored to #projects_table,
+    - And focus returns to #projects_table.
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.query_one("#projects_table", DataTable)
+        inp = app.query_one("#filter_input", Input)
+
+        # Set compound filter
+        app.selected_org = "AntaresAndBharani"
+        app.filter_text = "cross"
+        inp.value = "cross"
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert table.row_count == 1
+        assert app.selected_project == "crosstrainingapp"
+        assert table.cursor_row == 0
+
+        # Press Esc
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.filter_text == ""
+        assert app.selected_org is None
+        assert inp.value == ""
+        assert table.row_count == 11
+        assert app.focused == table
+
+
+@pytest.mark.asyncio
+async def test_scenario_5_zero_match_safety_and_placeholder_hydration(tmp_path: Path):
+    """
+    Scenario 5: Zero-Match Safety & Placeholder Hydration
+    - Given the active dashboard,
+    - When #filter_input receives a search query with 0 matches (e.g., "nonexistent-xyz"),
+    - Then #projects_table displays 0 rows without raising IndexError,
+    - And self.selected_project is set to None,
+    - And #sdlc_widget and #log_view display empty-state placeholders [dim]No projects match active filter[/dim].
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.query_one("#projects_table", DataTable)
+        sdlc = app.query_one("#sdlc_widget", SDLCProgressWidget)
+        log_view = app.query_one("#log_view", RichLog)
+
+        # Focus filter input and type zero-match query
+        await pilot.press("slash")
+        await pilot.pause()
+        await pilot.press(*list("nonexistent-xyz"))
+        await pilot.pause()
+
+        assert table.row_count == 0
+        assert app.selected_project is None
+        assert "[dim]No projects match active filter[/dim]" in str(sdlc.get_row_at(0)[2]) or "No projects match active filter" in str(sdlc.get_row_at(0)[2])
+        assert any("No projects match active filter" in str(line.text) for line in log_view.lines)
+
+
+@pytest.mark.asyncio
+async def test_scenario_6_state_persistence_across_polling_and_config_hot_reload(tmp_path: Path):
+    """
+    Scenario 6: State Persistence Across 2-Second Polling & Config Hot-Reload
+    - Given an active filter (filter_text="biq", selected_org="BasketIQ"),
+    - When the 2-second background timer executes update_projects_table(),
+    - Or _rebind_config() executes during a hot-reload,
+    - Then filter_text and selected_org persist unchanged,
+    - And the filtered view and cursor selection remain intact without DOM flickering.
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.query_one("#filter_input", Input)
+        inp.value = "biq"
+        app.selected_org = "BasketIQ"
+        await app.update_projects_table()
+        await pilot.pause()
+
+        table = app.query_one("#projects_table", DataTable)
+        assert table.row_count == 5
+        sel_proj = app.selected_project
+        sel_row = table.cursor_row
+
+        # 1. 2-second background polling tick
+        await app.update_projects_table()
+        await pilot.pause()
+
+        assert app.filter_text == "biq"
+        assert app.selected_org == "BasketIQ"
+        assert table.row_count == 5
+        assert app.selected_project == sel_proj
+        assert table.cursor_row == sel_row
+
+        # 2. Config hot-reload simulation via _rebind_config
+        new_config = make_11_project_config(tmp_path)
+        await app._rebind_config(new_config=new_config, trigger="Config Reload")
+        await pilot.pause()
+
+        assert app.filter_text == "biq"
+        assert app.selected_org == "BasketIQ"
+        assert table.row_count == 5
+        assert app.selected_project == sel_proj
+        assert table.cursor_row == sel_row
+
 
 

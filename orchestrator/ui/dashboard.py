@@ -14,7 +14,16 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, RichLog, TabbedContent, TabPane
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    RichLog,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 from textual.widgets.data_table import RowDoesNotExist
 
 from orchestrator.config import GlobalConfig
@@ -34,6 +43,8 @@ from orchestrator.ui.widgets import (
     HarnessQuotaWidget,
     SDLCProgressWidget,
     _apply_keyed_diff,
+    extract_github_org,
+    filter_projects,
     format_node_agent_spec,
 )
 
@@ -42,7 +53,7 @@ class DashboardApp(App):
     """
     Read-only Async Textual TUI Observability Dashboard for graph-orchestrator watch.
     Displays a live alphabetically-sorted projects status table with 7th column Agent Model,
-    ConfigStatusBanner, and multi-pane bottom split with SDLCProgressWidget and TabbedContent.
+    ConfigStatusBanner, filter bar, and multi-pane bottom split with SDLCProgressWidget and TabbedContent.
     """
 
     CSS = """
@@ -52,12 +63,26 @@ class DashboardApp(App):
     ConfigStatusBanner, #config_status_banner {
         height: 3;
     }
+    #filter_bar {
+        height: 3;
+        layout: horizontal;
+        padding: 0 1;
+    }
+    #filter_input {
+        width: 40;
+    }
+    #filter_chip {
+        width: 1fr;
+        content-align: right middle;
+        color: $text-muted;
+    }
     #projects_table {
         height: 1fr;
+        min-height: 12;
         border: solid green;
     }
     #bottom_container {
-        height: 60%;
+        height: 30%;
         layout: horizontal;
     }
     #sdlc_widget {
@@ -86,6 +111,9 @@ class DashboardApp(App):
         Binding("ctrl+r", "redraw_display", "Redraw Display", show=False),
         Binding("space", "toggle_auto_scroll", "Toggle Auto-Scroll"),
         Binding("ctrl+l", "clear_logs", "Clear Logs"),
+        Binding("slash", "focus_filter", "Filter", key_display="/"),
+        Binding("o", "cycle_org", "Cycle Org"),
+        Binding("escape", "reset_filter", "Reset Filter", show=False),
     ]
 
     TABLE_COLUMNS = [
@@ -139,6 +167,8 @@ class DashboardApp(App):
             or (log_handler.buffer_manager if log_handler and getattr(log_handler, "buffer_manager", None) else None)
             or ProjectLogBufferManager()
         )
+        self.filter_text: str = ""
+        self.selected_org: Optional[str] = None
         self.selected_project = selected_project
         self.selected_node = selected_node
         self.selected_issue_id: Optional[int] = selected_issue_id if selected_issue_id is not None else issue_id
@@ -170,7 +200,7 @@ class DashboardApp(App):
         self.selected_issue_id = value
 
     def compose(self) -> ComposeResult:
-        """Compose the TUI layout with Header, ConfigStatusBanner, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
+        """Compose the TUI layout with Header, ConfigStatusBanner, Filter Bar, DataTable, Horizontal split (SDLCProgressWidget + TabbedContent), and Footer."""
         yield Header(show_clock=True)
         yield ConfigStatusBanner(
             id="config_status_banner",
@@ -178,6 +208,9 @@ class DashboardApp(App):
             state_manager=self.state_manager,
             config_path=self.config_path,
         )
+        with Horizontal(id="filter_bar"):
+            yield Input(placeholder="Filter projects by name (/)...", id="filter_input")
+            yield Static(id="filter_chip")
         yield DataTable(id="projects_table")
         with Horizontal(id="bottom_container"):
             yield SDLCProgressWidget(id="sdlc_widget", state_manager=self.state_manager)
@@ -195,12 +228,26 @@ class DashboardApp(App):
                     yield AnomalyAlertsWidget(id="alerts_widget", state_manager=self.state_manager, hours=24.0)
         yield Footer()
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """
+        Suppresses quit, refresh, and toggle_auto_scroll actions when filter input is focused
+        to allow uninterrupted typing of queries containing 'q', 'r', or space.
+        """
+        if (
+            action in ("quit", "refresh", "toggle_auto_scroll", "focus_filter", "cycle_org")
+            and self.focused
+            and isinstance(self.focused, Input)
+        ):
+            return False
+        return super().check_action(action, parameters)
+
     async def on_mount(self) -> None:
         """Initializes widgets, binds log stream, and schedules periodic refresh."""
         table = self.query_one("#projects_table", DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_columns(*self.TABLE_COLUMNS)
+        table.focus()
 
         if self.log_handler:
             self.log_handler.callback = self._handle_log_record
@@ -394,6 +441,7 @@ class DashboardApp(App):
 
         try:
             log_view = self.query_one("#log_view", RichLog)
+            placeholder_was_active = self._placeholder_active
             if self._placeholder_active:
                 self._placeholder_active = False
                 if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
@@ -402,7 +450,7 @@ class DashboardApp(App):
                     log_view.clear()
 
             escaped = rich.markup.escape(formatted)
-            scroll_end = bool(self.auto_scroll and log_view.is_vertical_scroll_end)
+            scroll_end = bool(self.auto_scroll and (placeholder_was_active or log_view.is_vertical_scroll_end))
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
                 self.call_from_thread(log_view.write, escaped, scroll_end=scroll_end)
             else:
@@ -442,6 +490,7 @@ class DashboardApp(App):
 
         try:
             log_view = self.query_one("#log_view", RichLog)
+            placeholder_was_active = self._placeholder_active
             if self._placeholder_active:
                 self._placeholder_active = False
                 if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
@@ -450,7 +499,7 @@ class DashboardApp(App):
                     log_view.clear()
 
             escaped = rich.markup.escape(line)
-            scroll_end = bool(self.auto_scroll and log_view.is_vertical_scroll_end)
+            scroll_end = bool(self.auto_scroll and (placeholder_was_active or log_view.is_vertical_scroll_end))
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
                 self.call_from_thread(log_view.write, escaped, scroll_end=scroll_end)
             else:
@@ -568,7 +617,80 @@ class DashboardApp(App):
             except Exception:
                 pass
 
-        sorted_projects = sorted(self.config.projects, key=lambda p: p.name.lower())
+        visible_projects = filter_projects(self.config.projects, self.filter_text, self.selected_org)
+        sorted_projects = sorted(visible_projects, key=lambda p: p.name.lower())
+        visible_names = {p.name for p in visible_projects}
+
+        try:
+            chip = self.query_one("#filter_chip", Static)
+            org_display = self.selected_org if self.selected_org else "[All Orgs]"
+            chip_text = f"[Filter: '{self.filter_text}' | Org: {org_display}] (Matched: {len(visible_projects)} of {len(self.config.projects)})"
+            chip.update(rich.markup.escape(chip_text))
+        except Exception:
+            pass
+
+        if visible_projects:
+            try:
+                sdlc_widget = self.query_one(SDLCProgressWidget)
+                sdlc_widget.empty_message = "No active SDLC items"
+            except Exception:
+                pass
+            try:
+                alerts_widget = self.query_one(AnomalyAlertsWidget)
+                alerts_widget.empty_message = "No anomalies in last 24h"
+            except Exception:
+                pass
+            if self.selected_project not in visible_names:
+                self.selected_project = sorted_projects[0].name
+                self.selected_node = None
+                self.selected_issue_id = None
+                self._active_node_identity = None
+                await self.hydrate_project_logs(self.selected_project, node_name=None, issue_id=None)
+                await self._update_bottom_panes(self.selected_project, force=True)
+        else:
+            self.selected_project = None
+            self.selected_node = None
+            self.selected_issue_id = None
+            self._active_node_identity = None
+            is_filter_active = bool(self.filter_text or self.selected_org)
+            if is_filter_active:
+                empty_msg = "[dim]No projects match active filter[/dim]"
+                try:
+                    sdlc_widget = self.query_one(SDLCProgressWidget)
+                    await sdlc_widget.update_project(None, empty_message=empty_msg)
+                except Exception:
+                    pass
+                try:
+                    alerts_widget = self.query_one(AnomalyAlertsWidget)
+                    await alerts_widget.update_project(None, empty_message=empty_msg)
+                except Exception:
+                    pass
+                try:
+                    log_view = self.query_one("#log_view", RichLog)
+                    log_view.clear()
+                    log_view.write(empty_msg)
+                    self._placeholder_active = True
+                except Exception:
+                    pass
+            else:
+                try:
+                    sdlc_widget = self.query_one(SDLCProgressWidget)
+                    await sdlc_widget.update_project(None, empty_message="No active SDLC items")
+                except Exception:
+                    pass
+                try:
+                    alerts_widget = self.query_one(AnomalyAlertsWidget)
+                    await alerts_widget.update_project(None, empty_message="No anomalies in last 24h")
+                except Exception:
+                    pass
+                try:
+                    log_view = self.query_one("#log_view", RichLog)
+                    log_view.clear()
+                    log_view.write("[dim]Select a project lane to inspect real-time execution logs.[/dim]")
+                    self._placeholder_active = True
+                except Exception:
+                    pass
+
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
 
         target_rows: List[Tuple[str, Tuple[Any, ...]]] = []
@@ -753,7 +875,7 @@ class DashboardApp(App):
         if self.selected_project:
             await self._update_bottom_panes(self.selected_project, force=False)
             await self._poll_active_log_file()
-        else:
+        elif visible_projects:
             try:
                 quota_widget = self.query_one(HarnessQuotaWidget)
                 if self.state_manager:
@@ -1180,6 +1302,64 @@ class DashboardApp(App):
         await self.update_projects_table()
         if self.selected_project:
             await self._update_bottom_panes(self.selected_project, force=True)
+
+    def action_focus_filter(self) -> None:
+        """Focuses #filter_input when '/' is pressed."""
+        try:
+            inp = self.query_one("#filter_input", Input)
+            inp.focus()
+        except Exception:
+            pass
+
+    async def action_cycle_org(self) -> None:
+        """
+        Cycles selected_org through [None, *sorted(unique_orgs, key=str.lower)].
+        None displays as [All Orgs].
+        """
+        unique_orgs = {
+            extract_github_org(p.repo)
+            for p in self.config.projects
+            if extract_github_org(p.repo) != "Unknown"
+        }
+        org_cycle: list[Optional[str]] = [None, *sorted(unique_orgs, key=str.lower)]
+
+        if self.selected_org in org_cycle:
+            curr_idx = org_cycle.index(self.selected_org)
+            next_idx = (curr_idx + 1) % len(org_cycle)
+        else:
+            next_idx = 1 if len(org_cycle) > 1 else 0
+
+        self.selected_org = org_cycle[next_idx]
+        await self.update_projects_table()
+
+    async def action_reset_filter(self) -> None:
+        """
+        If #filter_input is focused or filter active, clears filter_text,
+        resets selected_org = None, blurs input, and restores focus to #projects_table.
+        """
+        is_focused_input = bool(self.focused and isinstance(self.focused, Input))
+        has_active_filter = bool(self.filter_text or self.selected_org is not None)
+
+        if is_focused_input or has_active_filter:
+            self.filter_text = ""
+            self.selected_org = None
+            try:
+                inp = self.query_one("#filter_input", Input)
+                inp.value = ""
+            except Exception:
+                pass
+            try:
+                table = self.query_one("#projects_table", DataTable)
+                table.focus()
+            except Exception:
+                pass
+            await self.update_projects_table()
+
+    @on(Input.Changed, "#filter_input")
+    async def on_filter_input_changed(self, event: Input.Changed) -> None:
+        """Reactively updates filter_text and projects table upon input change."""
+        self.filter_text = event.value
+        await self.update_projects_table()
 
     async def on_resize(self, event: events.Resize) -> None:
         """
