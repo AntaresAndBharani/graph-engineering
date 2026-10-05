@@ -15,9 +15,58 @@ from textual.widgets.data_table import (
     RowDoesNotExist,
 )
 
-from orchestrator.config import GlobalConfig
+from orchestrator.config import GlobalConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.quota import QuotaManager
+
+
+def extract_github_org(repository_slug: str) -> str:
+    """
+    Extracts GitHub organization name from repository slug (e.g. 'owner/repo').
+    Splits repository_slug.strip() on '/' (limit 1). If valid prefix exists and no
+    path separators like Windows drive letters, returns trimmed organization name.
+    Otherwise returns 'Unknown'.
+    """
+    if not repository_slug or not isinstance(repository_slug, str):
+        return "Unknown"
+    clean = repository_slug.strip()
+    if ":" in clean or "\\" in clean:
+        return "Unknown"
+    parts = clean.split("/", 1)
+    if len(parts) == 2:
+        org = parts[0].strip()
+        repo = parts[1].strip()
+        if org and repo:
+            return org
+    return "Unknown"
+
+
+def filter_projects(
+    projects: list[ProjectConfig],
+    filter_text: str = "",
+    selected_org: Optional[str] = None,
+) -> list[ProjectConfig]:
+    """
+    Pure function filtering projects list by name substring and GitHub organization.
+    - Case-insensitive.
+    - Matches filter_text.strip().lower() strictly against p.name.lower().
+    - Matches selected_org against extract_github_org(p.repo).lower().
+    - Composes both with logical AND.
+    """
+    clean_filter = filter_text.strip().lower() if filter_text else ""
+    clean_org = selected_org.strip().lower() if selected_org and selected_org.strip() else None
+
+    result: list[ProjectConfig] = []
+    for p in projects:
+        if clean_filter and clean_filter not in p.name.lower():
+            continue
+        if clean_org is not None:
+            p_org = extract_github_org(getattr(p, "repo", "")).lower()
+            if p_org != clean_org:
+                continue
+        result.append(p)
+    return result
+
 
 
 def format_node_agent_spec(
@@ -304,11 +353,13 @@ class SDLCProgressWidget(DataTable):
         self,
         state_manager: Optional[StateManager] = None,
         project_name: Optional[str] = None,
+        empty_message: str = "No active SDLC items",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.state_manager = state_manager
         self.project_name = project_name
+        self.empty_message = empty_message
         self._render_lock = asyncio.Lock()
 
     async def on_mount(self) -> None:
@@ -319,12 +370,20 @@ class SDLCProgressWidget(DataTable):
             self.add_columns(*self.TABLE_COLUMNS)
         await self._render_rows()
 
-    async def update_project(self, project_name: Optional[str] = None) -> None:
+    async def update_project(
+        self,
+        project_name: Optional[str] = None,
+        empty_message: Optional[str] = None,
+    ) -> None:
         """
         Asynchronously queries StateManager for active SDLC items and updates the table.
         Non-blocking to the Textual UI event loop.
         """
         self.project_name = project_name
+        if empty_message is not None:
+            self.empty_message = empty_message
+        elif project_name is not None:
+            self.empty_message = "No active SDLC items"
         await self._render_rows()
 
     async def _render_rows(self) -> None:
@@ -336,7 +395,7 @@ class SDLCProgressWidget(DataTable):
             if not self.project_name or not self.state_manager:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "-", "No active SDLC items", "-"))],
+                    [("-empty-", ("-", "-", self.empty_message, "-"))],
                 )
                 return
 
@@ -353,7 +412,7 @@ class SDLCProgressWidget(DataTable):
             if not hierarchy:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "-", "No active SDLC items", "-"))],
+                    [("-empty-", ("-", "-", self.empty_message, "-"))],
                 )
                 return
 
@@ -430,12 +489,14 @@ class AnomalyAlertsWidget(DataTable):
         state_manager: Optional[StateManager] = None,
         project_name: Optional[str] = None,
         hours: float = 24.0,
+        empty_message: str = "No anomalies in last 24h",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.state_manager = state_manager
         self.project_name = project_name
         self.hours = hours
+        self.empty_message = empty_message
         self._render_lock = asyncio.Lock()
 
     async def on_mount(self) -> None:
@@ -450,6 +511,7 @@ class AnomalyAlertsWidget(DataTable):
         self,
         project_name: Optional[str] = None,
         hours: Optional[float] = None,
+        empty_message: Optional[str] = None,
     ) -> None:
         """
         Asynchronously queries StateManager for recent anomalies and updates the table.
@@ -458,6 +520,10 @@ class AnomalyAlertsWidget(DataTable):
         self.project_name = project_name
         if hours is not None:
             self.hours = hours
+        if empty_message is not None:
+            self.empty_message = empty_message
+        elif project_name is not None:
+            self.empty_message = "No anomalies in last 24h"
         await self._render_rows()
 
     async def _render_rows(self) -> None:
@@ -469,7 +535,7 @@ class AnomalyAlertsWidget(DataTable):
             if not self.project_name or not self.state_manager:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "-", "No anomalies in last 24h", "-"))],
+                    [("-empty-", ("-", "-", self.empty_message, "-"))],
                 )
                 return
 
@@ -484,7 +550,7 @@ class AnomalyAlertsWidget(DataTable):
             if not anomalies:
                 _apply_keyed_diff(
                     self,
-                    [("-empty-", ("-", "-", "No anomalies in last 24h", "-"))],
+                    [("-empty-", ("-", "-", self.empty_message, "-"))],
                 )
                 return
 

@@ -8,6 +8,7 @@ from textual.widgets import DataTable
 from orchestrator.config import (
     GlobalConfig,
     HarnessQuotaConfig,
+    ProjectConfig,
     QuotaSettings,
     WindowLimitConfig,
 )
@@ -16,8 +17,10 @@ from orchestrator.quota import QuotaManager
 from orchestrator.ui.widgets import (
     HarnessQuotaWidget,
     SDLCProgressWidget,
-    format_pr_status_badge,
     _apply_keyed_diff,
+    extract_github_org,
+    filter_projects,
+    format_pr_status_badge,
 )
 
 
@@ -1029,6 +1032,113 @@ async def test_scenario_sdlc_progress_widget_positional_assertions_and_cell_alig
         assert rempty[1] == "-"
         assert rempty[2] == "No active SDLC items"
         assert rempty[3] == "-"
+
+
+def test_extract_github_org_valid_slugs():
+    assert extract_github_org("BasketIQ/biq-home") == "BasketIQ"
+    assert extract_github_org("AntaresAndBharani/graph-engineering") == "AntaresAndBharani"
+    assert extract_github_org("Antares1980/retro-fighter") == "Antares1980"
+    assert extract_github_org("  owner / repo  ") == "owner"
+    assert extract_github_org("owner/repo/extra") == "owner"
+
+
+def test_extract_github_org_invalid_and_edge_cases():
+    assert extract_github_org("") == "Unknown"
+    assert extract_github_org("   ") == "Unknown"
+    assert extract_github_org(None) == "Unknown"  # type: ignore
+    assert extract_github_org(123) == "Unknown"  # type: ignore
+    assert extract_github_org("repo-only-without-slash") == "Unknown"
+    assert extract_github_org("/repo") == "Unknown"
+    assert extract_github_org("owner/") == "Unknown"
+    assert extract_github_org("C:/Users/rogal/repos/proj") == "Unknown"
+    assert extract_github_org("C:\\Users\\rogal\\repos\\proj") == "Unknown"
+    assert extract_github_org("owner\\repo") == "Unknown"
+    assert extract_github_org("https://github.com/owner/repo") == "Unknown"
+
+
+def test_filter_projects_empty_filters(tmp_path: Path):
+    projects = [
+        ProjectConfig(name="biq-home", repo="BasketIQ/biq-home", local_path=str(tmp_path)),
+        ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path)),
+    ]
+    assert filter_projects(projects) == projects
+    assert filter_projects(projects, filter_text="", selected_org=None) == projects
+    assert filter_projects(projects, filter_text="   ", selected_org="") == projects
+
+
+def test_filter_projects_name_substring(tmp_path: Path):
+    projects = [
+        ProjectConfig(name="biq-home", repo="BasketIQ/biq-home", local_path=str(tmp_path)),
+        ProjectConfig(name="biq-knowledge", repo="BasketIQ/biq-knowledge", local_path=str(tmp_path)),
+        ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path)),
+        ProjectConfig(name="retro-fighter", repo="Antares1980/retro-fighter", local_path=str(tmp_path)),
+    ]
+    res_biq = filter_projects(projects, filter_text="BIQ")
+    assert [p.name for p in res_biq] == ["biq-home", "biq-knowledge"]
+
+    res_cross = filter_projects(projects, filter_text="cross")
+    assert [p.name for p in res_cross] == ["crosstrainingapp"]
+
+    res_none = filter_projects(projects, filter_text="nonexistent-xyz")
+    assert res_none == []
+
+
+def test_filter_projects_selected_org(tmp_path: Path):
+    projects = [
+        ProjectConfig(name="biq-home", repo="BasketIQ/biq-home", local_path=str(tmp_path)),
+        ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path)),
+        ProjectConfig(name="retro-fighter", repo="Antares1980/retro-fighter", local_path=str(tmp_path)),
+    ]
+    res_basket = filter_projects(projects, selected_org="BasketIQ")
+    assert [p.name for p in res_basket] == ["biq-home"]
+
+    res_antares = filter_projects(projects, selected_org="antaresandbharani")
+    assert [p.name for p in res_antares] == ["crosstrainingapp"]
+
+    res_1980 = filter_projects(projects, selected_org="Antares1980")
+    assert [p.name for p in res_1980] == ["retro-fighter"]
+
+    res_unknown = filter_projects(projects, selected_org="NonExistentOrg")
+    assert res_unknown == []
+
+
+def test_filter_projects_compound_filter(tmp_path: Path):
+    projects = [
+        ProjectConfig(name="biq-home", repo="BasketIQ/biq-home", local_path=str(tmp_path)),
+        ProjectConfig(name="biq-knowledge", repo="BasketIQ/biq-knowledge", local_path=str(tmp_path)),
+        ProjectConfig(name="crosstrainingapp", repo="AntaresAndBharani/crosstrainingapp", local_path=str(tmp_path)),
+        ProjectConfig(name="retro-fighter-classic", repo="AntaresAndBharani/retro-fighter-classic", local_path=str(tmp_path)),
+        ProjectConfig(name="retro-fighter", repo="Antares1980/retro-fighter", local_path=str(tmp_path)),
+    ]
+    res = filter_projects(projects, filter_text="retro", selected_org="AntaresAndBharani")
+    assert [p.name for p in res] == ["retro-fighter-classic"]
+
+    res_mismatch = filter_projects(projects, filter_text="biq", selected_org="AntaresAndBharani")
+    assert res_mismatch == []
+
+
+@pytest.mark.asyncio
+async def test_sdlc_progress_widget_custom_empty_message(tmp_path: Path):
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield SDLCProgressWidget(
+                state_manager=state_manager,
+                project_name=None,
+                empty_message="[dim]No projects match active filter[/dim]",
+            )
+
+    app = TestApp()
+    async with app.run_test() as _:
+        widget = app.query_one(SDLCProgressWidget)
+        assert widget.row_count == 1
+        assert "[dim]No projects match active filter[/dim]" in str(widget.get_row_at(0)[2])
+
+        await widget.update_project(None, empty_message="Custom empty state")
+        assert "Custom empty state" in str(widget.get_row_at(0)[2])
+
 
 
 

@@ -6,6 +6,8 @@ from orchestrator.ui.widgets import (
     ConfigStatusBanner,
     HarnessQuotaWidget,
     SDLCProgressWidget,
+    extract_github_org,
+    filter_projects,
     format_node_agent_spec,
 )
 
@@ -15,6 +17,8 @@ __all__ = [
     "SDLCProgressWidget",
     "AnomalyAlertsWidget",
     "HarnessQuotaWidget",
+    "extract_github_org",
+    "filter_projects",
     "format_node_agent_spec",
 ]
 
