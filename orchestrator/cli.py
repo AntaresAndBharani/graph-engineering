@@ -2332,6 +2332,7 @@ def council_command(
     max_rounds: Optional[int] = typer.Option(
         None,
         "--max-rounds",
+        "--rounds",
         min=1,
         help="Rounds before a deadlock is declared (default: 2).",
     ),

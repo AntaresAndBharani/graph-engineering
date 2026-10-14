@@ -270,10 +270,13 @@ def compute_state(sections: List[Section], base_max_rounds: int = DEFAULT_MAX_RO
 
     rounds: Dict[int, Dict[str, Section]] = {}
     continuation = 0
+    rounds_before_continue = 0
     last_council_kind = ""
     for s in session:
         if s.kind == "round":
             rounds.setdefault(s.round_num, {})[s.role] = s
+            if continuation == 0:
+                rounds_before_continue = max(rounds_before_continue, s.round_num)
         elif s.kind == "continue":
             continuation += s.extra
         if s.kind in COUNCIL_KINDS and s.kind != "subject":
@@ -291,12 +294,13 @@ def compute_state(sections: List[Section], base_max_rounds: int = DEFAULT_MAX_RO
         else:
             status = STATUS_IN_PROGRESS
 
+    effective_base = max(base_max_rounds, rounds_before_continue if rounds_before_continue > 0 else completed)
     return CouncilState(
         status=status,
         rounds=rounds,
         rounds_completed=completed,
         continuation=continuation,
-        max_rounds=base_max_rounds + continuation,
+        max_rounds=effective_base + continuation,
         session_sections=[s for s in session],
     )
 
@@ -935,6 +939,14 @@ def deliberate(plan_path: Path, plan_source: str, args: argparse.Namespace) -> T
             }
         round_num += 1
 
+    if not reviews:
+        return EXIT_DEADLOCK, {
+            **result,
+            "status": STATUS_DEADLOCKED,
+            "unresolved_points": [],
+            "next_action": "Deliberation cap reached; specify --continue N or --proceed provision-story.",
+        }
+
     append_blocks(plan_path, [render_dossier(round_num - 1, reviews, _plan_arg(args, plan_source))])
     return EXIT_DEADLOCK, {
         **result,
@@ -970,7 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diff-range", type=str, default=None,
                         help="Attach `git diff <range>` (run in the current directory) as the council subject at session start.")
     parser.add_argument("--max-diff-chars", type=int, default=DEFAULT_MAX_DIFF_CHARS)
-    parser.add_argument("--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS,
+    parser.add_argument("--max-rounds", "--rounds", type=int, default=DEFAULT_MAX_ROUNDS,
                         help=f"Rounds before a deadlock is declared (default: {DEFAULT_MAX_ROUNDS}).")
     parser.add_argument("--config", type=str, default=None,
                         help=f"Council model/effort config (default: ${CONFIG_ENV_VAR}, then {GLOBAL_CONFIG_PATH}, "

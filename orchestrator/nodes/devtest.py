@@ -1345,11 +1345,17 @@ async def _execute_reviewer_turn(
     if not acquired:
         return False, f"Development concurrency limit reached ({len(active_slots)}/{max_dev_projects} active). Project '{project.name}' deferred."
 
+    harness_cfg = config.harnesses.get(harness_name) if getattr(config, "harnesses", None) else None
+    retry_cfg = getattr(harness_cfg, "retry", None)
+    max_retries = getattr(retry_cfg, "max_retries", 0) if retry_cfg else 0
+    timeout_minutes = getattr(harness_cfg, "timeout_minutes", 30) if harness_cfg else 30
+    lock_ttl_minutes = int(timeout_minutes * (1 + max_retries) + 5) if harness_cfg else int(getattr(node_cfg, "lock_ttl", 3600) // 60)
+
     lock_acquired = await state_manager.acquire_lock(
         issue_id=issue_id,
         repo=project.repo,
         node_type="devtest",
-        ttl_seconds=getattr(node_cfg, "lock_ttl", 3600),
+        ttl_minutes=lock_ttl_minutes,
     )
     if not lock_acquired:
         await _release_slot_if_idle(project, state_manager)
@@ -1417,7 +1423,7 @@ async def _execute_reviewer_turn(
         "devtest-reviewer",
         issue_id=issue_id,
     )
-    harness_cfg = config.get_harness(harness_name)
+    harness_cfg = config.harnesses.get(harness_name) if getattr(config, "harnesses", None) else None
     adapter = AsyncHarnessAdapter(
         harness_name,
         harness_cfg,
