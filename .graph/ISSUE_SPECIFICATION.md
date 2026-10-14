@@ -1,152 +1,136 @@
 ## 🎯 Final Decision Plan & User Story Specification
 
-### 📖 User Story & Metadata
-#### Title: feat(ui): TUI Dashboard Layout Rebalance & Project Filtering (Name & GitHub Organization)
-* **Resolution Type:** Council Compromise Accepted (Round 3 Deliberation Consensus)
-* **Sizing Pattern:** Pattern A (Standalone Task, $\le 4$ files, $\le 300$ LOC diff)
-* **Target Files:**
-  - `orchestrator/ui/dashboard.py`
-  - `orchestrator/ui/widgets.py`
-  - `tests/test_dashboard.py`
-  - `tests/test_widgets.py`
-
-**As an** operator managing multi-repository engineering pipelines across multiple GitHub organizations (`BasketIQ`, `AntaresAndBharani`, `Antares1980`),  
-**I want** an inline project name filter, an organization cycling selector, and a 70/30 layout rebalance in the TUI dashboard,  
-**So that** I can immediately locate target repositories, inspect active nodes, and observe logs without manual vertical scrolling, row truncation, or keybinding collisions.
+### User Story: Dual-Persona DevTest Negotiation Loop Upgrade
+**As a** system engineer and platform operator,
+**I want** the `devtest` node to run an iterative Developer ↔ Reviewer negotiation loop bounded by `max_rounds` with PR-comment turn markers,
+**So that** PRs are independently verified against issue specifications prior to auto-merging without manual intervention or label proliferation.
 
 ---
 
-### 🏛️ Architecture & Component Impact
+### 1. Architectural Summary & Scope Boundaries
+This feature upgrades the `devtest` node (`orchestrator/nodes/devtest.py`) from a single-pass CLI execution into an iterative dual-persona (Developer ↔ Reviewer) negotiation loop with a bounded round cap (`max_rounds`, default 3) and a deterministic contingency resolution exit.
+- **Strict backward compatibility**: Disabled by default (`reviewer.enabled: false`). Existing single-pass behavior is byte-for-byte preserved.
+- **Zero label proliferation**: Turn coordination and negotiation states live exclusively within PR comments via structured marker headers (`<!-- DEVTEST_TURN: ... -->`).
+- **Resumption & restart robustness**: PR comments serve as the single source of truth across process restarts.
+- **Strict merge gating**: All PR merges are exclusively routed through `_verify_and_auto_merge_pr` (handling CI gating, `sdlc_items` SQLite synchronization, parent feature checklist progression, and worktree cleanup). Raw merges by persona CLI are prohibited.
 
-```mermaid
-flowchart TD
-    subgraph DashboardApp ["DashboardApp (orchestrator/ui/dashboard.py)"]
-        State["Reactive State: filter_text (str), selected_org (Optional[str])"]
-        InputWidget["Filter Bar: Input#filter_name & Static#filter_chip"]
-        KeyRouter["check_action() / Input Isolation: Suppress 'q', 'r', 'space' when Input focused"]
-        PollLoop["update_projects_table() & _rebind_config()"]
-        DataTable["#projects_table (DataTable) [height: 1fr; min-height: 12]"]
-    end
+---
 
-    subgraph WidgetsModule ["orchestrator/ui/widgets.py"]
-        OrgParser["extract_github_org(slug) -> str"]
-        FilterHelper["filter_projects(projects, filter_text, selected_org) -> list[ProjectConfig]"]
-    end
+### 2. Configuration Schema (`orchestrator/config.py` & `templates/config.example.yaml`)
 
-    subgraph BottomContainer ["#bottom_container [height: 30%; layout: horizontal]"]
-        SDLC["SDLCProgressWidget (#sdlc_widget)"]
-        Tabs["TabbedContent (#tabs) -> Logs, Quotas, Alerts"]
-    end
-
-    InputWidget -->|Input.Changed| State
-    State --> PollLoop
-    PollLoop --> FilterHelper
-    FilterHelper --> OrgParser
-    FilterHelper -->|Visible Projects| DataTable
-    DataTable -->|on_project_row_highlighted| BottomContainer
-    KeyRouter -.->|Shield| InputWidget
+1. Define `DevTestReviewerConfig` inheriting from `OrchestratorBaseModel`:
+```python
+class DevTestReviewerConfig(OrchestratorBaseModel):
+    enabled: bool = False
+    harness: Optional[str] = None  # Falls back to devtest.harness
+    model: Optional[str] = None    # Falls back to devtest.model
+    effort: Optional[str] = None   # Falls back to devtest.effort
+    max_rounds: int = Field(default=3, ge=1)
 ```
+2. Attach `reviewer` to `NodeConfig`:
+```python
+class NodeConfig(OrchestratorBaseModel):
+    ...
+    reviewer: DevTestReviewerConfig = Field(default_factory=DevTestReviewerConfig)
 
-#### 1. Layout Rebalance (Textual CSS)
-- In `orchestrator/ui/dashboard.py` (`DashboardApp.CSS`):
-  - `#bottom_container { height: 30%; layout: horizontal; }` (rebalanced from `60%`).
-  - `#projects_table { height: 1fr; min-height: 12; border: solid green; }`.
-  - Add `#filter_bar { height: 3; layout: horizontal; padding: 0 1; }`.
-  - Add `#filter_input { width: 40; }`.
-  - Add `#filter_chip { width: 1fr; content-align: right middle; color: $text-muted; }`.
-
-#### 2. Keybinding Isolation & Safety
-- **Problem Solved:** `Binding("q", "quit", "Quit", priority=True)` previously intercepted `q` before child widgets, causing queries like `biq` to initiate daemon shutdown.
-- **Contract:** Override `DashboardApp.check_action(action: str, parameters: tuple[object, ...]) -> bool | None`. If `action in ("quit", "refresh", "toggle_auto_scroll")` and `self.focused and isinstance(self.focused, Input)`: return `False`.
-- **Keyboard Triggers:**
-  - `/`: Focuses `#filter_input`.
-  - `o`: Cycles `selected_org` through `[None, *sorted(unique_orgs, key=str.lower)]`. `None` renders as `[All Orgs]`.
-  - `Esc`: If `#filter_input` is focused or filter active, clears `filter_text`, resets `selected_org = None`, blurs input, and restores focus to `#projects_table`.
-
-#### 3. Pure Helpers in `orchestrator/ui/widgets.py`
-- `extract_github_org(repository_slug: str) -> str`:
-  - Splits `repository_slug.strip()` on `/` (limit 1). If valid prefix exists and no path separators like Windows drive letters, returns the trimmed organization name. Otherwise returns `"Unknown"`.
-- `filter_projects(projects: list[ProjectConfig], filter_text: str = "", selected_org: Optional[str] = None) -> list[ProjectConfig]`:
-  - Pure function, case-insensitive.
-  - Matches `filter_text.strip().lower()` strictly against `p.name.lower()`.
-  - Matches `selected_org` against `extract_github_org(p.repo).lower()`.
-  - Composes both with logical `AND`.
-
-#### 4. Selection & 0-Match State Machine
-- Integrated inside `DashboardApp.update_projects_table()`:
-  - Calls `visible_projects = filter_projects(self.config.projects, self.filter_text, self.selected_org)`.
-  - Counter chip displays: `[Filter: '<filter_text>' | Org: <OrgName>] (Matched: <visible_count> of <total_count>)`.
-  - Child pipeline rows (`proj::devtest` / `└─`) follow parent project visibility and are excluded from distinct match counts.
-  - If `visible_count > 0`:
-    - If `self.selected_project` not in visible set: re-index selection to `visible_projects[0].name` and trigger `hydrate_project_logs(...)`.
-  - If `visible_count == 0`:
-    - Set `self.selected_project = None`.
-    - Clear table cursor repositioning without raising `IndexError`.
-    - Bottom detail panes render empty placeholder: `[dim]No projects match active filter[/dim]`.
+    @field_validator("reviewer", mode="before")
+    @classmethod
+    def _coerce_none_reviewer(cls, v: Any) -> Any:
+        return DevTestReviewerConfig() if v is None else v
+```
+3. Call `DevTestReviewerConfig.model_rebuild()` in the existing rebuild block (`config.py:384-390`).
+4. Implement helper `resolve_reviewer_config(node_cfg: NodeConfig) -> DevTestReviewerConfig` to cleanly inherit `harness`, `model`, and `effort` from the parent `node_cfg` when unset.
+5. Update `templates/config.example.yaml` with the `reviewer:` block documentation under `nodes.devtest`.
 
 ---
 
-### 🧪 Given-When-Then BDD Acceptance Criteria
+### 3. PR Comment State Machine & Dispatcher Contract
 
-#### Deterministic 11-Project Test Fixture
-All scenarios evaluate against an 11-project test fixture:
-- 5 `BasketIQ` projects: `biq-home`, `biq-knowledge`, `biq-onboard`, `biq-training`, `biq-playbook`.
-- 5 `AntaresAndBharani` projects: `crosstrainingapp`, `darwin-trader`, `graph-engineering`, `kerberito`, `retro-fighter-classic`.
-- 1 `Antares1980` project: `retro-fighter`.
+#### 3.1 Marker Syntax & Generation
+Every negotiation comment posted by either persona contains:
+`<!-- DEVTEST_TURN: persona=DEVELOPER|REVIEWER round=1..N status=READY_FOR_REVIEW|CHANGES_REQUESTED|APPROVED|CONTINGENCY_PLAN|CONTINGENCY_COMPLETED -->`
+- The orchestrator parses the Reviewer / Developer CLI output and programmatically injects/validates the marker header to prevent malformed LLM responses.
+- `determine_next_action(pr_comments, max_rounds=3)` scans comment bodies from newest to oldest for the last valid `DEVTEST_TURN` marker, filtering out non-marker bot/user comments.
 
-#### Scenario 1: Vertical Layout Proportions
-- **Given** `DashboardApp` mounted in a test terminal of size $(120, 35)$ with 11 projects loaded,
-- **When** the initial composition and render pass completes,
-- **Then** `#projects_table` allocates at least 15 visible rows without row truncation,
-- **And** `#bottom_container` occupies exactly 30% of vertical height ($\le 35\%$).
+#### 3.2 Exhaustive Transition Table
+| Last Marker / State | Next Persona | Action |
+|---|---|---|
+| No PR exists yet | `DEVELOPER` | Round 1 initial implementation. Open PR and post `persona=DEVELOPER round=1 status=READY_FOR_REVIEW`. |
+| PR exists with no valid marker | `DEVELOPER` | Treat as Round 1 recovery: verify PR branch and post `persona=DEVELOPER round=1 status=READY_FOR_REVIEW`. |
+| `persona=DEVELOPER`, `status=READY_FOR_REVIEW` (`round=R`) | `REVIEWER` | Evaluate PR diff against issue. If `R < max_rounds`, post `APPROVED` or `CHANGES_REQUESTED`. If `R >= max_rounds`, post `APPROVED` or `CONTINGENCY_PLAN`. |
+| `persona=REVIEWER`, `status=CHANGES_REQUESTED` (`round=R < max_rounds`) | `DEVELOPER` | Address reviewer feedback in worktree, push commit to PR branch, and post `persona=DEVELOPER round=R+1 status=READY_FOR_REVIEW`. |
+| `persona=REVIEWER`, `status=CONTINGENCY_PLAN` (`round=max_rounds`) | `DEVELOPER` | Apply reviewer contingency directives, ensure local tests pass, push commit, and post `persona=DEVELOPER round=max_rounds status=CONTINGENCY_COMPLETED`. |
+| `persona=REVIEWER`, `status=APPROVED` | `ORCHESTRATOR` | Hand off to `_verify_and_auto_merge_pr` for CI status check, merge, parent subtask progression, and slot release. |
+| `persona=DEVELOPER`, `status=CONTINGENCY_COMPLETED` | `ORCHESTRATOR` | Hand off to `_verify_and_auto_merge_pr` (idempotent merge gate). If CI fails, route to `needs-refactor`. |
+| PR already merged or closed | `NONE` | No-op terminal state. |
+| Invalid / unparseable verdict after bounded retry | `NONE` | Leave PR open, log error, fail safe without merging. |
 
-#### Scenario 2: GitHub Organization Filter Cycling
-- **Given** the 11-project dashboard with `selected_org = None` (displaying `[All Orgs]`),
-- **When** the operator presses `o` once,
-- **Then** `selected_org` transitions to `Antares1980`, displaying 1 project (`retro-fighter`),
-- **When** the operator presses `o` again,
-- **Then** `selected_org` transitions to `AntaresAndBharani`, displaying 5 projects,
-- **When** the operator presses `o` again,
-- **Then** `selected_org` transitions to `BasketIQ`, displaying 5 projects (`biq-*`),
-- **And** the filter chip displays `(Matched: 5 of 11)`.
+---
 
-#### Scenario 3: Name Substring Search & Priority Key Isolation
-- **Given** the dashboard displaying all 11 projects,
-- **When** the operator presses `/` to focus `#filter_input`,
-- **And** types `"biq rq"`,
-- **Then** `#filter_input.value` equals `"biq rq"`,
-- **And** the application does NOT quit, drain, reload, or toggle auto-scroll,
-- **And** only projects matching substring `"biq rq"` in `project.name` remain visible.
+### 4. Lifecycle & Integration Guards in `orchestrator/nodes/devtest.py`
 
-#### Scenario 4: Compound Filtering & Escape Reset
-- **Given** `selected_org` is set to `AntaresAndBharani` and `filter_text` is `"cross"`,
-- **When** the filter evaluates,
-- **Then** only `crosstrainingapp` is visible and highlighted,
-- **When** the operator presses `Esc`,
-- **Then** `filter_text` is cleared to `""`, `selected_org` is reset to `None`,
-- **And** all 11 projects are immediately restored to `#projects_table`,
-- **And** focus returns to `#projects_table`.
+1. **Phase 2 Non-Terminal Auto-Merge Guard (`devtest.py:1048-1080`)**:
+   - In dual-persona mode (`node_cfg.reviewer.enabled is True`), Phase 2 only auto-merges an open PR if its latest valid marker is `APPROVED` or `CONTINGENCY_COMPLETED`. Active negotiation PRs (`READY_FOR_REVIEW`, `CHANGES_REQUESTED`, `CONTINGENCY_PLAN`) are skipped.
+2. **Phase 3 Duplicate-PR Guard & Dispatcher Routing (`devtest.py:1201-1238`)**:
+   - Instead of aborting with `"Waiting for Phase 2 CI verification"`, an existing open PR with non-terminal negotiation marker is routed directly to `determine_next_action` to run the next required turn.
+3. **Phase 3 Destructive Git Reset Guard (`devtest.py:1339-1345`)**:
+   - Resumed Developer turns fetch and check out `origin/<branch_name>` instead of `origin/main` with `git reset --hard origin/main`, preserving all prior rounds' commits.
+4. **Daemon Tick Scheduling & Quotas**:
+   - Each persona turn executes within a single daemon tick with its own slot acquisition, `lock_ttl` (`devtest.py:1313`), and `check_dispatch_quota` verified against the resolved persona harness.
 
-#### Scenario 5: Zero-Match Safety & Placeholder Hydration
-- **Given** the active dashboard,
-- **When** `#filter_input` receives a search query with 0 matches (e.g., `"nonexistent-xyz"`),
-- **Then** `#projects_table` displays 0 rows without raising `IndexError`,
-- **And** `self.selected_project` is set to `None`,
-- **And** `#sdlc_widget` and `#log_view` display empty-state placeholders `[dim]No projects match active filter[/dim]`.
+---
 
-#### Scenario 6: State Persistence Across 2-Second Polling & Config Hot-Reload
-- **Given** an active filter (`filter_text="biq"`, `selected_org="BasketIQ"`),
-- **When** the 2-second background timer executes `update_projects_table()`,
-- **Or** `_rebind_config()` executes during a hot-reload,
-- **Then** `filter_text` and `selected_org` persist unchanged,
-- **And** the filtered view and cursor selection remain intact without DOM flickering.
+### 5. Acceptance Criteria (Gherkin BDD)
+
+#### Scenario 1: Legacy Compatibility (Reviewer Disabled)
+- **Given** `nodes.devtest.reviewer.enabled` is `false` or omitted in `config.yaml`,
+- **When** `devtest` runs on a `ready-for-dev` issue,
+- **Then** the Developer CLI is invoked in a single pass, opens the PR, and exits;
+- **And** the orchestrator merges the PR via `_verify_and_auto_merge_pr` only after CI is green, byte-for-byte unchanged from legacy behavior.
+
+#### Scenario 2: Agreement Reached Within Max Rounds
+- **Given** `nodes.devtest.reviewer.enabled` is `true` and `max_rounds` is 3,
+- **When** Developer opens PR with `DEVELOPER/READY_FOR_REVIEW round=1`,
+- **And** Reviewer posts `REVIEWER/CHANGES_REQUESTED round=1`,
+- **And** Developer pushes fixes with `DEVELOPER/READY_FOR_REVIEW round=2`,
+- **And** Reviewer posts `REVIEWER/APPROVED round=2`,
+- **Then** the negotiation terminates early at Round 2, Round 3 is not executed,
+- **And** the orchestrator auto-merges the PR via `_verify_and_auto_merge_pr` once CI passes.
+
+#### Scenario 3: Bounded Rounds Exhaustion & Contingency Resolution
+- **Given** `nodes.devtest.reviewer.enabled` is `true` and `max_rounds` is 3,
+- **When** Developer posts `READY_FOR_REVIEW` for Round 1, Round 2, and Round 3,
+- **And** Reviewer requests changes in Rounds 1 and 2,
+- **And** on Round 3 Reviewer posts `status=CONTINGENCY_PLAN` with pragmatic alignment directives,
+- **Then** Developer executes the contingency plan, pushes commits, and posts `DEVELOPER/CONTINGENCY_COMPLETED round=3`,
+- **And** the orchestrator auto-merges the PR via `_verify_and_auto_merge_pr` upon passing CI.
+
+#### Scenario 4: Phase 2 Auto-Merge Skip on Active Non-Terminal Negotiation
+- **Given** dual mode is enabled and an open PR has green CI (`PASS`),
+- **When** the latest PR marker is `DEVELOPER/READY_FOR_REVIEW round=1`,
+- **Then** Phase 2 does NOT auto-merge the PR, allowing the Reviewer persona to evaluate it.
+
+#### Scenario 5: Mid-Loop Restart Resumption
+- **Given** an open PR exists with latest marker `DEVELOPER/READY_FOR_REVIEW round=2` after a daemon restart,
+- **When** `devtest` runs,
+- **Then** the Phase 3 duplicate PR guard routes to the dispatcher without error,
+- **And** the Reviewer persona is dispatched for Round 2 without resetting the branch to `origin/main` or opening a duplicate PR.
+
+#### Scenario 6: Post-Contingency CI Failure Routing
+- **Given** latest marker is `DEVELOPER/CONTINGENCY_COMPLETED`,
+- **When** `_verify_and_auto_merge_pr` checks CI and detects a failure (`FAIL`),
+- **Then** the PR is not merged and the issue is routed to `needs-refactor`.
+
+#### Scenario 7: Full SDLC Side-Effect Execution on Merge
+- **Given** a dual-mode PR reaches `APPROVED` or `CONTINGENCY_COMPLETED` with passing CI,
+- **When** `_verify_and_auto_merge_pr` executes,
+- **Then** `sdlc_items` state is set to `MERGED`, the worktree is cleaned up, the parent feature checklist is advanced, and the next queued child slice is unlocked.
 
 ---
 
 ### 📦 Task Breakdown (Pattern A: Standalone Task)
 
-* **[x] Task 1 (Pure Helpers):** Implement `extract_github_org` and `filter_projects` in `orchestrator/ui/widgets.py` with comprehensive unit tests in `tests/test_widgets.py`.
-* **[x] Task 2 (Layout & Controls):** Add `#filter_bar`, `#filter_input`, and `#filter_chip` to `DashboardApp.compose()`, update CSS to 70/30 height distribution (`#bottom_container { height: 30%; }`).
-* **[x] Task 3 (Key Handling & Focus):** Implement `check_action()` App-level binding suppression for `q`, `r`, `space` while `#filter_input` is focused. Wire `/`, `o`, and `Esc` bindings.
-* **[x] Task 4 (Reactive Polling Integration):** Integrate `filter_projects` into `update_projects_table()` and `_rebind_config()`, handle 0-match empty states, and hydrate detail panes safely.
-* **[x] Task 5 (Test Suite Verification):** Add asynchronous Textual `App.run_test()` scenarios in `tests/test_dashboard.py` validating all 6 BDD scenarios and regression safety.
+* **[ ] Task 1 (Config Schema & Validation):** Define `DevTestReviewerConfig(OrchestratorBaseModel)` with `max_rounds: int = Field(default=3, ge=1)`, attach to `NodeConfig` with null coercion validator, add `model_rebuild()`, helper `resolve_reviewer_config()`, and update `templates/config.example.yaml`.
+* **[ ] Task 2 (Pure Turn Dispatcher & Parser):** Implement `determine_next_action(pr_comments, max_rounds=3)` and marker parser in `orchestrator/nodes/devtest.py` covering all transition table rows, comment filtering, and 0-marker recovery.
+* **[ ] Task 3 (Lifecycle Guards & Turn Execution):** Update `run_devtest_node` Phase 2 non-terminal PR skip, Phase 3 duplicate PR routing to dispatcher, `origin/<branch>` non-destructive checkout, and persona turn invocation per daemon tick.
+* **[ ] Task 4 (Verification & Test Suite):** Add comprehensive unit and integration tests in `tests/test_devtest_dual_persona.py` validating all 7 Gherkin scenarios, state transitions, and backwards compatibility.

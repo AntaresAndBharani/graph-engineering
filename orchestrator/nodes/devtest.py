@@ -7,11 +7,18 @@ import os
 import re
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from rich.console import Console
 
-from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
+from orchestrator.config import (
+    DevTestReviewerConfig,
+    GlobalConfig,
+    NodeConfig,
+    ProjectConfig,
+    resolve_reviewer_config,
+)
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
 from orchestrator.logging import (
@@ -26,6 +33,319 @@ from orchestrator.worktree import WorktreeManager, clean_worktree
 
 _logger = logging.getLogger(__name__)
 console = Console()
+
+
+@dataclass
+class DevTestTurnMarker:
+    persona: str  # DEVELOPER or REVIEWER
+    round: int
+    status: str   # READY_FOR_REVIEW, CHANGES_REQUESTED, APPROVED, CONTINGENCY_PLAN, CONTINGENCY_COMPLETED
+
+
+class ActionType(str):
+    """String subclass matching both action codes (e.g. 'REVIEW') and descriptive text."""
+    def __new__(cls, code: str, description: str = ""):
+        s = super().__new__(cls, code)
+        s.code = code
+        s.description = description
+        return s
+
+    def __eq__(self, other: Any) -> bool:
+        if super().__eq__(other):
+            return True
+        if isinstance(other, str):
+            if other.lower() in self.description.lower() or self.code.lower() in other.lower():
+                return True
+        return False
+
+
+@dataclass
+class DevTestAction:
+    next_persona: str  # "DEVELOPER", "REVIEWER", "ORCHESTRATOR", "NONE"
+    action: str        # ActionType or str
+    round: int
+    marker: Optional[DevTestTurnMarker] = None
+    details: str = ""
+
+
+TURN_MARKER_REGEX = re.compile(
+    r"<!--\s*DEVTEST_TURN:\s*persona=(?P<persona>[A-Za-z_]+)\s+round=(?P<round>\d+)\s+status=(?P<status>[A-Za-z_]+)\s*-->",
+    re.IGNORECASE,
+)
+
+
+def format_turn_marker(persona: str, round_num: int, status: str) -> str:
+    """Formats a validated turn marker string for PR comments."""
+    return f"<!-- DEVTEST_TURN: persona={persona.upper()} round={round_num} status={status.upper()} -->"
+
+
+def parse_turn_marker(text: str) -> Optional[DevTestTurnMarker]:
+    """Parses a turn marker from comment body text, validating persona, round, and status."""
+    if not text:
+        return None
+    match = TURN_MARKER_REGEX.search(text)
+    if not match:
+        return None
+    persona = match.group("persona").upper()
+    status = match.group("status").upper()
+    try:
+        round_num = int(match.group("round"))
+    except (ValueError, TypeError):
+        return None
+
+    if persona not in ("DEVELOPER", "REVIEWER"):
+        return None
+    if status not in ("READY_FOR_REVIEW", "CHANGES_REQUESTED", "APPROVED", "CONTINGENCY_PLAN", "CONTINGENCY_COMPLETED"):
+        return None
+    if round_num < 1:
+        return None
+
+    return DevTestTurnMarker(persona=persona, round=round_num, status=status)
+
+
+def determine_next_action(
+    pr_comments: Optional[List[Any]],
+    max_rounds: int = 3,
+    pr_state: Optional[str] = None,
+) -> DevTestAction:
+    """
+    Scans PR comments from newest to oldest for the last valid DEVTEST_TURN marker,
+    filtering out non-marker bot/user comments, and returns the next action.
+    """
+    if pr_state and pr_state.upper() in ("MERGED", "CLOSED"):
+        return DevTestAction(
+            next_persona="NONE",
+            action=ActionType("TERMINAL_NOOP", "No-op terminal state."),
+            round=0,
+            details=f"PR is already {pr_state.upper()}",
+        )
+
+    if pr_comments is None:
+        return DevTestAction(
+            next_persona="DEVELOPER",
+            action=ActionType(
+                "INITIAL_IMPLEMENTATION",
+                "Round 1 initial implementation. Open PR and post persona=DEVELOPER round=1 status=READY_FOR_REVIEW.",
+            ),
+            round=1,
+            details="No PR exists yet",
+        )
+
+    # Scan from newest to oldest
+    latest_marker: Optional[DevTestTurnMarker] = None
+    has_unparseable_turn = False
+
+    for comment in reversed(pr_comments):
+        body = ""
+        if isinstance(comment, dict):
+            body = comment.get("body", "") or ""
+            c_state = comment.get("state")
+            if c_state and str(c_state).upper() in ("MERGED", "CLOSED"):
+                return DevTestAction(
+                    next_persona="NONE",
+                    action=ActionType("TERMINAL_NOOP", "No-op terminal state."),
+                    round=0,
+                    details=f"PR is already {str(c_state).upper()}",
+                )
+        elif hasattr(comment, "body"):
+            body = getattr(comment, "body", "") or ""
+        elif isinstance(comment, str):
+            body = comment
+
+        if "DEVTEST_TURN" not in body:
+            continue
+
+        marker = parse_turn_marker(body)
+        if marker is not None:
+            latest_marker = marker
+            break
+        else:
+            has_unparseable_turn = True
+            break
+
+    if has_unparseable_turn:
+        return DevTestAction(
+            next_persona="NONE",
+            action=ActionType("FAIL_SAFE", "Leave PR open, log error, fail safe without merging."),
+            round=0,
+            details="Invalid / unparseable verdict after bounded retry",
+        )
+
+    if latest_marker is None:
+        return DevTestAction(
+            next_persona="DEVELOPER",
+            action=ActionType(
+                "RECOVERY",
+                "Treat as Round 1 recovery: verify PR branch and post persona=DEVELOPER round=1 status=READY_FOR_REVIEW.",
+            ),
+            round=1,
+            details="PR exists with no valid marker",
+        )
+
+    m = latest_marker
+    if m.persona == "DEVELOPER":
+        if m.status == "READY_FOR_REVIEW":
+            return DevTestAction(
+                next_persona="REVIEWER",
+                action=ActionType(
+                    "REVIEW",
+                    "Evaluate PR diff against issue. If R < max_rounds, post APPROVED or CHANGES_REQUESTED. If R >= max_rounds, post APPROVED or CONTINGENCY_PLAN.",
+                ),
+                round=m.round,
+                marker=m,
+            )
+        elif m.status == "CONTINGENCY_COMPLETED":
+            return DevTestAction(
+                next_persona="ORCHESTRATOR",
+                action=ActionType(
+                    "AUTO_MERGE",
+                    "Hand off to _verify_and_auto_merge_pr (idempotent merge gate). If CI fails, route to needs-refactor.",
+                ),
+                round=m.round,
+                marker=m,
+            )
+        else:
+            return DevTestAction(
+                next_persona="NONE",
+                action=ActionType("FAIL_SAFE", "Leave PR open, log error, fail safe without merging."),
+                round=m.round,
+                marker=m,
+                details=f"Unexpected status for DEVELOPER: {m.status}",
+            )
+
+    elif m.persona == "REVIEWER":
+        if m.status == "APPROVED":
+            return DevTestAction(
+                next_persona="ORCHESTRATOR",
+                action=ActionType(
+                    "AUTO_MERGE",
+                    "Hand off to _verify_and_auto_merge_pr for CI status check, merge, parent subtask progression, and slot release.",
+                ),
+                round=m.round,
+                marker=m,
+            )
+        elif m.status == "CHANGES_REQUESTED":
+            if m.round < max_rounds:
+                return DevTestAction(
+                    next_persona="DEVELOPER",
+                    action=ActionType(
+                        "REVISE",
+                        "Address reviewer feedback in worktree, push commit to PR branch, and post persona=DEVELOPER round=R+1 status=READY_FOR_REVIEW.",
+                    ),
+                    round=m.round + 1,
+                    marker=m,
+                )
+            else:
+                return DevTestAction(
+                    next_persona="NONE",
+                    action=ActionType("FAIL_SAFE", "Leave PR open, log error, fail safe without merging."),
+                    round=m.round,
+                    marker=m,
+                    details="Max rounds reached with CHANGES_REQUESTED instead of CONTINGENCY_PLAN",
+                )
+        elif m.status == "CONTINGENCY_PLAN":
+            return DevTestAction(
+                next_persona="DEVELOPER",
+                action=ActionType(
+                    "APPLY_CONTINGENCY",
+                    "Apply reviewer contingency directives, ensure local tests pass, push commit, and post persona=DEVELOPER round=max_rounds status=CONTINGENCY_COMPLETED.",
+                ),
+                round=m.round,
+                marker=m,
+            )
+        else:
+            return DevTestAction(
+                next_persona="NONE",
+                action=ActionType("FAIL_SAFE", "Leave PR open, log error, fail safe without merging."),
+                round=m.round,
+                marker=m,
+                details=f"Unexpected status for REVIEWER: {m.status}",
+            )
+
+    return DevTestAction(
+        next_persona="NONE",
+        action=ActionType("FAIL_SAFE", "Leave PR open, log error, fail safe without merging."),
+        round=0,
+        marker=m,
+    )
+
+
+async def fetch_pr_comments(repo: str, pr_number: int) -> List[Dict[str, Any]]:
+    """Fetches comments for a PR using gh pr view."""
+    if not shutil.which("gh"):
+        return []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "view", str(pr_number),
+            "--repo", repo,
+            "--json", "comments,state",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        if proc.returncode == 0 and stdout:
+            data = json.loads(stdout.decode("utf-8", errors="replace"))
+            return data.get("comments", [])
+    except Exception as e:
+        _logger.debug("fetch_pr_comments error for PR #%s: %s", pr_number, e)
+    return []
+
+
+async def post_pr_turn_comment(
+    repo: str,
+    pr_number: int,
+    persona: str,
+    round_num: int,
+    status: str,
+    body: str,
+) -> bool:
+    """Posts a PR comment with a validated DEVTEST_TURN marker header."""
+    marker = format_turn_marker(persona, round_num, status)
+    full_body = f"{marker}\n\n{body.strip()}"
+    if not shutil.which("gh"):
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "comment", str(pr_number),
+            "--repo", repo,
+            "--body", full_body,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        return proc.returncode == 0
+    except Exception as e:
+        _logger.debug("post_pr_turn_comment failed for PR #%s: %s", pr_number, e)
+        return False
+
+
+def parse_reviewer_verdict(output: str, current_round: int, max_rounds: int) -> tuple[str, str]:
+    """
+    Parses Reviewer CLI output for a verdict: APPROVED, CHANGES_REQUESTED, or CONTINGENCY_PLAN.
+    Returns (verdict, review_text).
+    """
+    m = re.search(r"\bVERDICT:\s*([A-Za-z_]+)\b", output, re.IGNORECASE)
+    verdict = ""
+    if m:
+        verdict = m.group(1).upper()
+    else:
+        if "APPROVED" in output.upper() and "CHANGES_REQUESTED" not in output.upper():
+            verdict = "APPROVED"
+        elif "CONTINGENCY_PLAN" in output.upper():
+            verdict = "CONTINGENCY_PLAN"
+        elif "CHANGES_REQUESTED" in output.upper():
+            verdict = "CHANGES_REQUESTED"
+
+    if current_round >= max_rounds and verdict == "CHANGES_REQUESTED":
+        verdict = "CONTINGENCY_PLAN"
+
+    if verdict not in ("APPROVED", "CHANGES_REQUESTED", "CONTINGENCY_PLAN"):
+        verdict = "CHANGES_REQUESTED" if current_round < max_rounds else "CONTINGENCY_PLAN"
+
+    return verdict, output
+
 
 
 async def verify_git_safety(local_path: Path, expected_repo: str) -> tuple[bool, str]:
@@ -992,6 +1312,171 @@ async def _extract_issue_from_pr(repo: str, pr: Dict[str, Any]) -> tuple[Optiona
     return None, title
 
 
+async def _execute_reviewer_turn(
+    project: ProjectConfig,
+    config: GlobalConfig,
+    state_manager: StateManager,
+    node_cfg: NodeConfig,
+    target_issue: Dict[str, Any],
+    pr_number: int,
+    round_num: int,
+    max_rounds: int,
+    branch_prefix: str,
+) -> tuple[bool, str]:
+    """Executes a single Reviewer persona turn within the current daemon tick."""
+    issue_id = target_issue.get("number", 0)
+    issue_title = target_issue.get("title", "")
+    trigger = node_cfg.label_trigger or "ready-for-dev"
+    output_label = node_cfg.label_output or "dev-implemented"
+
+    resolved_reviewer = resolve_reviewer_config(node_cfg)
+    harness_name = resolved_reviewer.harness or node_cfg.harness or "claude"
+
+    # 1. Quota check against resolved reviewer harness
+    allowed, q_res = await check_dispatch_quota(project, "devtest", config, state_manager, harness_name=harness_name)
+    if not allowed:
+        return False, f"Quota throttled for reviewer harness '{q_res.harness_name}'. Dispatch deferred (Renewal in {q_res.formatted_eta})."
+
+    # 2. Acquire slot & lock
+    max_dev_projects = getattr(getattr(config, "settings", None), "max_concurrent_developing_projects", 2)
+    acquired, active_slots = await state_manager.acquire_development_slot(
+        project.name, project.repo, max_slots=max_dev_projects
+    )
+    if not acquired:
+        return False, f"Development concurrency limit reached ({len(active_slots)}/{max_dev_projects} active). Project '{project.name}' deferred."
+
+    lock_acquired = await state_manager.acquire_lock(
+        issue_id=issue_id,
+        repo=project.repo,
+        node_type="devtest",
+        ttl_seconds=getattr(node_cfg, "lock_ttl", 3600),
+    )
+    if not lock_acquired:
+        await _release_slot_if_idle(project, state_manager)
+        return False, f"Issue #{issue_id} is currently locked by another active run. Skipping."
+
+    console.print(f"\n  [bold magenta]🔍 [{project.name}:devtest-reviewer][/bold magenta] [bold white]Reviewing PR #{pr_number} (Round {round_num}/{max_rounds}) for Subtask #{issue_id}:[/bold white] [cyan]'{issue_title}'[/cyan]")
+
+    exec_cwd = await WorktreeManager.ensure_worktree(project, "devtest")
+    branch_name = f"{branch_prefix}{issue_id}"
+
+    # Fetch and checkout PR branch non-destructively
+    try:
+        await (await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, f"origin/{branch_name}", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", f"origin/{branch_name}", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+    except Exception as e:
+        _logger.debug("Reviewer branch checkout warning: %s", e)
+
+    # 3. Construct Reviewer prompt
+    context_note = ""
+    if project.context_files:
+        files_str = ", ".join(project.context_files)
+        context_note = (
+            f"Read the methodology and architecture files listed in: {files_str}.\n"
+            f"Audit the code strictly adhering to those local repository standards.\n"
+        )
+
+    issue_body_text = target_issue.get("body", "").strip()
+
+    if round_num < max_rounds:
+        verdict_guidelines = (
+            f"You MUST conclude your review with exactly one of the following verdicts on its own line:\n"
+            f"VERDICT: APPROVED\n"
+            f"or\n"
+            f"VERDICT: CHANGES_REQUESTED\n\n"
+            f"Provide concrete, actionable technical feedback if changes are requested."
+        )
+    else:
+        verdict_guidelines = (
+            f"Round {round_num} is the FINAL negotiation round (max_rounds={max_rounds}).\n"
+            f"You MUST conclude your review with exactly one of the following verdicts on its own line:\n"
+            f"VERDICT: APPROVED\n"
+            f"or\n"
+            f"VERDICT: CONTINGENCY_PLAN\n\n"
+            f"If not approved, you MUST formulate pragmatic, unambiguous alignment directives that the Developer can immediately execute."
+        )
+
+    prompt = (
+        f"You are the 3-Amigos Reviewer & Quality Guardian operating autonomously in non-interactive batch mode.\n"
+        f"Evaluate the Pull Request #{pr_number} on branch '{branch_name}' implementing Issue #{issue_id} ('{issue_title}') in repository '{project.repo}'.\n"
+        f"IMPORTANT: The current target repository is '{project.repo}'.\n\n"
+        f"ISSUE SPECIFICATION:\n{issue_body_text}\n\n"
+        f"{context_note}\n"
+        f"REVIEW INSTRUCTIONS:\n"
+        f"1. Inspect the implementation changes on branch '{branch_name}' (e.g. `git diff origin/main..HEAD`).\n"
+        f"2. Verify that all Gherkin acceptance criteria in Issue #{issue_id} are satisfied.\n"
+        f"3. Verify that unit and component tests exist and pass cleanly (`pytest -v` or appropriate runner).\n"
+        f"4. Verify that code changes follow the repository architecture standards.\n\n"
+        f"{verdict_guidelines}\n"
+    )
+
+    log_file = get_project_log_path(
+        config.settings.resolved_log_dir,
+        project.name,
+        "devtest-reviewer",
+        issue_id=issue_id,
+    )
+    harness_cfg = config.get_harness(harness_name)
+    adapter = AsyncHarnessAdapter(
+        harness_name,
+        harness_cfg,
+        state_manager=state_manager,
+        project_name=project.name,
+        node_name="devtest",
+        issue_number=issue_id,
+    )
+    exit_code = await adapter.execute(
+        prompt=prompt,
+        cwd=exec_cwd,
+        log_file=log_file,
+        model=resolved_reviewer.model,
+        effort=resolved_reviewer.effort,
+        console_prefix=f"[{project.name}:devtest-reviewer]",
+    )
+
+    review_text = ""
+    if log_file.exists():
+        try:
+            review_text = log_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    verdict, _ = parse_reviewer_verdict(review_text, round_num, max_rounds)
+    if exit_code != 0 and not verdict:
+        verdict = "CHANGES_REQUESTED" if round_num < max_rounds else "CONTINGENCY_PLAN"
+
+    comment_body = f"### 🔍 Reviewer Feedback (Round {round_num}/{max_rounds})\n\n**Verdict:** `{verdict}`\n\n"
+    if review_text:
+        lines = review_text.strip().splitlines()
+        summary_lines = lines[-50:] if len(lines) > 50 else lines
+        comment_body += "\n".join(summary_lines)
+    else:
+        comment_body += f"Review completed with verdict `{verdict}`."
+
+    await post_pr_turn_comment(project.repo, pr_number, "REVIEWER", round_num, verdict, comment_body)
+
+    if verdict == "APPROVED":
+        ci_status, _ = await check_pr_ci_status(project.repo, pr_number)
+        if ci_status == "PASS":
+            ran, msg = await _verify_and_auto_merge_pr(
+                project=project,
+                state_manager=state_manager,
+                pr_number=pr_number,
+                issue_id=issue_id,
+                issue_title=issue_title,
+                trigger_label=trigger,
+                auto_merge_approved=True,
+                default_output_label=output_label,
+            )
+            await state_manager.release_lock(issue_id, project.repo, "devtest")
+            return ran, msg
+
+    await state_manager.release_lock(issue_id, project.repo, "devtest")
+    await _release_slot_if_idle(project, state_manager)
+    return True, f"Reviewer round {round_num} completed with verdict: {verdict}"
+
+
 async def run_devtest_node(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -1068,6 +1553,19 @@ async def run_devtest_node(
         if ci_status == "PASS":
             issue_id, issue_title = await _extract_issue_from_pr(project.repo, pr)
             target_issue_id = issue_id or pr_number
+
+            # Phase 2 Non-Terminal Auto-Merge Guard
+            reviewer_cfg = getattr(node_cfg, "reviewer", None)
+            if reviewer_cfg and reviewer_cfg.enabled:
+                pr_comments = await fetch_pr_comments(project.repo, pr_number)
+                next_action = determine_next_action(pr_comments, max_rounds=reviewer_cfg.max_rounds)
+                if next_action.next_persona != "ORCHESTRATOR":
+                    _logger.info(
+                        "[%s:devtest] Skipping Phase 2 auto-merge for PR #%d: active negotiation turn %s (%s).",
+                        project.name, pr_number, next_action.next_persona, next_action.action
+                    )
+                    continue
+
             return await _verify_and_auto_merge_pr(
                 project=project,
                 state_manager=state_manager,
@@ -1215,27 +1713,58 @@ async def run_devtest_node(
                 existing_pr = pr.get("number")
                 break
 
+    is_resumed_developer_turn = False
+    resumed_developer_action: Optional[DevTestAction] = None
+
     if existing_pr:
-        _logger.info(
-            "[%s:devtest] Subtask #%d already has open PR #%s (or linked_pr in sdlc_items). Waiting for Phase 2 CI verification.",
-            project.name,
-            issue_id,
-            existing_pr,
-        )
-        console.print(
-            f"  [bold cyan][{project.name}:devtest][/bold cyan] [bold yellow]⏸ Subtask #{issue_id} already has open PR #{existing_pr} (linked_pr). Waiting for Phase 2 CI verification.[/bold yellow]"
-        )
-        if not existing_item.get("linked_pr"):
-            await state_manager.sync_project_sdlc_items(
-                project.name,
-                [{
-                    "issue_number": issue_id,
-                    "title": issue_title,
-                    "state": "IN_PROGRESS",
-                    "linked_pr": int(existing_pr),
-                }],
+        reviewer_cfg = getattr(node_cfg, "reviewer", None)
+        if reviewer_cfg and reviewer_cfg.enabled:
+            pr_comments = await fetch_pr_comments(project.repo, int(existing_pr))
+            next_action = determine_next_action(pr_comments, max_rounds=reviewer_cfg.max_rounds)
+            _logger.info(
+                "[%s:devtest] Subtask #%d has open PR #%s, dual-persona next action: %s (round %d)",
+                project.name, issue_id, existing_pr, next_action.next_persona, next_action.round
             )
-        return False, f"Subtask #{issue_id} already has open PR #{existing_pr} (linked_pr). Waiting for Phase 2 CI verification."
+            if next_action.next_persona == "ORCHESTRATOR":
+                return False, f"Subtask #{issue_id} PR #{existing_pr} negotiation completed ({next_action.action}). Waiting for Phase 2 CI verification."
+            elif next_action.next_persona == "NONE":
+                return False, f"Subtask #{issue_id} PR #{existing_pr} terminal/fail-safe state ({next_action.action})."
+            elif next_action.next_persona == "REVIEWER":
+                return await _execute_reviewer_turn(
+                    project=project,
+                    config=config,
+                    state_manager=state_manager,
+                    node_cfg=node_cfg,
+                    target_issue=target_issue,
+                    pr_number=int(existing_pr),
+                    round_num=next_action.round,
+                    max_rounds=reviewer_cfg.max_rounds,
+                    branch_prefix=branch_prefix,
+                )
+            elif next_action.next_persona == "DEVELOPER":
+                is_resumed_developer_turn = True
+                resumed_developer_action = next_action
+        else:
+            _logger.info(
+                "[%s:devtest] Subtask #%d already has open PR #%s (or linked_pr in sdlc_items). Waiting for Phase 2 CI verification.",
+                project.name,
+                issue_id,
+                existing_pr,
+            )
+            console.print(
+                f"  [bold cyan][{project.name}:devtest][/bold cyan] [bold yellow]⏸ Subtask #{issue_id} already has open PR #{existing_pr} (linked_pr). Waiting for Phase 2 CI verification.[/bold yellow]"
+            )
+            if not existing_item.get("linked_pr"):
+                await state_manager.sync_project_sdlc_items(
+                    project.name,
+                    [{
+                        "issue_number": issue_id,
+                        "title": issue_title,
+                        "state": "IN_PROGRESS",
+                        "linked_pr": int(existing_pr),
+                    }],
+                )
+            return False, f"Subtask #{issue_id} already has open PR #{existing_pr} (linked_pr). Waiting for Phase 2 CI verification."
 
     # Ensure issue is active with trigger label on GitHub if it was queued
     curr_labels = [
@@ -1339,9 +1868,14 @@ async def run_devtest_node(
     try:
         await (await asyncio.create_subprocess_exec("git", "reset", "--hard", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
         await (await asyncio.create_subprocess_exec("git", "clean", "-fd", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
-        await (await asyncio.create_subprocess_exec("git", "fetch", "origin", "main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
-        await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, "origin/main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
-        await (await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        if is_resumed_developer_turn:
+            await (await asyncio.create_subprocess_exec("git", "fetch", "origin", branch_name, cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+            await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, f"origin/{branch_name}", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+            await (await asyncio.create_subprocess_exec("git", "reset", "--hard", f"origin/{branch_name}", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+        else:
+            await (await asyncio.create_subprocess_exec("git", "fetch", "origin", "main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+            await (await asyncio.create_subprocess_exec("git", "checkout", "-B", branch_name, "origin/main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
+            await (await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=str(exec_cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)).wait()
     except Exception as e:
         await state_manager.fail_job(
             issue_id=issue_id,
@@ -1384,20 +1918,55 @@ async def run_devtest_node(
     else:
         issue_body_section = f"\nISSUE SPECIFICATION:\n{issue_body_text}\n" if issue_body_text else ""
 
+    resumed_directive = ""
+    if is_resumed_developer_turn and resumed_developer_action:
+        round_num = resumed_developer_action.round
+        if resumed_developer_action.action == "APPLY_CONTINGENCY":
+            resumed_directive = (
+                f"\nCONTINGENCY RESOLUTION DIRECTIVES (Round {round_num}):\n"
+                f"The Reviewer has issued a CONTINGENCY PLAN for PR #{existing_pr}.\n"
+                f"You MUST strictly follow and apply the reviewer's contingency directives.\n"
+                f"Verify that local unit tests pass cleanly, commit your changes, and push to origin {branch_name}.\n"
+                f"Do NOT open a new Pull Request: PR #{existing_pr} is already open.\n"
+            )
+        else:
+            resumed_directive = (
+                f"\nREVIEWER FEEDBACK REMEDIATION (Round {round_num}):\n"
+                f"The Reviewer has requested changes on PR #{existing_pr}.\n"
+                f"Inspect the PR review comments, remediate all reported issues, ensure local unit tests pass, and push to origin {branch_name}.\n"
+                f"Do NOT open a new Pull Request: PR #{existing_pr} is already open.\n"
+            )
+
+    if is_resumed_developer_turn:
+        operational_steps = (
+            f"OPERATIONAL STEPS:\n"
+            f"1. Review the feedback and requirements.\n"
+            f"2. Implement the required fixes in the existing branch.\n"
+            f"3. Run local unit/component tests to ensure 100% passing suite.\n"
+            f"4. Commit all modified files (`git status --porcelain` must be empty).\n"
+            f"5. Push your branch ('{branch_name}') to `origin {branch_name}`.\n"
+            f"6. Do NOT open a new Pull Request: PR #{existing_pr} is already open.\n"
+        )
+    else:
+        operational_steps = (
+            f"OPERATIONAL STEPS:\n"
+            f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
+            f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
+            f"3. Implement the minimal clean code required to make all tests pass.\n"
+            f"4. Verify that the entire test suite and linter pass cleanly.\n"
+            f"5. Check that all changes are committed: run `git status` and verify that 100% of modified, added, and untracked files are staged and committed (`git status --porcelain` must be completely empty). Never open a Pull Request with uncommitted or untracked changes.\n"
+            f"6. Push your branch ('{branch_name}') to `origin {branch_name}`.\n"
+            f"7. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n"
+        )
+
     prompt = (
         f"You are the 3-Amigos Developer & QA Engineer operating autonomously in non-interactive batch mode.\n"
         f"Implement the technical requirements for Issue #{issue_id} ('{issue_title}') in repository '{project.repo}'.\n"
         f"IMPORTANT: The current target repository is '{project.repo}'. Do not query, inspect, or operate on other repositories.\n\n"
         f"{issue_body_section}\n"
+        f"{resumed_directive}\n"
         f"{context_note}"
-        f"OPERATIONAL STEPS:\n"
-        f"1. Read the Gherkin acceptance criteria in Issue #{issue_id} and local context files.\n"
-        f"2. Write comprehensive unit and integration tests covering all Given/When/Then scenarios.\n"
-        f"3. Implement the minimal clean code required to make all tests pass.\n"
-        f"4. Verify that the entire test suite and linter pass cleanly.\n"
-        f"5. Check that all changes are committed: run `git status` and verify that 100% of modified, added, and untracked files are staged and committed (`git status --porcelain` must be completely empty). Never open a Pull Request with uncommitted or untracked changes.\n"
-        f"6. Push your branch ('{branch_name}') to `origin {branch_name}`.\n"
-        f"7. Open a Pull Request using `gh pr create --repo {project.repo} --title '<title>' --body 'Closes #{issue_id}'`.\n\n"
+        f"{operational_steps}\n"
         f"SPEED & LIFECYCLE DIRECTIVES:\n"
         f"- Run EVERY command (tests, linters, git, gh) in the FOREGROUND and block until it finishes. NEVER start a command in the background and then wait for it: in batch mode the session exits as soon as the agent is idle, killing background tasks and discarding the run.\n"
         f"- Fast local verification only: run local unit/component tests (e.g. pytest, npm test, ./gradlew testDebugUnitTest).\n"
@@ -1548,6 +2117,58 @@ async def run_devtest_node(
                 )).wait()
                 await (await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(exec_cwd))).wait()
 
+        reviewer_cfg = getattr(node_cfg, "reviewer", None)
+        if reviewer_cfg and reviewer_cfg.enabled:
+            if is_resumed_developer_turn and resumed_developer_action:
+                round_num = resumed_developer_action.round
+                if resumed_developer_action.action == "APPLY_CONTINGENCY":
+                    await post_pr_turn_comment(
+                        project.repo, pr_num, "DEVELOPER", round_num, "CONTINGENCY_COMPLETED", "Contingency plan implemented and verified."
+                    )
+                    ran, msg = await _verify_and_auto_merge_pr(
+                        project=project,
+                        state_manager=state_manager,
+                        pr_number=pr_num,
+                        issue_id=issue_id,
+                        issue_title=issue_title,
+                        trigger_label=trigger,
+                        auto_merge_approved=getattr(node_cfg, "auto_merge_approved", True),
+                        default_output_label=output_label,
+                    )
+                    await state_manager.release_lock(issue_id, project.repo, "devtest")
+                    return ran, msg
+                elif resumed_developer_action.action == "REVISE":
+                    await post_pr_turn_comment(
+                        project.repo, pr_num, "DEVELOPER", round_num, "READY_FOR_REVIEW", f"Addressed reviewer feedback for Round {round_num}."
+                    )
+                    await state_manager.release_lock(issue_id, project.repo, "devtest")
+                    await _release_slot_if_idle(project, state_manager)
+                    return True, f"DevTest subtask #{issue_id} updated PR #{pr_num} for Round {round_num} (ready for review)."
+                else:  # RECOVERY
+                    await post_pr_turn_comment(
+                        project.repo, pr_num, "DEVELOPER", 1, "READY_FOR_REVIEW", "Round 1 recovery verified."
+                    )
+                    await state_manager.release_lock(issue_id, project.repo, "devtest")
+                    await _release_slot_if_idle(project, state_manager)
+                    return True, f"DevTest subtask #{issue_id} recovered PR #{pr_num} for Round 1 (ready for review)."
+            else:
+                await post_pr_turn_comment(
+                    project.repo, pr_num, "DEVELOPER", 1, "READY_FOR_REVIEW", "Initial implementation ready for review."
+                )
+                await state_manager.sync_project_sdlc_items(
+                    project.name,
+                    [{
+                        "issue_number": issue_id,
+                        "title": issue_title,
+                        "state": "IN_PROGRESS",
+                        "labels": ["dev-implemented"],
+                        "linked_pr": pr_num,
+                    }],
+                )
+                await state_manager.release_lock(issue_id, project.repo, "devtest")
+                await _release_slot_if_idle(project, state_manager)
+                return True, f"DevTest subtask #{issue_id} implemented and opened PR #{pr_num} (Round 1 ready for review)."
+
         ran, msg = await _verify_and_auto_merge_pr(
             project=project,
             state_manager=state_manager,
@@ -1635,6 +2256,25 @@ async def run_devtest_node(
         return False, f"Git / PR creation failed: {e}"
 
     if created_pr_num:
+        reviewer_cfg = getattr(node_cfg, "reviewer", None)
+        if reviewer_cfg and reviewer_cfg.enabled:
+            await post_pr_turn_comment(
+                project.repo, created_pr_num, "DEVELOPER", 1, "READY_FOR_REVIEW", "Initial implementation ready for review."
+            )
+            await state_manager.sync_project_sdlc_items(
+                project.name,
+                [{
+                    "issue_number": issue_id,
+                    "title": issue_title,
+                    "state": "IN_PROGRESS",
+                    "labels": ["dev-implemented"],
+                    "linked_pr": created_pr_num,
+                }],
+            )
+            await state_manager.release_lock(issue_id, project.repo, "devtest")
+            await _release_slot_if_idle(project, state_manager)
+            return True, f"DevTest subtask #{issue_id} implemented and opened PR #{created_pr_num} (Round 1 ready for review)."
+
         ran, msg = await _verify_and_auto_merge_pr(
             project=project,
             state_manager=state_manager,
