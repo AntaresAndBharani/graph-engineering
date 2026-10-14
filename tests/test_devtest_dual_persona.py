@@ -625,3 +625,57 @@ async def test_scenario_7_full_sdlc_side_effects_on_merge(test_setup, monkeypatc
             items = await state_manager.get_sdlc_items(project.name)
             item_11 = next(it for it in items if it["issue_number"] == 11)
             assert item_11["state"] == "MERGED"
+
+
+@pytest.mark.asyncio
+async def test_execute_reviewer_turn_lock_acquisition(test_setup, monkeypatch):
+    """
+    Verifies that _execute_reviewer_turn acquires a lock using valid ttl_minutes and config.harnesses.
+    """
+    project, config, state_manager, tmp_path = test_setup
+    await state_manager.init_db()
+
+    node_cfg = NodeConfig(
+        harness="claude",
+        reviewer=DevTestReviewerConfig(enabled=True, harness="claude", max_rounds=3),
+    )
+    project.nodes["devtest"] = node_cfg
+
+    mock_issue = {"number": 41, "title": "Test Issue", "body": "Gherkin"}
+
+    acquire_lock_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(state_manager, "acquire_lock", acquire_lock_mock)
+    monkeypatch.setattr(state_manager, "acquire_development_slot", AsyncMock(return_value=(True, [])))
+    monkeypatch.setattr(state_manager, "release_lock", AsyncMock())
+    monkeypatch.setattr(devtest, "check_dispatch_quota", AsyncMock(return_value=(True, MagicMock(harness_name="claude"))))
+    monkeypatch.setattr(devtest.WorktreeManager, "ensure_worktree", AsyncMock(return_value=tmp_path))
+    monkeypatch.setattr(devtest.AsyncHarnessAdapter, "execute", AsyncMock(return_value=0))
+    monkeypatch.setattr(devtest, "post_pr_turn_comment", AsyncMock())
+    monkeypatch.setattr(devtest, "check_pr_ci_status", AsyncMock(return_value=("PASS", "All green")))
+    monkeypatch.setattr(devtest, "_verify_and_auto_merge_pr", AsyncMock(return_value=(True, "Merged")))
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.wait = AsyncMock(return_value=0)
+        mock_exec.return_value = mock_proc
+
+        ran, msg = await devtest._execute_reviewer_turn(
+            project=project,
+            config=config,
+            state_manager=state_manager,
+            node_cfg=node_cfg,
+            target_issue=mock_issue,
+            pr_number=42,
+            round_num=1,
+            max_rounds=3,
+            branch_prefix="feat/issue-",
+        )
+
+        assert acquire_lock_mock.called
+        kwargs = acquire_lock_mock.call_args.kwargs
+        assert "ttl_minutes" in kwargs
+        assert "ttl_seconds" not in kwargs
+        assert kwargs["issue_id"] == 41
+        assert kwargs["node_type"] == "devtest"
+
