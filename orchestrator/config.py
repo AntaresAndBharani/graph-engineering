@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -47,6 +47,14 @@ class LabelConfig(OrchestratorBaseModel):
     description: str = ""
 
 
+class DevTestReviewerConfig(OrchestratorBaseModel):
+    enabled: bool = False
+    harness: Optional[str] = None  # Falls back to devtest.harness
+    model: Optional[str] = None    # Falls back to devtest.model
+    effort: Optional[str] = None   # Falls back to devtest.effort
+    max_rounds: int = Field(default=3, ge=1)
+
+
 class NodeConfig(OrchestratorBaseModel):
     enabled: bool = True
     harness: str = "claude"
@@ -69,6 +77,12 @@ class NodeConfig(OrchestratorBaseModel):
     conflict_effort: Optional[str] = None
     lookahead_backoff_seconds: int = Field(default=1200, ge=0)
     interval_seconds: Optional[int] = None
+    reviewer: DevTestReviewerConfig = Field(default_factory=DevTestReviewerConfig)
+
+    @field_validator("reviewer", mode="before")
+    @classmethod
+    def _coerce_none_reviewer(cls, v: Any) -> Any:
+        return DevTestReviewerConfig() if v is None else v
 
 
 class TechDebtConfig(OrchestratorBaseModel):
@@ -380,7 +394,20 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
     return GlobalConfig(**raw_data)
 
 
+def resolve_reviewer_config(node_cfg: NodeConfig) -> DevTestReviewerConfig:
+    """Cleanly inherits harness, model, and effort from parent node_cfg when unset."""
+    reviewer = getattr(node_cfg, "reviewer", None) or DevTestReviewerConfig()
+    return DevTestReviewerConfig(
+        enabled=reviewer.enabled,
+        harness=reviewer.harness or node_cfg.harness,
+        model=reviewer.model or node_cfg.model,
+        effort=reviewer.effort or node_cfg.effort,
+        max_rounds=reviewer.max_rounds,
+    )
+
+
 # Rebuild Pydantic models to ensure forward reference resolution across reload cycles
+DevTestReviewerConfig.model_rebuild()
 TechDebtConfig.model_rebuild()
 WindowLimitConfig.model_rebuild()
 HarnessQuotaConfig.model_rebuild()
@@ -388,4 +415,5 @@ QuotaSettings.model_rebuild()
 NodeConfig.model_rebuild()
 ProjectConfig.model_rebuild()
 GlobalConfig.model_rebuild()
+
 

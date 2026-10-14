@@ -169,6 +169,12 @@ projects:
         label_output: "dev-implemented"   # Completion label applied upon PR implementation
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
+        reviewer:
+          enabled: false                  # Dual-persona Developer ↔ Reviewer negotiation loop
+          harness: null                   # Reviewer harness (defaults to devtest.harness)
+          model: null                     # Reviewer model (defaults to devtest.model)
+          effort: null                    # Reviewer effort (defaults to devtest.effort)
+          max_rounds: 3                   # Negotiation round cap before contingency plan
       reviewer:
         enabled: false
       supervisor:
