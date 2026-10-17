@@ -1079,9 +1079,46 @@ def test_scenario_issue_189_force_disk_does_not_pollute_project_buffers(tmp_path
     assert "alpha" not in ProjectLogBufferManager.PROJECT_BUFFERS
 
 
+def test_read_harness_output(tmp_path: Path):
+    """
+    Scenario 4: Downstream Node State Machine Protection
+      Given a log file containing interleaved lifecycle messages and [THOUGHT] lines
+      When read_harness_output(log_file) is called
+      Then all [THOUGHT] lines are completely stripped
+      And clean harness output is returned.
+    """
+    from orchestrator.logging import read_harness_output
+
+    # 1. Nonexistent file returns empty string
+    assert read_harness_output(tmp_path / "nonexistent.log") == ""
+
+    # 2. Interleaved thoughts and lifecycle output
+    log_file = tmp_path / "harness.log"
+    content = (
+        "=== EXECUTION STARTED ===\n"
+        "[10:00:00] [myproj:devtest] [THOUGHT] Developer 🧠 Thinking about test cases\n"
+        "pytest -v tests/test_core.py\n"
+        "[10:00:30] [myproj:devtest] [THOUGHT] Developer 🧠 Tests passed, checking git status\n"
+        "25 passed in 1.2s\n"
+        '{"status": "success", "verdict": "APPROVED"}\n'
+    )
+    log_file.write_text(content, encoding="utf-8")
+
+    clean = read_harness_output(log_file)
+    assert "[THOUGHT]" not in clean
+    assert "Thinking about test cases" not in clean
+    assert "Tests passed, checking git status" not in clean
+    assert "=== EXECUTION STARTED ===" in clean
+    assert "pytest -v tests/test_core.py" in clean
+    assert '{"status": "success", "verdict": "APPROVED"}' in clean
 
 
+def test_ignore_tags_contains_thought():
+    """Asserts that 'THOUGHT' is part of IGNORE_TAGS and project/node extraction skips it."""
+    from orchestrator.logging import ProjectLogBufferManager
 
+    assert "THOUGHT" in ProjectLogBufferManager.IGNORE_TAGS
 
-
-
+    thought_line = "[12:34:56] [alpha_proj:devtest] [THOUGHT] Developer 🧠 Thinking..."
+    assert ProjectLogBufferManager.extract_project_name(thought_line) == "alpha_proj"
+    assert ProjectLogBufferManager.extract_node_name(thought_line) == "devtest"

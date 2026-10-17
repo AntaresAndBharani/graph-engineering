@@ -87,6 +87,35 @@ def format_node_agent_spec(
     return clean_model
 
 
+def format_thought_line(line: str) -> str:
+    """
+    Escapes and formats thought lines for RichLog display.
+    If the line contains [THOUGHT], the thought reasoning text (after 🧠 or [THOUGHT])
+    is escaped via rich.markup.escape and enclosed in [dim cyan italic]...[/dim cyan italic] tags.
+    Non-thought lines are escaped cleanly with rich.markup.escape(line).
+    """
+    import rich.markup
+
+    if not isinstance(line, str):
+        return str(line)
+
+    if "[THOUGHT]" in line:
+        if "🧠" in line:
+            prefix, sep, thought_text = line.partition("🧠")
+            escaped_prefix = rich.markup.escape(prefix)
+            escaped_thought = rich.markup.escape(thought_text)
+            return f"{escaped_prefix}[dim cyan italic]🧠{escaped_thought}[/dim cyan italic]"
+        elif " [THOUGHT] " in line:
+            prefix, sep, thought_text = line.partition(" [THOUGHT] ")
+            escaped_prefix = rich.markup.escape(prefix)
+            escaped_thought = rich.markup.escape(thought_text)
+            return f"{escaped_prefix} [dim cyan][THOUGHT][/dim cyan] [dim cyan italic]{escaped_thought}[/dim cyan italic]"
+        else:
+            escaped = rich.markup.escape(line)
+            return f"[dim cyan italic]{escaped}[/dim cyan italic]"
+    return rich.markup.escape(line)
+
+
 class ConfigStatusBanner(Static):
     """
     Read-only Static banner widget displaying the canonical configuration file path,

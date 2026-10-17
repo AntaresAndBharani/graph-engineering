@@ -25,6 +25,7 @@ from orchestrator.logging import (
     ProjectLogBufferManager,
     format_story_lock_dispatch_log,
     get_project_log_path,
+    read_harness_output,
 )
 from orchestrator import poller
 from orchestrator.nodes.reviewer import check_pr_ci_status
@@ -402,6 +403,37 @@ async def _release_slot_if_idle(project: ProjectConfig, state_manager: StateMana
         _logger.debug("[%s:devtest] Failed to check/release development slot: %s", project.name, e)
 
 
+async def _execute_adapter_safe(
+    adapter: AsyncHarnessAdapter,
+    prompt: str,
+    cwd: Path,
+    log_file: Path,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    console_prefix: Optional[str] = None,
+    node_label: Optional[str] = None,
+) -> int:
+    try:
+        return await adapter.execute(
+            prompt=prompt,
+            cwd=cwd,
+            log_file=log_file,
+            model=model,
+            effort=effort,
+            console_prefix=console_prefix,
+            node_label=node_label,
+        )
+    except TypeError:
+        return await adapter.execute(
+            prompt=prompt,
+            cwd=cwd,
+            log_file=log_file,
+            model=model,
+            effort=effort,
+            console_prefix=console_prefix,
+        )
+
+
 async def _remediate_refactor_pr(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -457,6 +489,7 @@ async def _remediate_refactor_pr(
 
     # 1. Fetch critique / comments from PR
     critique = ""
+    refactor_round = 1
     if shutil.which("gh"):
         try:
             proc_view = await asyncio.create_subprocess_exec(
@@ -475,7 +508,16 @@ async def _remediate_refactor_pr(
                 review_bodies = [r.get("body", "") for r in pr_data.get("reviews", []) if r.get("body")]
                 comment_bodies = [c.get("body", "") for c in pr_data.get("comments", []) if c.get("body")]
                 all_critiques = review_bodies + comment_bodies
+                rounds = []
+                for c in all_critiques:
+                    m = re.search(r"Round\s+(\d+)", c, re.IGNORECASE)
+                    if m:
+                        rounds.append(int(m.group(1)))
+                if rounds:
+                    refactor_round = max(rounds) + 1
                 architect_critiques = [c for c in all_critiques if "Architectural Review" in c or "needs-refactor" in c or "Refactoring Required" in c]
+                if not rounds and architect_critiques:
+                    refactor_round = len(architect_critiques)
                 if architect_critiques:
                     critique = "\n\n---\n\n".join(architect_critiques)
                 elif all_critiques:
@@ -532,13 +574,15 @@ async def _remediate_refactor_pr(
         issue_number=pr_number,
     )
     try:
-        exit_code = await adapter.execute(
+        exit_code = await _execute_adapter_safe(
+            adapter,
             prompt=prompt,
             cwd=exec_cwd,
             log_file=log_file,
             model=node_cfg.model,
             effort=node_cfg.effort,
             console_prefix=f"[{project.name}:devtest-refactor]",
+            node_label=f"devtest:Refactor (Round {refactor_round})",
         )
     finally:
         await state_manager.release_lock(pr_number, project.repo, "devtest_refactor")
@@ -1432,19 +1476,21 @@ async def _execute_reviewer_turn(
         node_name="devtest",
         issue_number=issue_id,
     )
-    exit_code = await adapter.execute(
+    exit_code = await _execute_adapter_safe(
+        adapter,
         prompt=prompt,
         cwd=exec_cwd,
         log_file=log_file,
         model=resolved_reviewer.model,
         effort=resolved_reviewer.effort,
         console_prefix=f"[{project.name}:devtest-reviewer]",
+        node_label="devtest:Reviewer",
     )
 
     review_text = ""
     if log_file.exists():
         try:
-            review_text = log_file.read_text(encoding="utf-8", errors="replace")
+            review_text = read_harness_output(log_file)
         except Exception:
             pass
 
@@ -1988,13 +2034,17 @@ async def run_devtest_node(
         node_name="devtest",
         issue_number=issue_id,
     )
-    exit_code = await adapter.execute(
+    dev_reviewer_cfg = resolve_reviewer_config(node_cfg, project=project)
+    dev_node_label = "devtest:Developer" if (dev_reviewer_cfg and dev_reviewer_cfg.enabled) else "devtest:SinglePass"
+    exit_code = await _execute_adapter_safe(
+        adapter,
         prompt=prompt,
         cwd=exec_cwd,
         log_file=log_file,
         model=node_cfg.model,
         effort=node_cfg.effort,
         console_prefix=f"[{project.name}:devtest]",
+        node_label=dev_node_label,
     )
 
     if exit_code != 0:

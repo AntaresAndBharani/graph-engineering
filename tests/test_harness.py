@@ -1198,6 +1198,151 @@ async def test_harness_windows_command_line_length_abort(tmp_path: Path, monkeyp
     assert "exceeds Windows CreateProcessW limit" in content
 
 
+def test_thought_extractor_claude_stream_json(tmp_path: Path):
+    """
+    Scenario 2: Claude Thought Extraction
+    Given an active node running under the claude harness with stream-json
+    When claude streams thinking blocks and result event
+    Then ThoughtExtractor flushes accumulated reasoning and returns only clean result text.
+    """
+    from orchestrator.harness import ThoughtExtractor
+    import json
+
+    log_file = tmp_path / "claude_thoughts.log"
+    extractor = ThoughtExtractor(
+        harness_name="claude",
+        project_name="my-proj",
+        node_name="devtest",
+        node_label="devtest:Developer",
+        log_file=log_file,
+    )
+
+    extractor.process_stream_line(json.dumps({"type": "thinking", "thinking": "Analyzing code structure and edge cases"}))
+    extractor.process_stream_line(json.dumps({"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "Checking test assertions"}}))
+    extractor.process_stream_line(json.dumps({"type": "result", "result": "All changes implemented and tests passing."}))
+
+    flushed = extractor.flush_thoughts()
+    assert len(flushed) == 2
+    assert any("[THOUGHT] Developer 🧠 Analyzing code structure and edge cases" in f for f in flushed)
+    assert any("[THOUGHT] Developer 🧠 Checking test assertions" in f for f in flushed)
+
+    # Check log_file contains thought lines
+    assert log_file.exists()
+    log_content = log_file.read_text(encoding="utf-8")
+    assert "[THOUGHT] Developer 🧠 Analyzing code structure" in log_content
+
+    # Clean final text
+    final = extractor.get_final_text("")
+    assert final == "All changes implemented and tests passing."
+
+
+def test_thought_extractor_agy_transcript_polling_and_deduplication(tmp_path: Path):
+    """
+    Scenario 1: Antigravity Thought Extraction & Deduplication
+    Given an active node under the antigravity harness
+    When agy appends thinking to transcript_full.jsonl
+    Then ThoughtExtractor extracts thinking incrementally with byte-offset safety and deduplicates.
+    """
+    from orchestrator.harness import ThoughtExtractor
+    import json
+
+    brain_dir = tmp_path / "brain"
+    conv_dir = brain_dir / "conv-123"
+    logs_dir = conv_dir / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    transcript_file = logs_dir / "transcript_full.jsonl"
+
+    log_file = tmp_path / "agy_thoughts.log"
+    extractor = ThoughtExtractor(
+        harness_name="antigravity",
+        project_name="my-proj",
+        node_name="devtest",
+        node_label="devtest:Reviewer",
+        log_file=log_file,
+        brain_base_dir=brain_dir,
+    )
+    extractor.conversation_id = "conv-123"
+
+    # Write initial step
+    step1 = json.dumps({"step_index": 1, "thinking": "Evaluating PR architecture compliance"}) + "\n"
+    transcript_file.write_text(step1, encoding="utf-8")
+
+    flushed1 = extractor.flush_thoughts()
+    assert len(flushed1) == 1
+    assert "[THOUGHT] Reviewer 🧠 Evaluating PR architecture compliance" in flushed1[0]
+
+    # Poll again without new data -> returns empty (no duplicates)
+    flushed_empty = extractor.flush_thoughts()
+    assert len(flushed_empty) == 0
+
+    # Append step 2 and a partial line (simulating incomplete write)
+    step2 = json.dumps({"step_index": 2, "thinking": "Verifying BDD scenario coverage"}) + "\n"
+    partial = '{"step_index": 3, "thin'
+    with open(transcript_file, "a", encoding="utf-8") as f:
+        f.write(step2 + partial)
+
+    flushed2 = extractor.flush_thoughts()
+    assert len(flushed2) == 1
+    assert "[THOUGHT] Reviewer 🧠 Verifying BDD scenario coverage" in flushed2[0]
+
+    # Complete step 3
+    with open(transcript_file, "a", encoding="utf-8") as f:
+        f.write('king": "Completing review verdict"}\n')
+
+    flushed3 = extractor.flush_thoughts()
+    assert len(flushed3) == 1
+    assert "[THOUGHT] Reviewer 🧠 Completing review verdict" in flushed3[0]
+
+
+def test_thought_extractor_truncates_long_lines_and_filters_empty(tmp_path: Path):
+    """Asserts long thought lines are capped at 2,000 chars and empty strings are ignored."""
+    from orchestrator.harness import ThoughtExtractor, MAX_THOUGHT_LINE_LENGTH
+    import json
+
+    extractor = ThoughtExtractor(
+        harness_name="claude",
+        project_name="p",
+        node_name="n",
+        log_file=tmp_path / "t.log",
+    )
+
+    long_thought = "A" * 3000
+    extractor.process_stream_line(json.dumps({"type": "thinking", "thinking": long_thought}))
+    extractor.process_stream_line(json.dumps({"type": "thinking", "thinking": ""}))
+    extractor.process_stream_line(json.dumps({"type": "thinking", "thinking": '""'}))
+    extractor.process_stream_line(json.dumps({"type": "thinking", "thinking": "   "}))
+
+    flushed = extractor.flush_thoughts()
+    assert len(flushed) == 1
+    # Check truncation to 2000 chars + suffix
+    assert "... (truncated)" in flushed[0]
+
+
+def test_downstream_read_harness_output_strips_thoughts(tmp_path: Path):
+    """
+    Scenario 4: Downstream Node State Machine Protection
+    Asserts read_harness_output strips all [THOUGHT] lines cleanly.
+    """
+    from orchestrator.logging import read_harness_output
+
+    log_file = tmp_path / "mixed.log"
+    log_file.write_text(
+        "[10:00:00] [p:devtest] === EXECUTION STARTED ===\n"
+        "[10:00:01] [p:devtest] [THOUGHT] devtest:Developer 🧠 inspecting git status\n"
+        "[10:00:02] [p:devtest] [THOUGHT] devtest:Developer 🧠 compiling changes\n"
+        "VERDICT: APPROVED\n"
+        '{"status": "success", "files": ["foo.py"]}\n',
+        encoding="utf-8"
+    )
+
+    clean = read_harness_output(log_file)
+    assert "[THOUGHT]" not in clean
+    assert "VERDICT: APPROVED" in clean
+    assert '{"status": "success", "files": ["foo.py"]}' in clean
+    assert "=== EXECUTION STARTED ===" in clean
+
+
+
 
 
 

@@ -113,7 +113,7 @@ class ProjectLogBufferManager:
         "BLACK",
         "DEFAULT",
     }
-    IGNORE_TAGS = LOG_LEVEL_NAMES | RICH_STYLE_TAGS
+    IGNORE_TAGS = LOG_LEVEL_NAMES | RICH_STYLE_TAGS | {"THOUGHT"}
 
     @classmethod
     def reset(cls) -> None:
@@ -452,6 +452,16 @@ def strip_ansi(text: str) -> str:
     if not text:
         return ""
     return ANSI_ESCAPE_RE.sub("", text)
+
+
+def read_harness_output(log_path: Path | str) -> str:
+    """Reads log_file and strips out [THOUGHT] lines, returning clean harness output."""
+    p = Path(log_path)
+    if not p.is_file():
+        return ""
+    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    clean_lines = [line for line in lines if " [THOUGHT] " not in line]
+    return "\n".join(clean_lines).strip()
 
 
 def get_project_log_path(
