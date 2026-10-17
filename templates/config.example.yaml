@@ -170,10 +170,10 @@ projects:
         branch_prefix: "feat/issue-"
         auto_merge_approved: true
         reviewer:
-          enabled: false                  # Dual-persona Developer ↔ Reviewer negotiation loop
-          harness: null                   # Reviewer harness (defaults to devtest.harness)
-          model: null                     # Reviewer model (defaults to devtest.model)
-          effort: null                    # Reviewer effort (defaults to devtest.effort)
+          enabled: true                   # Dual-persona Developer ↔ Reviewer negotiation loop
+          harness: "antigravity"          # Reviewer harness (Antigravity CLI: agy)
+          model: "claude-sonnet-5-5-low"  # Reviewer model (Claude Sonnet 5.5 Low)
+          effort: "low"                   # Reviewer effort (low)
           max_rounds: 3                   # Negotiation round cap before contingency plan
       reviewer:
         enabled: false
