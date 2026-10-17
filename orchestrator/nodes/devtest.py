@@ -403,6 +403,37 @@ async def _release_slot_if_idle(project: ProjectConfig, state_manager: StateMana
         _logger.debug("[%s:devtest] Failed to check/release development slot: %s", project.name, e)
 
 
+async def _execute_adapter_safe(
+    adapter: AsyncHarnessAdapter,
+    prompt: str,
+    cwd: Path,
+    log_file: Path,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    console_prefix: Optional[str] = None,
+    node_label: Optional[str] = None,
+) -> int:
+    try:
+        return await adapter.execute(
+            prompt=prompt,
+            cwd=cwd,
+            log_file=log_file,
+            model=model,
+            effort=effort,
+            console_prefix=console_prefix,
+            node_label=node_label,
+        )
+    except TypeError:
+        return await adapter.execute(
+            prompt=prompt,
+            cwd=cwd,
+            log_file=log_file,
+            model=model,
+            effort=effort,
+            console_prefix=console_prefix,
+        )
+
+
 async def _remediate_refactor_pr(
     project: ProjectConfig,
     config: GlobalConfig,
@@ -533,37 +564,6 @@ async def _remediate_refactor_pr(
         f"- DO NOT launch Android emulators, iOS simulators, or full Maestro/E2E UI test suites.\n"
         f"- DO NOT wait for remote GitHub Actions or poll CI (`gh run watch`). Once pushed, EXIT IMMEDIATELY; the orchestrator daemon will verify CI and auto-merge.\n"
     )
-
-async def _execute_adapter_safe(
-    adapter: AsyncHarnessAdapter,
-    prompt: str,
-    cwd: Path,
-    log_file: Path,
-    model: Optional[str] = None,
-    effort: Optional[str] = None,
-    console_prefix: Optional[str] = None,
-    node_label: Optional[str] = None,
-) -> int:
-    try:
-        return await adapter.execute(
-            prompt=prompt,
-            cwd=cwd,
-            log_file=log_file,
-            model=model,
-            effort=effort,
-            console_prefix=console_prefix,
-            node_label=node_label,
-        )
-    except TypeError:
-        return await adapter.execute(
-            prompt=prompt,
-            cwd=cwd,
-            log_file=log_file,
-            model=model,
-            effort=effort,
-            console_prefix=console_prefix,
-        )
-
 
     adapter = AsyncHarnessAdapter(
         harness_name,
