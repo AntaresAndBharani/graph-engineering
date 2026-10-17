@@ -46,6 +46,7 @@ from orchestrator.ui.widgets import (
     extract_github_org,
     filter_projects,
     format_node_agent_spec,
+    format_thought_line,
 )
 
 
@@ -181,6 +182,7 @@ class DashboardApp(App):
         self._last_tail_offset: int = 0
         self._placeholder_active: bool = False
         self._stream_activity: dict[tuple[str, Optional[str]], float] = {}
+        self._active_running_nodes: set[tuple[str, Optional[str]]] = set()
         self._completion_marker_rendered: bool = False
         self.is_draining: bool = False
         self._drain_task: Optional[asyncio.Task] = None
@@ -190,6 +192,16 @@ class DashboardApp(App):
         self._watchdog_timer: Optional[Any] = None
         self.title = "Graph Orchestrator - TUI Dashboard"
         self._update_sub_title()
+
+    def is_node_active(self, project_name: Optional[str], node_name: Optional[str]) -> bool:
+        """Returns True if the project and node are currently in an active running state."""
+        if not project_name or not node_name or node_name in ("Idle", "—"):
+            return False
+        active_nodes = getattr(self, "_active_running_nodes", set())
+        if active_nodes:
+            return (project_name, node_name) in active_nodes
+        # Fallback when _active_running_nodes has not been populated (e.g. before initial poll or in mock tests)
+        return True
 
     @property
     def issue_id(self) -> Optional[int]:
@@ -423,7 +435,7 @@ class DashboardApp(App):
             log_view.clear()
             for line in lines:
                 if isinstance(line, str):
-                    log_view.write(rich.markup.escape(line))
+                    log_view.write(format_thought_line(line))
                 else:
                     log_view.write(line)
             if should_preserve and not self._completion_marker_rendered:
@@ -449,7 +461,7 @@ class DashboardApp(App):
                 else:
                     log_view.clear()
 
-            escaped = rich.markup.escape(formatted)
+            escaped = format_thought_line(formatted)
             scroll_end = bool(self.auto_scroll and (placeholder_was_active or log_view.is_vertical_scroll_end))
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
                 self.call_from_thread(log_view.write, escaped, scroll_end=scroll_end)
@@ -498,7 +510,7 @@ class DashboardApp(App):
                 else:
                     log_view.clear()
 
-            escaped = rich.markup.escape(line)
+            escaped = format_thought_line(line)
             scroll_end = bool(self.auto_scroll and (placeholder_was_active or log_view.is_vertical_scroll_end))
             if getattr(self, "_thread_id", None) is not None and threading.get_ident() != self._thread_id:
                 self.call_from_thread(log_view.write, escaped, scroll_end=scroll_end)
@@ -616,6 +628,16 @@ class DashboardApp(App):
                 active_jobs = await self.state_manager.get_active_jobs()
             except Exception:
                 pass
+
+        running_nodes = set()
+        for j in active_jobs:
+            if j.get("status") == "RUNNING":
+                repo = j.get("repo")
+                proj = next((p for p in self.config.projects if p.repo == repo), None)
+                if proj:
+                    running_nodes.add((proj.name, j.get("node_type")))
+                    running_nodes.add((proj.name, None))
+        self._active_running_nodes = running_nodes
 
         visible_projects = filter_projects(self.config.projects, self.filter_text, self.selected_org)
         sorted_projects = sorted(visible_projects, key=lambda p: p.name.lower())
@@ -819,6 +841,12 @@ class DashboardApp(App):
                         and active_node is None
                     )
 
+                    if is_running_to_idle:
+                        try:
+                            await self._poll_active_log_file(force=True)
+                        except Exception:
+                            pass
+
                     self._active_node_identity = current_identity
                     self.selected_node = active_node
                     self.selected_issue_id = active_issue_id
@@ -907,6 +935,12 @@ class DashboardApp(App):
         if not self.selected_project:
             return
 
+        if not self.selected_node:
+            return
+
+        if not force and not self.is_node_active(self.selected_project, self.selected_node):
+            return
+
         if not force:
             last_stream = max(
                 self._stream_activity.get((self.selected_project, getattr(self, "selected_node", None)), 0.0),
@@ -956,7 +990,7 @@ class DashboardApp(App):
                         log_view.clear()
                         self._placeholder_active = False
                     for line in disk_res.lines:
-                        log_view.write(rich.markup.escape(line))
+                        log_view.write(format_thought_line(line))
                     self._last_tail_offset = disk_res.file_size
             return
 
@@ -1015,7 +1049,7 @@ class DashboardApp(App):
             for line in new_content.splitlines():
                 clean_line = strip_ansi(line).rstrip("\r\n")
                 log_view.write(
-                    rich.markup.escape(clean_line),
+                    format_thought_line(clean_line),
                     scroll_end=bool(self.auto_scroll and log_view.is_vertical_scroll_end),
                 )
 

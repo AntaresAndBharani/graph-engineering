@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import get_project_log_path
+from orchestrator.logging import get_project_log_path, read_harness_output
 from orchestrator.poller import check_dispatch_quota, fetch_issues_with_label
 
 
@@ -154,7 +154,7 @@ async def run_bau_node(
 
     # 5. Parse Output
     try:
-        content = log_file.read_text(encoding="utf-8", errors="replace")
+        content = read_harness_output(log_file)
         # Extract JSON from output
         json_match = re.search(r"(\{[\s\S]*\})", content)
         if not json_match:

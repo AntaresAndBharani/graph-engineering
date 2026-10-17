@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import get_project_log_path
+from orchestrator.logging import get_project_log_path, read_harness_output
 from orchestrator import poller
 
 
@@ -226,8 +226,7 @@ async def evaluate_supervisor_issue(
             console_prefix=f"[{project.name}:po-proxy]",
         )
         if exit_code == 0 and log_file.exists():
-            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-                output_content = f.read()
+            output_content = read_harness_output(log_file)
             verdict, gaps, gherkin_ac = parse_po_evaluation_response(output_content, default_title=title)
         else:
             # Fallback heuristic if harness not executable

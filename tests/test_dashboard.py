@@ -28,6 +28,7 @@ from orchestrator.ui.widgets import (
     HarnessQuotaWidget,
     SDLCProgressWidget,
     format_node_agent_spec,
+    format_thought_line,
 )
 
 
@@ -5232,6 +5233,107 @@ async def test_scenario_6_state_persistence_across_polling_and_config_hot_reload
         assert table.row_count == 5
         assert app.selected_project == sel_proj
         assert table.cursor_row == sel_row
+
+
+def test_format_thought_line_escaping_and_styling():
+    """
+    Scenario 3 / Requirement 4: Rich Markup Escaping in Widgets
+    Asserts that format_thought_line escapes thought text with brackets to prevent
+    Textual markup errors, and applies [dim cyan italic] tags.
+    """
+    line1 = "[12:34:56] [my-project:devtest] [THOUGHT] Developer 🧠 inspecting Foo[Bar] with <special> & [tags]"
+    formatted1 = format_thought_line(line1)
+    assert "[dim cyan italic]🧠" in formatted1
+    assert "[/dim cyan italic]" in formatted1
+    assert r"\[tags]" in formatted1
+
+    # Non-thought line
+    line2 = "Standard output line without thoughts"
+    formatted2 = format_thought_line(line2)
+    assert "[dim cyan italic]" not in formatted2
+    assert formatted2 == "Standard output line without thoughts"
+
+
+@pytest.mark.asyncio
+async def test_scoped_log_streaming_zero_idle_io(tmp_path: Path, monkeypatch):
+    """
+    Scenario 3: Scoped TUI Log Refresh & Zero Idle I/O
+    Asserts that when a project/node is idle, _poll_active_log_file returns immediately
+    performing zero disk reads and zero stat() calls.
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    # Selected project and node are not active (active jobs exist on other projects)
+    app.selected_project = "biq-home"
+    app.selected_node = "devtest"
+    app._active_running_nodes = {("other-project", "devtest")}
+
+    read_calls = 0
+    stat_calls = 0
+
+    original_open = open
+    def mock_open(*args, **kwargs):
+        nonlocal read_calls
+        read_calls += 1
+        return original_open(*args, **kwargs)
+
+    original_stat = Path.stat
+    def mock_stat(self, *args, **kwargs):
+        nonlocal stat_calls
+        stat_calls += 1
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", mock_open)
+    monkeypatch.setattr(Path, "stat", mock_stat)
+
+    # Call _poll_active_log_file without force for an idle project
+    await app._poll_active_log_file(force=False)
+
+    assert read_calls == 0
+    assert stat_calls == 0
+
+    # Also assert when selected_node is "Idle"
+    app.selected_node = "Idle"
+    await app._poll_active_log_file(force=False)
+    assert read_calls == 0
+    assert stat_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_active_to_idle_transition_trailing_flush(tmp_path: Path):
+    """
+    Scenario 3: Trailing flush on Active-to-Idle transition
+    Asserts that when a node transitions from active to idle, _poll_active_log_file(force=True)
+    is invoked to flush trailing thoughts before selected_node is reset.
+    """
+    config = make_11_project_config(tmp_path)
+    state_manager = StateManager(tmp_path / "state.db")
+    await state_manager.init_db()
+
+    app = DashboardApp(config=config, state_manager=state_manager)
+    app.selected_project = "biq-home"
+    app.selected_node = "devtest"
+    app._active_node_identity = ("biq-home", "devtest")
+
+    poll_calls: list[bool] = []
+    async def mock_poll(force: bool = False):
+        poll_calls.append(force)
+
+    app._poll_active_log_file = mock_poll
+
+    # Simulate transition to idle (no running jobs)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Trigger update_projects_table with no active jobs for biq-home
+        await app.update_projects_table()
+        await pilot.pause()
+
+        # The trailing flush must have been called with force=True
+        assert True in poll_calls
+
 
 
 

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from orchestrator.config import GlobalConfig, NodeConfig, ProjectConfig
 from orchestrator.db import StateManager
 from orchestrator.harness import AsyncHarnessAdapter
-from orchestrator.logging import get_project_log_path
+from orchestrator.logging import get_project_log_path, read_harness_output
 from orchestrator.poller import check_dispatch_quota
 from orchestrator.nodes.devtest import verify_git_safety
 from orchestrator.worktree import (
@@ -379,7 +379,7 @@ async def run_tech_debt_node(
             return False, f"Tech debt audit harness execution failed with code {exit_code}."
 
         # 7. Parse Recommendation & Dispatch Audited GitHub Issue
-        content = log_file.read_text(encoding="utf-8", errors="replace") if log_file.exists() else ""
+        content = read_harness_output(log_file)
         rec = parse_tech_debt_recommendation(content)
 
         if not rec:
