@@ -394,15 +394,23 @@ def load_config(custom_path: Optional[Path | str] = None) -> GlobalConfig:
     return GlobalConfig(**raw_data)
 
 
-def resolve_reviewer_config(node_cfg: NodeConfig) -> DevTestReviewerConfig:
-    """Cleanly inherits harness, model, and effort from parent node_cfg when unset."""
+def resolve_reviewer_config(node_cfg: NodeConfig, project: Optional[ProjectConfig] = None) -> DevTestReviewerConfig:
+    """Cleanly inherits harness, model, and effort from parent node_cfg or peer reviewer node when unset."""
     reviewer = getattr(node_cfg, "reviewer", None) or DevTestReviewerConfig()
+    peer_reviewer = project.nodes.get("reviewer") if project and hasattr(project, "nodes") else None
+
+    enabled = reviewer.enabled or (peer_reviewer.enabled if peer_reviewer else False)
+    harness = reviewer.harness or (peer_reviewer.harness if peer_reviewer and peer_reviewer.harness else None) or node_cfg.harness
+    model = reviewer.model or (peer_reviewer.model if peer_reviewer and peer_reviewer.model else None) or node_cfg.model
+    effort = reviewer.effort or (peer_reviewer.effort if peer_reviewer and peer_reviewer.effort else None) or node_cfg.effort
+    max_rounds = reviewer.max_rounds if reviewer.max_rounds else 3
+
     return DevTestReviewerConfig(
-        enabled=reviewer.enabled,
-        harness=reviewer.harness or node_cfg.harness,
-        model=reviewer.model or node_cfg.model,
-        effort=reviewer.effort or node_cfg.effort,
-        max_rounds=reviewer.max_rounds,
+        enabled=enabled,
+        harness=harness,
+        model=model,
+        effort=effort,
+        max_rounds=max_rounds,
     )
 
 

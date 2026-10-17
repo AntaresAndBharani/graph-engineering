@@ -1329,7 +1329,7 @@ async def _execute_reviewer_turn(
     trigger = node_cfg.label_trigger or "ready-for-dev"
     output_label = node_cfg.label_output or "dev-implemented"
 
-    resolved_reviewer = resolve_reviewer_config(node_cfg)
+    resolved_reviewer = resolve_reviewer_config(node_cfg, project=project)
     harness_name = resolved_reviewer.harness or node_cfg.harness or "claude"
 
     # 1. Quota check against resolved reviewer harness
@@ -1561,7 +1561,7 @@ async def run_devtest_node(
             target_issue_id = issue_id or pr_number
 
             # Phase 2 Non-Terminal Auto-Merge Guard
-            reviewer_cfg = getattr(node_cfg, "reviewer", None)
+            reviewer_cfg = resolve_reviewer_config(node_cfg, project=project)
             if reviewer_cfg and reviewer_cfg.enabled:
                 pr_comments = await fetch_pr_comments(project.repo, pr_number)
                 next_action = determine_next_action(pr_comments, max_rounds=reviewer_cfg.max_rounds)
@@ -1723,7 +1723,7 @@ async def run_devtest_node(
     resumed_developer_action: Optional[DevTestAction] = None
 
     if existing_pr:
-        reviewer_cfg = getattr(node_cfg, "reviewer", None)
+        reviewer_cfg = resolve_reviewer_config(node_cfg, project=project)
         if reviewer_cfg and reviewer_cfg.enabled:
             pr_comments = await fetch_pr_comments(project.repo, int(existing_pr))
             next_action = determine_next_action(pr_comments, max_rounds=reviewer_cfg.max_rounds)
@@ -2123,7 +2123,7 @@ async def run_devtest_node(
                 )).wait()
                 await (await asyncio.create_subprocess_exec("git", "push", "origin", branch_name, cwd=str(exec_cwd))).wait()
 
-        reviewer_cfg = getattr(node_cfg, "reviewer", None)
+        reviewer_cfg = resolve_reviewer_config(node_cfg, project=project)
         if reviewer_cfg and reviewer_cfg.enabled:
             if is_resumed_developer_turn and resumed_developer_action:
                 round_num = resumed_developer_action.round
@@ -2262,7 +2262,7 @@ async def run_devtest_node(
         return False, f"Git / PR creation failed: {e}"
 
     if created_pr_num:
-        reviewer_cfg = getattr(node_cfg, "reviewer", None)
+        reviewer_cfg = resolve_reviewer_config(node_cfg, project=project)
         if reviewer_cfg and reviewer_cfg.enabled:
             await post_pr_turn_comment(
                 project.repo, created_pr_num, "DEVELOPER", 1, "READY_FOR_REVIEW", "Initial implementation ready for review."

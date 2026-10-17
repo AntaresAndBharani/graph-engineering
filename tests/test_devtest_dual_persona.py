@@ -679,3 +679,56 @@ async def test_execute_reviewer_turn_lock_acquisition(test_setup, monkeypatch):
         assert kwargs["issue_id"] == 41
         assert kwargs["node_type"] == "devtest"
 
+
+def test_resolve_reviewer_config_peer_node_inheritance():
+    """
+    Verifies that resolve_reviewer_config inherits from project.nodes['reviewer']
+    when devtest.reviewer is not explicitly enabled.
+    """
+    devtest_node = NodeConfig(harness="claude", model="sonnet", reviewer=DevTestReviewerConfig(enabled=False))
+    peer_reviewer_node = NodeConfig(
+        enabled=True,
+        harness="antigravity",
+        model="claude-sonnet-5-5-low",
+        effort="low",
+    )
+    project = ProjectConfig(
+        name="test-project",
+        repo="org/repo",
+        local_path=Path("/tmp/test"),
+        nodes={
+            "devtest": devtest_node,
+            "reviewer": peer_reviewer_node,
+        },
+    )
+
+    resolved = resolve_reviewer_config(devtest_node, project=project)
+    assert resolved.enabled is True
+    assert resolved.harness == "antigravity"
+    assert resolved.model == "claude-sonnet-5-5-low"
+    assert resolved.effort == "low"
+    assert resolved.max_rounds == 3
+
+
+def test_reviewer_config_antigravity_claude_sonnet_explicit():
+    """
+    Verifies that explicit antigravity / claude-sonnet-5-5-low configuration is preserved.
+    """
+    node = NodeConfig(
+        harness="claude",
+        reviewer=DevTestReviewerConfig(
+            enabled=True,
+            harness="antigravity",
+            model="claude-sonnet-5-5-low",
+            effort="low",
+            max_rounds=3,
+        ),
+    )
+    resolved = resolve_reviewer_config(node)
+    assert resolved.enabled is True
+    assert resolved.harness == "antigravity"
+    assert resolved.model == "claude-sonnet-5-5-low"
+    assert resolved.effort == "low"
+    assert resolved.max_rounds == 3
+
+
